@@ -1,0 +1,33 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"yaml.schemas": {
+			"https://json.schemastore.org/github-workflow.json": ".github/workflows/*",
+			"https://raw.githubusercontent.com/canonical/cloud-init/main/cloudinit/config/schemas/versions.schema.cloud-config.json": "**/cloudinit/*.{yml,yaml}"
+		},
+		"ansible.python.interpreterPath": "/opt/homebrew/bin/python3",
+		"files.associations": {
+			"live/ansible/**/*.yaml": "ansible",
+			"live/ansible/**/*.yml": "ansible",
+			"*.hcl": "opentofu",
+			"*.tf": "opentofu",
+			"*.tfvars": "opentofu",
+			"*.tofu": "opentofu"
+		},
+		"opentofu.validation.enableEnhancedValidation": false,
+		"[hcl][terraform][terraform-vars][opentofu][opentofu-vars]": {
+			"editor.defaultFormatter": "opentofu.vscode-opentofu",
+			"editor.formatOnSave": true,
+			"editor.formatOnSaveMode": "file"
+		},
+	},
+	"extensions": {
+		"recommendations": [
+			"redhat.ansible"
+		]
+	}
+}

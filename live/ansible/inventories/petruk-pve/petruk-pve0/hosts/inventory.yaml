@@ -1,0 +1,9 @@
+---
+pve:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  hosts:
+    petruk_pve0:
+      ansible_host: 192.168.3.101
+      ansible_user: root
+      ansible_port: 22

@@ -1,0 +1,14 @@
+---
+- name: Install Cloudflared
+  hosts: all
+  become: true
+  vars_files:
+    - vars/vault.yaml
+  vars:
+    cloudflare_tunnel_credential: "{{ vault_cloudflare_tunnel_credential }}"
+    cloudflare_tunnel_enable: true
+
+  roles:
+    - name: Install Cloudflared
+      role: sebdanielsson.cloudflared
+      state: present

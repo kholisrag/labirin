@@ -1,0 +1,7 @@
+cloudflared_all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  hosts:
+    cloudflared_vm:
+      ansible_host: 192.168.3.10
+      ansible_user: ansible

@@ -1,0 +1,50 @@
+---
+- name: Manage Proxmox Resource Pools
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  tasks:
+    - name: Ensure resource pools exist
+      community.proxmox.proxmox_pool:
+        api_host: "{{ pve_host }}"
+        api_user: "{{ iac_user }}"
+        api_password: "{{ iac_user_password }}"
+        poolid: "{{ item.name }}"
+        comment: "{{ item.comment | default(omit) }}"
+        state: present
+      loop: "{{ resources_pools }}"
+      when:
+        - resources_pools is defined
+        - pool_state | default('present') == 'present'
+      tags:
+        - create
+        - pools
+
+    - name: Remove resource pools
+      community.proxmox.proxmox_pool:
+        api_host: "{{ pve_host }}"
+        api_user: "{{ iac_user }}"
+        api_password: "{{ iac_user_password }}"
+        poolid: "{{ item.name }}"
+        state: absent
+      loop: "{{ resources_pools }}"
+      when:
+        - resources_pools is defined
+        - pool_state | default('present') == 'absent'
+      tags:
+        - delete
+        - pools
+
+    - name: Display created pools
+      ansible.builtin.debug:
+        msg: "Resource pool '{{ item.name }}' has been configured with comment: {{ item.comment | default('No comment') }}"
+      loop: "{{ resources_pools }}"
+      when:
+        - resources_pools is defined
+        - pool_state | default('present') == 'present'
+      tags:
+        - create
+        - pools

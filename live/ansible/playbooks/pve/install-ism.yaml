@@ -1,0 +1,181 @@
+# ref: https://forum.proxmox.com/threads/dell-server-tools-install-script-for-pve8-x.145970/post-801067
+---
+- name: Install Dell iDRAC Service Module for Proxmox 9 (Debian 13 / trixie)
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Display installation information
+      ansible.builtin.debug:
+        msg: "Dell iDRAC Service Module install for Proxmox 9 (Debian 13 / trixie)"
+
+    - name: Ensure /usr/share/keyrings directory exists
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download and install Dell OpenManage GPG key
+      ansible.builtin.shell:
+        cmd: |
+          curl -fsSL https://linux.dell.com/repo/pgp_pubkeys/0x1285491434D8786F.asc \
+            | gpg --dearmor | tee /usr/share/keyrings/dell-openmanage.gpg >/dev/null
+        creates: /usr/share/keyrings/dell-openmanage.gpg
+
+    - name: Create Dell iSM Deb822 source file
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/dell-ism.sources
+        content: |
+          Types: deb
+          URIs: http://linux.dell.com/repo/community/openmanage/iSM/5400/bullseye
+          Suites: bullseye
+          Components: main
+          Signed-By: /usr/share/keyrings/dell-openmanage.gpg
+          Architectures: amd64
+          Enabled: yes
+        mode: "0644"
+
+    - name: Create Dell iSM apt pinning preferences
+      ansible.builtin.copy:
+        dest: /etc/apt/preferences.d/dell-ism
+        content: |
+          Package: dcism dcism-osc
+          Pin: origin "linux.dell.com"
+          Pin-Priority: 700
+
+          Package: *
+          Pin: origin "linux.dell.com"
+          Pin-Priority: -1
+        mode: "0644"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+
+    - name: Install Dell iSM packages (OS Collector first, then iSM)
+      ansible.builtin.apt:
+        name:
+          - dcism-osc
+          - dcism
+        state: present
+
+    - name: Check if libssl1.1 is installed
+      ansible.builtin.shell:
+        cmd: dpkg -l | grep libssl1.1
+      register: libssl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Download libssl1.1 if not installed
+      ansible.builtin.get_url:
+        url: http://ftp.us.debian.org/debian/pool/main/o/openssl/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        dest: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        mode: "0644"
+      when: libssl_check.rc != 0
+
+    - name: Install libssl1.1 from downloaded deb package
+      ansible.builtin.apt:
+        deb: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        state: present
+      when: libssl_check.rc != 0
+
+    - name: Remove temporary libssl1.1 deb file
+      ansible.builtin.file:
+        path: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        state: absent
+      when: libssl_check.rc != 0
+
+    - name: Check if dcismeng service exists and get current status
+      ansible.builtin.systemd:
+        name: dcismeng
+      register: dcismeng_status_before
+      failed_when: false
+
+    - name: Display dcismeng service status before changes
+      ansible.builtin.debug:
+        msg:
+          - "Service exists: {{ dcismeng_status_before.status is defined }}"
+          - "Enabled: {{ dcismeng_status_before.status.UnitFileState | default('unknown') }}"
+          - "Active: {{ dcismeng_status_before.status.ActiveState | default('unknown') }}"
+          - "Running: {{ dcismeng_status_before.status.SubState | default('unknown') }}"
+      when: dcismeng_status_before.status is defined
+
+    - name: Enable and start dcismeng service
+      ansible.builtin.systemd:
+        name: dcismeng
+        enabled: true
+        state: started
+
+    - name: Wait for service to stabilize
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: Check dcismeng service status after changes
+      ansible.builtin.systemd:
+        name: dcismeng
+      register: dcismeng_status_after
+
+    - name: Display dcismeng service status after changes
+      ansible.builtin.debug:
+        msg:
+          - "Service enabled: {{ dcismeng_status_after.status.UnitFileState }}"
+          - "Service active: {{ dcismeng_status_after.status.ActiveState }}"
+          - "Service running: {{ dcismeng_status_after.status.SubState }}"
+
+    - name: Get detailed service logs if service is not running
+      ansible.builtin.shell:
+        cmd: journalctl -u dcismeng -n 50 --no-pager
+      register: service_logs
+      changed_when: false
+      when: dcismeng_status_after.status.SubState != 'running'
+
+    - name: Display service logs if not running
+      ansible.builtin.debug:
+        msg: "{{ service_logs.stdout_lines }}"
+      when:
+        - dcismeng_status_after.status.SubState != 'running'
+        - service_logs.stdout_lines is defined
+
+    - name: Check if service failed and display reason
+      ansible.builtin.shell:
+        cmd: systemctl status dcismeng --no-pager -l
+      register: service_status_detail
+      changed_when: false
+      failed_when: false
+      when: dcismeng_status_after.status.ActiveState == 'failed'
+
+    - name: Display detailed failure information
+      ansible.builtin.debug:
+        msg: "{{ service_status_detail.stdout_lines }}"
+      when:
+        - dcismeng_status_after.status.ActiveState == 'failed'
+        - service_status_detail.stdout_lines is defined
+
+    - name: Warn if service is not running
+      ansible.builtin.debug:
+        msg:
+          - "WARNING: dcismeng service is {{ dcismeng_status_after.status.SubState }}"
+          - "This may be normal if this is a VM or non-Dell hardware"
+          - "Check logs with: journalctl -u dcismeng -b"
+      when: dcismeng_status_after.status.SubState != 'running'
+
+    - name: Check installed iSM packages
+      ansible.builtin.shell:
+        cmd: dpkg -l | grep -E 'dcism|dcism-osc'
+      register: ism_packages
+      changed_when: false
+      failed_when: false
+
+    - name: Display installed iSM packages
+      ansible.builtin.debug:
+        msg: "{{ ism_packages.stdout_lines }}"
+      when: ism_packages.stdout_lines | length > 0
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - "Installation complete!"
+          - "In iDRAC9, check Overview -> OS info / iSM status."
+          - "Logs: journalctl -u dcismeng -b"

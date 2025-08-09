@@ -1,0 +1,28 @@
+pve_endpoint: ENC[AES256_GCM,data:P4Lpte2d2ZXXLeb3K2lcE5Rr8cuBU6iDSx1u,iv:0zPzyu2V7p3TAXQ649b8momW+hCr7ROe/ZeNLTXyf34=,tag:9slxIkE53x5hRpWgoAtMAw==,type:str]
+pve_api_token: ENC[AES256_GCM,data:FiXyryb9R2lt42WPinoP+JgqzNPJR+pWhEDw1OU3ZKq6ATE0qVRtUC5tElsGfFh4UWaRkZ/8uaO20Q==,iv:8QnVypS2I61fX1/eLBwDY/yyQCHtvGOlKBQlWuhTEQg=,tag:bmD1SmA1UobpssAdBVvzdg==,type:str]
+pve_ssh_public_key: ENC[AES256_GCM,data:ztBVwpEO3uA8u3Qfxj665mOfvdip6FHXVlcdOPlIjG3J9XJPImCYvoK1EZOLaf2NGnw20r+tWH39DXnkg42Kt09lpObmuDw5XseYE1k91VKxd3Tc7LalyHYyvHk6glebGxnzIBLdmXVXd5uvonb7Evzwjhz+alk=,iv:n6TYvSkW+Ppj/uwwLX8OiEpZgAzXW7HnNrwmPh0n79Q=,tag:ahPNiPr9kfaMUWVBtLxiXw==,type:str]
+pve_ssh_private_key: ENC[AES256_GCM,data:xFmJEjzv3bZwQDjtyHNit9LQeAE961JTslP6QMVx2s5OHWXHStKxoDFeSAGi8DgI75R7ZlMALJXP52an5x+48k7OVqcq7vJx6hkXqn6MDW3Kfnyr2+SQ1B50h0X3dPEYtUcttxV37IMTNBslfyDG575zS1+/EKcRrthbjzW6DzmLiWXaHCF5sOrTjrFFOxgIL1HiX9TcuqsqasQKj7CcOftcmNfG1pGN6r4Rd20Ab2JZQGqxrm/xHYIvxISJf5+oxl/8uS9hI2Or7eNuP/b4rrZhLsNDcF9n0kvTGQ2lBCovNxnmRa0El5LfGAQ6fQk1D4U3HX8CRkNv9RgD/u+u/U2gznC/E5uoc5RafMPC539kyLlwZIy9EYC0med9KjG2WMMtLjDcpBIAnFEHKbhoggMYNgQACleB+NNLsBYZup62YaX2nuo+mIqeuz/8TXgGMp8/jTnYnuipGDsfbWup4HLiXd3aFqisA8qbalt4Vz1Dpd2fb1YgylKpHVzTJ41rCVFQ4KD3BKZTZjCGi1ePw5TKArW9CbaVV8L7azl/bcwReVKPoG2m7z+iKi5qtz9w,iv:fUwHkHlVxan57huLFaVqeOszwOCSpp5VO5eSMfgCne8=,tag:lL4ixQ7DjUO1vEpaxyDMMg==,type:str]
+sops:
+    age:
+        - recipient: age17nqlfm7qj72hgjfs82vqwcfatqymqngpwvp7v999crs2t5a6tu5sd0vcp9
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBQV2ZsbW03aVk2RGdkTFRR
+            ZkFvdGpVVUk2UGYvSEFENWRHSlRHYk1EM2dJCnMzc2d0dXdHZUcyVDVMb1dBWGRh
+            YTdSc2pSUWJlVlMrRGNyUVA5Y004b2MKLS0tIGxqakRCWjUrUVFLL292eHN4ckl4
+            eTlaeER3RjJLT05pSXFBaFJmaTZaVHcKT6utD1udQppXxmMnOcIgrT0awrvxuknG
+            L0R4YQhEm2YKn6uRWd0nCKgHhQdAmf+n2Tk6ThMxyzNcpqzLhvKWpg==
+            -----END AGE ENCRYPTED FILE-----
+        - recipient: age1lgmay2ca3aydsltkxjhz2qc6ep4rqdpjneye3lxra0h3a5k37aeqjj2ue4
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB1WmVyTXpXTWwvYXhHZmxN
+            SXViQTkxdFl0Z2hWWlpDOVZTNzZudFhNT2kwCjFGTDNGbXgyY1hYWVc3OXhickxQ
+            eEg1ZUlYczRWQldCWUpiOTdubHp6QUEKLS0tIHJGOG5ESkgzTGxKcDdTQnd0a0Fi
+            UEEwcTZNem5LM1FYQm5CVkxZMVpUNmMK3s1omb4aMd/I5G7s0XmeWvMypus3rSYm
+            onzCXpPLCyXL4FtqTV+wqGw5GwNg0r9Eu1CZN14kM3LLRMR5t1l3nA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2025-11-05T16:18:21Z"
+    mac: ENC[AES256_GCM,data:6rDjMQd1olKrLL9zuj8wrvxwYPbbpX0Bb1IXg63h4Wexp/FpJ4BVbP8FH0BPvHuH+Vq3Iu0NCg5FLOlK87H7LiNhi7h8NAdGON3qh2cQqWDikeKzXOKzZ7Usin6QHFSkXImaKdxIMUZIZ/UsRobtVWBMBTVaI4fKIUotpFXSobk=,iv:GAZFjsj/EdEgKC2DPhqCsckJEmjaSpD5bU18hkfvQ48=,tag:Hcp/1A0ufpNnkhrXIgTS+Q==,type:str]
+    unencrypted_suffix: _unencrypted
+    version: 3.11.0

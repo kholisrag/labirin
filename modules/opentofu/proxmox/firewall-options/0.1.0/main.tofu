@@ -1,0 +1,15 @@
+resource "proxmox_virtual_environment_firewall_options" "firewall_options" {
+  node_name     = lookup(var.firewall_options, "node_name", null)
+  vm_id         = lookup(var.firewall_options, "vm_id", null)
+  container_id  = lookup(var.firewall_options, "container_id", null)
+  dhcp          = lookup(var.firewall_options, "dhcp", true)
+  enabled       = lookup(var.firewall_options, "enabled", false)
+  ipfilter      = lookup(var.firewall_options, "ipfilter", false)
+  log_level_in  = lookup(var.firewall_options, "log_level_in", null)
+  log_level_out = lookup(var.firewall_options, "log_level_out", null)
+  macfilter     = lookup(var.firewall_options, "macfilter", false)
+  ndp           = lookup(var.firewall_options, "ndp", false)
+  input_policy  = lookup(var.firewall_options, "input_policy", "DROP")
+  output_policy = lookup(var.firewall_options, "output_policy", "ACCEPT")
+  radv          = lookup(var.firewall_options, "radv", false)
+}

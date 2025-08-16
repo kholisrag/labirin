@@ -1,5 +1,5 @@
 1panel_all:
   hosts:
     1panel:
-      ansible_host: 10.1.176.29
+      ansible_host: 10.10.48.114
       ansible_user: ubuntu

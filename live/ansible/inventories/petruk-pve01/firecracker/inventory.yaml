@@ -1,0 +1,5 @@
+firecracker_all:
+  hosts:
+    firecracker:
+      ansible_host: 10.10.72.13
+      ansible_user: ubuntu

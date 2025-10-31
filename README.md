@@ -1,6 +1,6 @@
 # **Labirin**
 
-A Monorepo for Centralized Sources of Truth for My Personal Projects.
+A Monorepo for Centralized Sources of Truth for My Personal Projects, that can be published.
 
 ## Known Use Cases
 

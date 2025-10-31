@@ -3,6 +3,3 @@ cloudflared_all:
     cloudflared_vm:
       ansible_host: 192.168.3.151
       ansible_user: ubuntu
-    cloudflared_lxc:
-      ansible_host: 192.168.3.213
-      ansible_user: root

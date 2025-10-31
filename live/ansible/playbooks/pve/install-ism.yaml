@@ -61,6 +61,32 @@
           - dcism
         state: present
 
+    - name: Check if libssl1.1 is installed
+      ansible.builtin.shell:
+        cmd: dpkg -l | grep libssl1.1
+      register: libssl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Download libssl1.1 if not installed
+      ansible.builtin.get_url:
+        url: http://ftp.us.debian.org/debian/pool/main/o/openssl/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        dest: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        mode: "0644"
+      when: libssl_check.rc != 0
+
+    - name: Install libssl1.1 from downloaded deb package
+      ansible.builtin.apt:
+        deb: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        state: present
+      when: libssl_check.rc != 0
+
+    - name: Remove temporary libssl1.1 deb file
+      ansible.builtin.file:
+        path: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        state: absent
+      when: libssl_check.rc != 0
+
     - name: Check if dcismeng service exists and get current status
       ansible.builtin.systemd:
         name: dcismeng

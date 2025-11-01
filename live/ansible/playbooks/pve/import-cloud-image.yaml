@@ -1,0 +1,96 @@
+---
+- name: Import Cloud Images to Proxmox VE
+  hosts: all
+  become: true
+  vars:
+    cloud_images:
+      - name: debian-13-genericcloud-amd64.qcow2
+        url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+        vm_id: 9000
+        vm_name: debian13-cloudinit
+        download_storage: ssd
+        download_path: /mnt/pve/ssd/template/iso
+        vm_import_storage: local-lvm
+        redownload: false
+      - name: noble-server-cloudimg-amd64.img
+        url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+        vm_id: 9001
+        vm_name: ubuntu24-cloudinit
+        download_storage: ssd
+        download_path: /mnt/pve/ssd/template/iso
+        vm_import_storage: local-lvm
+        redownload: false
+
+  tasks:
+    - name: Ensure download directories exist
+      ansible.builtin.file:
+        path: "{{ item.download_path }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ cloud_images }}"
+
+    - name: Check if cloud images already exist
+      ansible.builtin.stat:
+        path: "{{ item.download_path }}/{{ item.name }}"
+      loop: "{{ cloud_images }}"
+      register: image_stat
+
+    - name: Download cloud images (if not exist or redownload is true)
+      ansible.builtin.get_url:
+        url: "{{ item.item.url }}"
+        dest: "{{ item.item.download_path }}/{{ item.item.name }}"
+        mode: "0644"
+        timeout: 600
+        force: "{{ item.item.redownload | default(false) }}"
+      loop: "{{ image_stat.results }}"
+      when: not item.stat.exists or item.item.redownload | default(false)
+      register: download_result
+
+    - name: Check if VM already exists
+      ansible.builtin.command:
+        cmd: qm status {{ item.vm_id }}
+      loop: "{{ cloud_images }}"
+      register: vm_status
+      failed_when: false
+      changed_when: false
+
+    - name: Create VM for cloud-init template
+      ansible.builtin.command:
+        cmd: qm create {{ item.item.vm_id }} --name {{ item.item.vm_name }}
+      loop: "{{ vm_status.results }}"
+      when: item.rc != 0
+      register: vm_create
+
+    - name: Import cloud image to VM
+      ansible.builtin.command:
+        cmd: >
+          qm set {{ item.vm_id }}
+          --scsi0 {{ item.vm_import_storage }}:0,import-from={{ item.download_path }}/{{ item.name }}
+      loop: "{{ cloud_images }}"
+      when: vm_create.changed or (vm_status.results | selectattr('item.vm_id', 'equalto', item.vm_id) | first).rc != 0
+      register: import_result
+
+    - name: Configure VM settings for cloud-init
+      ansible.builtin.command:
+        cmd: >
+          qm set {{ item.vm_id }}
+          --ide2 {{ item.vm_import_storage }}:cloudinit
+          --boot order=scsi0
+          --serial0 socket
+          --vga serial0
+      loop: "{{ cloud_images }}"
+      when: import_result.changed
+
+    - name: Convert VM to template
+      ansible.builtin.command:
+        cmd: qm template {{ item.vm_id }}
+      loop: "{{ cloud_images }}"
+      when: import_result.changed
+
+    - name: Display template creation summary
+      ansible.builtin.debug:
+        msg: |
+          Cloud-init templates created successfully:
+          {% for image in cloud_images %}
+          - {{ image.vm_name }} (VM ID: {{ image.vm_id }}) - {{ image.name }}
+          {% endfor %}

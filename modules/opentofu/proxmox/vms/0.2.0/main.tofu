@@ -144,6 +144,7 @@ resource "proxmox_virtual_environment_vm" "vm" {
   dynamic "cdrom" {
     for_each = lookup(each.value, "cdrom", null) != null ? lookup(each.value, "cdrom") : []
     content {
+      enabled   = lookup(cdrom.value, "enabled", true)
       file_id   = lookup(cdrom.value, "file_id", "cdrom")
       interface = lookup(cdrom.value, "interface", "ide3")
     }
@@ -185,10 +186,10 @@ resource "proxmox_virtual_environment_vm" "vm" {
       datastore_id      = lookup(disk.value, "datastore_id", "local-lvm")
       path_in_datastore = lookup(disk.value, "path_in_datastore", null)
       discard           = lookup(disk.value, "discard", "ignore")
-      file_format       = lookup(disk.value, "file_format", "qcow2")
+      file_format       = lookup(disk.value, "file_format", null)
       file_id           = lookup(disk.value, "file_id", null)
       import_from       = lookup(disk.value, "import_from", null)
-      interface         = lookup(disk.value, "interface", "virtio0")
+      interface         = lookup(disk.value, "interface", null)
       iothread          = lookup(disk.value, "iothread", false)
       replicate         = lookup(disk.value, "replicate", true)
       serial            = lookup(disk.value, "serial", null)

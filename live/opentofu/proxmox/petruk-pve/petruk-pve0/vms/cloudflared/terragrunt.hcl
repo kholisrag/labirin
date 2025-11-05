@@ -44,7 +44,7 @@ inputs = {
         }
       ]
       started    = true
-      protection = false
+      protection = true
       agent = [
         {
           enabled = true

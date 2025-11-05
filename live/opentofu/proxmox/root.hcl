@@ -107,11 +107,6 @@ terraform {
     execute      = ["bash", "-c", "ssh-agent -k 2>/dev/null || true"]
     run_on_error = true
   }
-
-  after_hook "lock_providers_multiplatform" {
-    commands = ["init"]
-    execute  = ["bash", "-c", "tofu providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64 -platform=darwin_amd64"]
-  }
 }
 
 errors {

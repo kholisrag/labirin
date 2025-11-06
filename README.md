@@ -1,6 +1,6 @@
 # **Labirin**
 
-A Monorepo for Centralized Sources of Truth for My Personal Projects, that can be published.
+A Monorepo for Centralized Sources of Truth for My Personal / Hobbyist Projects, that can be published.
 This Opinionated based on my understanding so far for Infrastructure as Code (IaC), Configuration Management, Application Deployment, and Orchestration.
 Please feel free to open an Issue if you have any suggestions or improvements.
 
@@ -10,18 +10,8 @@ Please feel free to open an Issue if you have any suggestions or improvements.
 
 2. Configuration Management, Application Deployment, and Orchestration using `ansible`
 
-## For My Self
+## Table of Contents
 
-- [ ] Documents the Proxmox template creation
+1. [Goal Tracker](docs/goal_tracker.md)
 
-- [ ] Start to use `terragrunt` and `opentofu` for Proxmox VM creation
-
-## Ansible Playbook
-
-```bash
-uv venv .labirin_venv/ --python 3.14
-source .labirin_venv/bin/activate
-
-uv pip <subcommand>
-uv pip freeze > requirements.txt
-```
+2. [Miscellaneous Notes](docs/miscellaneous.md)

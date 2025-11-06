@@ -144,7 +144,6 @@ resource "proxmox_virtual_environment_vm" "vm" {
   dynamic "cdrom" {
     for_each = lookup(each.value, "cdrom", null) != null ? lookup(each.value, "cdrom") : []
     content {
-      enabled   = lookup(cdrom.value, "enabled", true)
       file_id   = lookup(cdrom.value, "file_id", "cdrom")
       interface = lookup(cdrom.value, "interface", "ide3")
     }

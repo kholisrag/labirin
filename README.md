@@ -1,6 +1,8 @@
 # **Labirin**
 
 A Monorepo for Centralized Sources of Truth for My Personal Projects, that can be published.
+This Opinionated based on my understanding so far for Infrastructure as Code (IaC), Configuration Management, Application Deployment, and Orchestration.
+Please feel free to open an Issue if you have any suggestions or improvements.
 
 ## Known Use Cases
 

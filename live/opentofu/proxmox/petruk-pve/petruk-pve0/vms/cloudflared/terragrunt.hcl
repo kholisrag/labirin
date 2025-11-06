@@ -55,6 +55,11 @@ inputs = {
           vm_id = 9001 # ubuntu24-cloudinit
         }
       ]
+      operating_system = [
+        {
+          type = "l26"
+        }
+      ]
       machine = "q35"
       cpu = [
         {

@@ -30,12 +30,20 @@ inputs = {
         })
       }
 
-      name        = local.name
-      node_name   = local.node_vars.locals.node
-      vm_id       = local.vm_id
-      description = "Cloudflared Tunnel VM"
-      bios        = "ovmf"
-      on_boot     = true
+      name                = local.name
+      node_name           = local.node_vars.locals.node
+      vm_id               = local.vm_id
+      description         = "Cloudflared Tunnel VM"
+      bios                = "ovmf"
+      machine             = "q35"
+      started             = true
+      protection          = true
+      on_boot             = true
+      reboot_after_update = true
+      scsi_hardware       = "virtio-scsi-single"
+      pool_id             = "gateway-pool"
+      tags                = ["gateway"]
+
       startup = [
         {
           order      = 1
@@ -43,8 +51,6 @@ inputs = {
           down_delay = 10
         }
       ]
-      started    = true
-      protection = true
       agent = [
         {
           enabled = true
@@ -60,7 +66,6 @@ inputs = {
           type = "l26"
         }
       ]
-      machine = "q35"
       cpu = [
         {
           cores   = 1
@@ -76,9 +81,6 @@ inputs = {
           floating  = 1024
         }
       ]
-      scsi_hardware = "virtio-scsi-single"
-      pool_id       = "gateway-pool"
-      tags          = ["gateway"]
 
       vga = [
         {

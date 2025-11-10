@@ -49,7 +49,7 @@ inputs = {
       # - Agent Need to be Enabled after All OPNSense Installation + Configuration Done
       #   if not, the terragrunt will stuck indefinitely waiting for the agent to be connected
       #   `error waiting for network interfaces from QEMU agent`
-      # - Need to install OPNSense Plugin: os-qemu-agent
+      # - Need to install agent OPNSense Web GUI: System > Firmware > Plugins (✅ Show community plugins ) > os-qemu-guest-agent
       agent = [
         {
           enabled = false

@@ -4,7 +4,7 @@ locals {
   node_vars       = read_terragrunt_config(find_in_parent_folders("node.hcl"))
 
   name  = basename(get_terragrunt_dir())
-  vm_id = 100
+  vm_id = 101
 }
 
 terraform {
@@ -17,25 +17,17 @@ include "parent" {
   path = find_in_parent_folders("root.hcl")
 }
 
+dependency "iso_images" {
+  config_path = format("%s/../../download-files/iso-images", get_terragrunt_dir())
+}
+
 inputs = {
   vms = {
-    cloudflared = {
-      cloud_init = {
-        datastore_id = "ssd"
-        user_data    = sops_decrypt_file(format("%s/user-data.enc.yaml", get_terragrunt_dir()))
-        network_data = sops_decrypt_file(format("%s/network-config.enc.yaml", get_terragrunt_dir()))
-        meta_data = yamlencode({
-          "instance-id"    = local.name
-          "vm-id"          = local.vm_id
-          "vm-name"        = local.name
-          "local-hostname" = format("%s.homelab", local.name)
-        })
-      }
-
+    opnsense = {
       name                = local.name
       node_name           = local.node_vars.locals.node
       vm_id               = local.vm_id
-      description         = "Cloudflared Tunnel VM"
+      description         = "OPNSense Gateway VM"
       bios                = "ovmf"
       machine             = "q35"
       started             = true
@@ -48,19 +40,19 @@ inputs = {
 
       startup = [
         {
-          order      = 1
+          order      = 2
           up_delay   = 10
           down_delay = 10
         }
       ]
+      ## Notes:
+      # - Agent Need to be Enabled after All OPNSense Installation + Configuration Done
+      #   if not, the terragrunt will stuck indefinitely waiting for the agent to be connected
+      #   `error waiting for network interfaces from QEMU agent`
+      # - Need to install OPNSense Plugin: os-qemu-agent
       agent = [
         {
-          enabled = true
-        }
-      ]
-      clone = [
-        {
-          vm_id = 9001 # ubuntu24-cloudinit
+          enabled = false
         }
       ]
       operating_system = [
@@ -70,28 +62,39 @@ inputs = {
       ]
       cpu = [
         {
-          cores   = 1
-          type    = "x86-64-v2-AES"
+          cores   = 2
+          type    = "host"
           sockets = 2
           numa    = true
-          flags   = ["+aes"]
+          flags   = []
         }
       ]
       memory = [
         {
-          dedicated = 2048
-          floating  = 1024
+          dedicated = 16384
+          floating  = 8192
         }
       ]
 
       vga = [
         {
-          type = "serial0"
+          type   = "std"
+          memory = 16
         }
       ]
       network_device = [
         {
           bridge = "vmbr0"
+          model  = "virtio"
+          queues = 8
+        },
+        {
+          bridge = "vmbr1"
+          model  = "virtio"
+          queues = 8
+        },
+        {
+          bridge = "vmbr2"
           model  = "virtio"
           queues = 8
         }
@@ -102,11 +105,16 @@ inputs = {
           type         = "4m"
         }
       ]
+      ##- Notes:
+      ## - Set boot_order to cdrom first for the installation process
+      ##   After done OPNSense installation, change it to boot from disk only
+      # boot_order = ["ide2","scsi0"]
+      boot_order = ["scsi0"]
       disk = [
         {
           interface    = "scsi0"
           datastore_id = "local-lvm"
-          size         = 4
+          size         = 120
           cache        = "none"
           aio          = "io_uring"
           backup       = true
@@ -114,6 +122,17 @@ inputs = {
           ssd          = true
         }
       ]
+      ## Notes:
+      # - Commented after done OPNSense installation
+      # - Seem have a bug from the provider side when we comment cdrom block after done OPNSense installation
+      #   Need to delete the cdrom device manually from Proxmox UI
+      # - the protection need to be disabled first for use to remove the cdrom
+      # cdrom = [
+      #   {
+      #     interface = "ide2"
+      #     file_id   = dependency.iso_images.outputs.download_file_output["opnsense"].id
+      #   }
+      # ]
       serial_device = [
         {
           device = "socket"

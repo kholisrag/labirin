@@ -19,6 +19,7 @@ proxmox_privileges: >-
   SDN.Audit
   SDN.Use
   Sys.Audit
+  Sys.Console
   Sys.Modify
   User.Modify
   VM.Allocate

@@ -50,9 +50,14 @@ inputs = {
       #   if not, the terragrunt will stuck indefinitely waiting for the agent to be connected
       #   `error waiting for network interfaces from QEMU agent`
       # - Need to install agent OPNSense Web GUI: System > Firmware > Plugins (✅ Show community plugins ) > os-qemu-guest-agent
+      # - After installed the plugin, enable the QEMU Guest Agent from Web GUI: Service > QEMU Guest Agent > Enable QEMU Guest Agent
+      # - Next, Power Off the VM
+      # - Then, enable the agent below abd apply it
+      # - Finally, Power On the VM
+      # - IP Address should be appear on Proxmox VM Summary tab
       agent = [
         {
-          enabled = false
+          enabled = true
         }
       ]
       operating_system = [

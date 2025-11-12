@@ -91,7 +91,7 @@ inputs = {
       ]
       network_device = [
         {
-          bridge = "vmbr0"
+          bridge = "vmbr1"
           model  = "virtio"
           queues = 8
         }

@@ -128,9 +128,10 @@ errors {
       ".*When expanding the plan for.*to include new values learned so far during apply, provider.*changed the planned action from NoOp to Create.*",
       ".*Terraform failed to fetch the requested providers for.*",
       ".*Error building changeset.*but it already exists.*",
-      ".*If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.*"
+      ".*If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.*",
+      ".*Failed to resolve provider packages.*",
     ]
-    max_attempts       = 30
+    max_attempts       = 10
     sleep_interval_sec = 10
   }
 }

@@ -1,0 +1,28 @@
+---
+- name: Check Ansible Connection to Remote Hosts
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Ping remote hosts
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Display connection status
+      ansible.builtin.debug:
+        msg: "Successfully connected to {{ inventory_hostname }}"
+      when: ping_result is succeeded
+
+    - name: Gather basic facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+      register: facts_result
+
+    - name: Display system information
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Architecture: {{ ansible_architecture }}
+          Python: {{ ansible_python_version }}
+      when: facts_result is succeeded

@@ -102,6 +102,7 @@ pve_users:
     token_name: "opnsensetoken"
     pve_privileges: >-
       Sys.Modify
+      Sys.Audit
 
 cloud_images:
   - name: debian-13-genericcloud-amd64.qcow2

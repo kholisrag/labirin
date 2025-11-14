@@ -3,5 +3,5 @@ cloudflared_all:
     ansible_python_interpreter: /usr/bin/python3
   hosts:
     cloudflared_vm:
-      ansible_host: 192.168.3.10
+      ansible_host: petruk-pve0-cloudflared
       ansible_user: ansible

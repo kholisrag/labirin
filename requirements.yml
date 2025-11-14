@@ -8,3 +8,5 @@ collections:
     version: ">=1.4.0,<2.0.0"
   - name: ansible.posix
     version: ">=2.1.0,<3.0.0"
+  - name: oxlorg.opnsense
+    version: ">=25.7.7,<26.0.0"

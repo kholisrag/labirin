@@ -1,0 +1,46 @@
+---
+- name: Install Common Tools
+  hosts: all
+  become: true
+  vars:
+    packages:
+      - name: qemu-guest-agent
+        state: present
+        service: true
+      - name: fastfetch
+        state: present
+        download_url: "https://github.com/fastfetch-cli/fastfetch/releases/download/2.55.0/fastfetch-linux-amd64.deb"
+        service: false
+        dpkg: true
+
+  tasks:
+    - name: Download and install packages via dpkg
+      ansible.builtin.get_url:
+        url: "{{ item.download_url }}"
+        dest: "/tmp/{{ item.name }}.deb"
+        mode: "0644"
+      loop: "{{ packages }}"
+      when: item.dpkg | default(false)
+
+    - name: Install downloaded .deb packages
+      ansible.builtin.apt:
+        deb: "/tmp/{{ item.name }}.deb"
+        state: present
+      loop: "{{ packages }}"
+      when: item.dpkg | default(false)
+
+    - name: Install packages via apt
+      ansible.builtin.apt:
+        name: "{{ item.name }}"
+        state: "{{ item.state }}"
+        update_cache: true
+      loop: "{{ packages }}"
+      when: not (item.dpkg | default(false))
+
+    - name: Start and enable services
+      ansible.builtin.service:
+        name: "{{ item.name }}"
+        state: started
+        enabled: true
+      loop: "{{ packages }}"
+      when: item.service | default(false)

@@ -1,6 +1,6 @@
 ---
 - name: Manage SSH Authorized Keys
-  hosts: all
+  hosts: petruk_pve0
   become: true
   vars_files:
     - vars/main.yaml

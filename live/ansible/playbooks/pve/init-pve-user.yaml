@@ -1,0 +1,177 @@
+---
+- name: Initialize Additional Users on Proxmox 9
+  hosts: petruk_pve0
+  gather_facts: false
+  become: true
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  tasks:
+    - name: Check if Role exists
+      ansible.builtin.command: pveum role list
+      register: role_list
+      changed_when: false
+
+    - name: Create Role if it doesn't exist
+      ansible.builtin.command: >
+        pveum role add {{ item.role }} -privs "{{ item.pve_privileges }}"
+      loop: "{{ pve_users }}"
+      when: item.role not in role_list.stdout
+      register: role_created
+      changed_when: role_created.rc == 0
+
+    - name: Modify Role privileges if it already exists
+      ansible.builtin.command: >
+        pveum role modify {{ item.role }} -privs "{{ item.pve_privileges }}"
+      loop: "{{ pve_users }}"
+      when: item.role in role_list.stdout
+      register: role_modified
+      changed_when: role_modified.rc == 0
+
+    - name: Check if User exists
+      ansible.builtin.command: pveum user list
+      register: user_list
+      changed_when: false
+
+    - name: Create User
+      ansible.builtin.command: >
+        pveum user add {{ item.username }} --password {{ item.password }}
+      loop: "{{ pve_users }}"
+      when: item.username not in user_list.stdout
+      no_log: true
+      register: user_created
+      changed_when: user_created.rc == 0
+
+    - name: Apply ACL for User
+      ansible.builtin.command: >
+        pveum aclmod / -user {{ item.username }} -role {{ item.role }}
+      loop: "{{ pve_users }}"
+      register: acl_result
+      changed_when: "'200 OK' in acl_result.stderr or acl_result.rc == 0"
+
+    - name: Check for existing API tokens
+      ansible.builtin.command: pvesh get /access/users/{{ item.username }}/token --output-format json
+      loop: "{{ pve_users }}"
+      register: existing_tokens
+      changed_when: false
+      failed_when: false
+
+    - name: Create API token for User if it does not exist
+      ansible.builtin.command: >
+        pvesh create /access/users/{{ item.username }}/token/{{ item.token_name }}
+        --privsep 0
+        --output-format json
+      loop: "{{ pve_users }}"
+      register: token_output
+      when: >
+        item.token_name not in
+        (
+          (
+            existing_tokens.results |
+            selectattr('item.username', 'equalto', item.username) |
+            map(attribute='stdout') | first | default('[]') | from_json
+          ) |
+          map(attribute='tokenid') | list
+        )
+      changed_when: token_output.rc == 0
+
+    - name: Extract token secret from output
+      ansible.builtin.set_fact:
+        token_secrets: >-
+          {{ token_secrets | default([]) +
+          [{
+            'username': item.item.username,
+            'token_name': item.item.token_name,
+            'secret': (item.stdout | from_json).value
+          }] }}
+      loop: "{{ token_output.results }}"
+      when: not item.skipped | default(false) and item.rc == 0
+
+    - name: Display API token information
+      ansible.builtin.debug:
+        msg:
+          - "===================================================="
+          - "IMPORTANT: Save these credentials securely!"
+          - "===================================================="
+          - ""
+          - "API Token ID: {{ item.username }}!{{ item.token_name }}"
+          - >-
+            API Token Secret: {{ (token_secrets | selectattr('username', 'equalto', item.username) |
+            map(attribute='secret') | first) |
+            default('Token already exists - check Proxmox UI or delete and recreate') }}
+          - ""
+          - "Export these as environment variables:"
+          - "export PM_API_TOKEN_ID='{{ item.username }}!{{ item.token_name }}'"
+          - >-
+            export PM_API_TOKEN_SECRET="{{ (token_secrets |
+            selectattr('username', 'equalto', item.username) |
+            map(attribute='secret') | first) | default('<token_secrets>') }}"
+          - ""
+          - "===================================================="
+      loop: "{{ pve_users }}"
+
+    - name: Verify user and role configuration
+      ansible.builtin.command: pveum user list
+      register: final_verification
+      changed_when: false
+
+    - name: Show verification results
+      ansible.builtin.debug:
+        msg: "User {{ item.username }} has been successfully configured with role {{ item.role }}"
+      loop: "{{ pve_users }}"
+      when: item.username in final_verification.stdout
+
+- name: Update token secrets file on localhost
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars_files:
+    - vars/main.yaml
+  vars:
+    secrets_dir: "{{ playbook_dir }}/secrets"
+    tokens_file: "{{ secrets_dir }}/tokens.yaml"
+    tokens_enc_file: "{{ secrets_dir }}/tokens.enc.yaml"
+
+  tasks:
+    - name: Check if new tokens were created
+      ansible.builtin.set_fact:
+        new_tokens_created: "{{ hostvars['petruk_pve0'].token_secrets is defined }}"
+
+    - name: Process tokens if any were created
+      when: new_tokens_created | bool
+      block:
+        - name: Decrypt tokens file
+          ansible.builtin.command:
+            cmd: >-
+              sops --output {{ tokens_file }}
+              --decrypt {{ tokens_enc_file }}
+          changed_when: true
+
+        - name: Check if token exists and upsert
+          ansible.builtin.shell: |
+            set -o pipefail
+            if yq eval '.pve_tokens[] | select(.name == "{{ item.token_name }}")' {{ tokens_file }} | grep -q .; then
+              yq eval '(.pve_tokens[] | select(.name == "{{ item.token_name }}").token) = "{{ item.secret }}"' -i {{ tokens_file }}
+            else
+              yq eval '.pve_tokens += [{"name": "{{ item.token_name }}", "token": "{{ item.secret }}"}]' -i {{ tokens_file }}
+            fi
+          loop: "{{ hostvars['petruk_pve0'].token_secrets }}"
+          when: item.secret != ''
+          changed_when: true
+
+        - name: Re-encrypt tokens file
+          ansible.builtin.command:
+            cmd: >-
+              sops --output {{ tokens_enc_file }}
+              --encrypt {{ tokens_file }}
+          changed_when: true
+
+        - name: Remove decrypted tokens file
+          ansible.builtin.file:
+            path: "{{ tokens_file }}"
+            state: absent
+
+        - name: Display success message
+          ansible.builtin.debug:
+            msg: "Successfully updated {{ tokens_enc_file }} with new tokens"

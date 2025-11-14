@@ -1,0 +1,28 @@
+---
+- name: Manage SSH Config
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars_files:
+    - vars/vault.yaml
+
+  tasks:
+    - name: Ensure .ssh directory exists
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.ssh"
+        state: directory
+        mode: "0700"
+
+    - name: Add SSH host configurations
+      community.general.ssh_config:
+        ssh_config_file: "{{ ansible_env.HOME }}/.ssh/config"
+        host: "{{ item.host }}"
+        hostname: "{{ item.hostname }}"
+        remote_user: "{{ item.username }}"
+        port: "{{ item.port }}"
+        identity_file: "{{ item.identity_file | default(omit) }}"
+        forward_agent: "{{ item.forward_agent | default(omit) }}"
+        state: present
+      loop: "{{ ssh_hosts }}"
+      when: ssh_hosts is defined
+      # noqa: unknown-module

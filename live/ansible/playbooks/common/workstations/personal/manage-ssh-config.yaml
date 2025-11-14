@@ -25,4 +25,3 @@
         state: present
       loop: "{{ ssh_hosts }}"
       when: ssh_hosts is defined
-      # noqa: unknown-module

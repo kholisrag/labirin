@@ -1,7 +1,7 @@
 # ref: https://forum.proxmox.com/threads/dell-server-tools-install-script-for-pve8-x.145970/post-801067
 ---
 - name: Install Dell iDRAC Service Module for Proxmox 9 (Debian 13 / trixie)
-  hosts: all
+  hosts: petruk_pve0
   become: true
   gather_facts: true
 

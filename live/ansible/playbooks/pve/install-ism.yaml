@@ -19,6 +19,7 @@
     - name: Download and install Dell OpenManage GPG key
       ansible.builtin.shell:
         cmd: |
+          set -o pipefail
           curl -fsSL https://linux.dell.com/repo/pgp_pubkeys/0x1285491434D8786F.asc \
             | gpg --dearmor | tee /usr/share/keyrings/dell-openmanage.gpg >/dev/null
         creates: /usr/share/keyrings/dell-openmanage.gpg
@@ -63,7 +64,9 @@
 
     - name: Check if libssl1.1 is installed
       ansible.builtin.shell:
-        cmd: dpkg -l | grep libssl1.1
+        cmd: |
+          set -o pipefail
+          dpkg -l | grep libssl1.1
       register: libssl_check
       changed_when: false
       failed_when: false
@@ -126,7 +129,9 @@
 
     - name: Get detailed service logs if service is not running
       ansible.builtin.shell:
-        cmd: journalctl -u dcismeng -n 50 --no-pager
+        cmd: |
+          set -o pipefail
+          journalctl -u dcismeng -n 50 --no-pager
       register: service_logs
       changed_when: false
       when: dcismeng_status_after.status.SubState != 'running'
@@ -140,7 +145,9 @@
 
     - name: Check if service failed and display reason
       ansible.builtin.shell:
-        cmd: systemctl status dcismeng --no-pager -l
+        cmd: |
+          set -o pipefail
+          systemctl status dcismeng --no-pager -l
       register: service_status_detail
       changed_when: false
       failed_when: false
@@ -163,7 +170,9 @@
 
     - name: Check installed iSM packages
       ansible.builtin.shell:
-        cmd: dpkg -l | grep -E 'dcism|dcism-osc'
+        cmd: |
+          set -o pipefail
+          dpkg -l | grep -E 'dcism|dcism-osc'
       register: ism_packages
       changed_when: false
       failed_when: false

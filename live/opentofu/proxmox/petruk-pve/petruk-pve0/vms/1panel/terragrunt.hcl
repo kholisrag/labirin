@@ -11,7 +11,7 @@ terraform {
   source = format("%s/modules/opentofu/proxmox/vms//0.2.0", get_repo_root())
 }
 
-prevent_destroy = true
+prevent_destroy = false
 
 include "parent" {
   path = find_in_parent_folders("root.hcl")
@@ -39,7 +39,7 @@ inputs = {
       bios                = "ovmf"
       machine             = "q35"
       started             = true
-      protection          = true
+      protection          = false
       on_boot             = true
       reboot_after_update = true
       scsi_hardware       = "virtio-scsi-single"

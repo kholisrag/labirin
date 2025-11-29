@@ -1,0 +1,31 @@
+# OPNSense
+# References: https://ansible-opnsense.oxl.app/index.html
+opnsense_ssl_verify: true
+
+############ Firewall Rules Configuration ############
+# Rule matching configuration
+opnsense_rule_match_fields: ["description"]
+opnsense_reload: true
+# Optional features
+opnsense_list_rules: true
+# Multi-control settings (used when managing all rules at once)
+firewall_multi_control:
+  # Fail if rule verification fails
+  fail_verify: true
+  # Continue processing even if a rule fails
+  fail_processing: false
+  # Output detailed information
+  output_info: true
+  # override:  # Override parameters for all rules
+  #   log: true
+  #   interface: ['lan']
+
+# DANGEROUS: Set to true to remove rules not in this config
+opnsense_purge_unmanaged: false
+# Purge filters (only used if opnsense_purge_unmanaged is true)
+# opnsense_purge_filters:
+#   ip_protocol: 'inet'
+#   action: 'allow'
+#   interface: ['opt2']
+
+############ End Of Firewall Rules Configuration ############

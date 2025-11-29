@@ -2,7 +2,7 @@ locals {
   vms = {
     for i, vm in var.vms : i => merge(
       {
-        vm_id = i
+        name = i
       },
       vm
     )

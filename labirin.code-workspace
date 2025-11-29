@@ -10,7 +10,7 @@
 			"https://raw.githubusercontent.com/canonical/cloud-init/main/cloudinit/config/schemas/versions.schema.cloud-config.json": "**/cloudinit/*.{yml,yaml}"
 		},
 		"ansible.lightspeed.enabled": false,
-		"ansible.python.interpreterPath": "./.labirin_venv/bin/python",
+		"ansible.python.interpreterPath": "/Users/petrukngantuk/go/src/github.com/kholisrag/labirin/.labirin_venv/bin/python",
 		"files.associations": {
 			"live/ansible/**/*.yaml": "ansible",
 			"live/ansible/**/*.yml": "ansible",

@@ -4,10 +4,6 @@ locals {
   node_vars       = read_terragrunt_config(find_in_parent_folders("node.hcl"))
 
   name = basename(get_terragrunt_dir())
-  network_yaml = {
-    for idx, mac_addresses in yamldecode(sops_decrypt_file(format("%s/network.enc.yaml", get_terragrunt_dir()))).mac_addresses :
-    mac_addresses.name => mac_addresses
-  }
 }
 
 terraform {
@@ -28,8 +24,8 @@ inputs = {
   vms = {
     format("talos-k8s-%s-01", local.name) = {
       node_name           = local.node_vars.locals.node
-      vm_id               = 103
-      description         = "Talos Kubernetes Master Node 01"
+      vm_id               = 106
+      description         = "Talos Kubernetes Worker Node 01"
       bios                = "ovmf"
       machine             = "q35"
       started             = true
@@ -37,8 +33,8 @@ inputs = {
       on_boot             = true
       reboot_after_update = false
       scsi_hardware       = "virtio-scsi-pci"
-      pool_id             = "k8s-master-pool"
-      tags                = ["k8s-master", "talos-master"]
+      pool_id             = "k8s-worker-pool"
+      tags                = ["k8s-worker", "talos-worker"]
       startup = [
         {
           order      = 4
@@ -58,7 +54,7 @@ inputs = {
       ]
       cpu = [
         {
-          cores   = 1
+          cores   = 2
           type    = "host"
           sockets = 2
           numa    = true
@@ -67,8 +63,8 @@ inputs = {
       ]
       memory = [
         {
-          dedicated = 4096
-          floating  = 4096
+          dedicated = 8192
+          floating  = 8192
         }
       ]
       vga = [
@@ -78,10 +74,9 @@ inputs = {
       ]
       network_device = [
         {
-          bridge      = "vmbr1"
-          model       = "virtio"
-          mac_address = local.network_yaml[format("talos-k8s-%s-01", local.name)].mac_address
-          queues      = 8
+          bridge = "vmbr1"
+          model  = "virtio"
+          queues = 8
         }
       ]
       efi_disk = [
@@ -126,8 +121,8 @@ inputs = {
     },
     format("talos-k8s-%s-02", local.name) = {
       node_name           = local.node_vars.locals.node
-      vm_id               = 104
-      description         = "Talos Kubernetes Master Node 02"
+      vm_id               = 107
+      description         = "Talos Kubernetes Worker Node 02"
       bios                = "ovmf"
       machine             = "q35"
       started             = true
@@ -135,8 +130,8 @@ inputs = {
       on_boot             = true
       reboot_after_update = false
       scsi_hardware       = "virtio-scsi-pci"
-      pool_id             = "k8s-master-pool"
-      tags                = ["k8s-master", "talos-master"]
+      pool_id             = "k8s-worker-pool"
+      tags                = ["k8s-worker", "talos-worker"]
       startup = [
         {
           order      = 4
@@ -176,10 +171,9 @@ inputs = {
       ]
       network_device = [
         {
-          bridge      = "vmbr1"
-          model       = "virtio"
-          mac_address = local.network_yaml[format("talos-k8s-%s-02", local.name)].mac_address
-          queues      = 8
+          bridge = "vmbr1"
+          model  = "virtio"
+          queues = 8
         }
       ]
       efi_disk = [
@@ -224,8 +218,8 @@ inputs = {
     },
     format("talos-k8s-%s-03", local.name) = {
       node_name           = local.node_vars.locals.node
-      vm_id               = 105
-      description         = "Talos Kubernetes Master Node 03"
+      vm_id               = 108
+      description         = "Talos Kubernetes Worker Node 03"
       bios                = "ovmf"
       machine             = "q35"
       started             = true
@@ -233,8 +227,8 @@ inputs = {
       on_boot             = true
       reboot_after_update = false
       scsi_hardware       = "virtio-scsi-pci"
-      pool_id             = "k8s-master-pool"
-      tags                = ["k8s-master", "talos-master"]
+      pool_id             = "k8s-worker-pool"
+      tags                = ["k8s-worker", "talos-worker"]
       startup = [
         {
           order      = 4
@@ -274,10 +268,9 @@ inputs = {
       ]
       network_device = [
         {
-          bridge      = "vmbr1"
-          model       = "virtio"
-          mac_address = local.network_yaml[format("talos-k8s-%s-03", local.name)].mac_address
-          queues      = 8
+          bridge = "vmbr1"
+          model  = "virtio"
+          queues = 8
         }
       ]
       efi_disk = [

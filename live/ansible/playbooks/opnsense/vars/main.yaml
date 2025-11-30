@@ -36,3 +36,8 @@ opnsense_vip_match_fields: ["address", "interface"]
 # Optional features
 opnsense_list_vips: true
 ############ End Of Virtual IPs Configuration ############
+
+############ Dnsmasq Host Overrides Configuration ############
+# Optional features
+opnsense_list_dnsmasq_hosts: true
+############ End Of Dnsmasq Host Overrides Configuration ############

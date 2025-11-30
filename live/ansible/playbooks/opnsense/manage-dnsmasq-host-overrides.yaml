@@ -1,0 +1,93 @@
+---
+- name: Centralized OPNsense Dnsmasq Host Overrides Management
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  module_defaults:
+    group/oxlorg.opnsense.all:
+      firewall: "{{ opnsense_host }}"
+      api_credential_file: "{{ opnsense_api_credential_file | default(omit) }}"
+      api_key: "{{ opnsense_api_key | default(omit) }}"
+      api_secret: "{{ opnsense_api_secret | default(omit) }}"
+      ssl_verify: "{{ opnsense_ssl_verify | default(true) }}"
+
+    oxlorg.opnsense.dnsmasq_host:
+      reload: false
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - opnsense_host is defined
+          - dnsmasq_hosts is defined
+        fail_msg: "Required variables are missing. Please check vars/main.yaml"
+      tags:
+        - manage_dnsmasq_hosts
+
+    - name: Display firewall being configured
+      ansible.builtin.debug:
+        msg: "Configuring Dnsmasq Hosts on {{ opnsense_host }}"
+      tags:
+        - manage_dnsmasq_hosts
+
+    - name: Manage Dnsmasq Hosts
+      oxlorg.opnsense.dnsmasq_host:
+        description: "{{ item.description }}"
+        host: "{{ item.host | default(omit) }}"
+        domain: "{{ item.domain | default(omit) }}"
+        local: "{{ item.local | default(false) }}"
+        ip: "{{ item.ip | default(omit) }}"
+        alias: "{{ item.alias | default(omit) }}"
+        cname: "{{ item.cname | default(omit) }}"
+        client_id: "{{ item.client_id | default(omit) }}"
+        hardware_addr: "{{ item.hardware_addr | default(omit) }}"
+        lease_time: "{{ item.lease_time | default(omit) }}"
+        set_tag: "{{ item.set_tag | default(omit) }}"
+        ignore: "{{ item.ignore | default(false) }}"
+        comments: "{{ item.comments | default(omit) }}"
+        state: "{{ item.state | default('present') }}"
+        enabled: "{{ item.enabled | default(omit) }}"
+      loop: "{{ dnsmasq_hosts | default([]) }}"
+      loop_control:
+        label: "{{ item.description | default(item.host | default(item.ip | default('unnamed'))) }}"
+      when:
+        - dnsmasq_hosts is defined
+        - dnsmasq_hosts | length > 0
+      tags:
+        - manage_dnsmasq_hosts
+
+    - name: Reload Dnsmasq configuration
+      oxlorg.opnsense.reload:
+        target: "dnsmasq"
+      when:
+        - dnsmasq_hosts is defined
+        - dnsmasq_hosts | length > 0
+        - opnsense_reload | default(true)
+      tags:
+        - manage_dnsmasq_hosts
+
+    - name: List existing Dnsmasq Hosts
+      oxlorg.opnsense.list:
+        target: "dnsmasq_host"
+      register: existing_hosts
+      when: opnsense_list_dnsmasq_hosts | default(false)
+      tags:
+        - list_dnsmasq_hosts
+        - manage_dnsmasq_hosts
+
+    - name: Display existing Dnsmasq Hosts
+      ansible.builtin.debug:
+        var: existing_hosts.data
+      when:
+        - opnsense_list_dnsmasq_hosts | default(false)
+        - existing_hosts is defined
+      tags:
+        - list_dnsmasq_hosts
+        - manage_dnsmasq_hosts

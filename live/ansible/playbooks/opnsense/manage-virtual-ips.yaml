@@ -1,0 +1,84 @@
+---
+- name: Centralized OPNsense Virtual IPs Management
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  module_defaults:
+    group/oxlorg.opnsense.all:
+      firewall: "{{ opnsense_host }}"
+      api_credential_file: "{{ opnsense_api_credential_file | default(omit) }}"
+      api_key: "{{ opnsense_api_key | default(omit) }}"
+      api_secret: "{{ opnsense_api_secret | default(omit) }}"
+      ssl_verify: "{{ opnsense_ssl_verify | default(true) }}"
+
+    oxlorg.opnsense.interface_vip:
+      match_fields: "{{ opnsense_vip_match_fields | default(['address', 'interface']) }}"
+      reload: "{{ opnsense_reload | default(true) }}"
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - opnsense_host is defined
+          - virtual_ips is defined
+        fail_msg: "Required variables are missing. Please check vars/main.yaml"
+      tags:
+        - manage_vips
+
+    - name: Display firewall being configured
+      ansible.builtin.debug:
+        msg: "Configuring Virtual IPs on {{ opnsense_host }}"
+      tags:
+        - manage_vips
+
+    - name: Manage Virtual IPs
+      oxlorg.opnsense.interface_vip:
+        interface: "{{ item.interface }}"
+        address: "{{ item.address }}"
+        mode: "{{ item.mode | default('ipalias') }}"
+        expand: "{{ item.expand | default(true) }}"
+        bind: "{{ item.bind | default(true) }}"
+        gateway: "{{ item.gateway | default(omit) }}"
+        password: "{{ item.password | default(omit) }}"
+        vhid: "{{ item.vhid | default(omit) }}"
+        peer: "{{ item.peer | default(omit) }}"
+        peer6: "{{ item.peer6 | default(omit) }}"
+        advertising_base: "{{ item.advertising_base | default(1) }}"
+        advertising_skew: "{{ item.advertising_skew | default(0) }}"
+        description: "{{ item.description | default(omit) }}"
+        state: "{{ item.state | default('present') }}"
+        enabled: "{{ item.enabled | default(omit) }}"
+      loop: "{{ virtual_ips | default([]) }}"
+      loop_control:
+        label: "{{ item.description | default(item.address) }}"
+      when:
+        - virtual_ips is defined
+        - virtual_ips | length > 0
+      tags:
+        - manage_vips
+
+    - name: List existing Virtual IPs
+      oxlorg.opnsense.list:
+        target: "interface_vip"
+      register: existing_vips
+      when: opnsense_list_vips | default(false)
+      tags:
+        - list_vips
+        - manage_vips
+
+    - name: Display existing Virtual IPs
+      ansible.builtin.debug:
+        var: existing_vips.data
+      when:
+        - opnsense_list_vips | default(false)
+        - existing_vips is defined
+      tags:
+        - list_vips
+        - manage_vips

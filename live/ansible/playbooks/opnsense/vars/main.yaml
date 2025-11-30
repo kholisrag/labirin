@@ -29,3 +29,10 @@ opnsense_purge_unmanaged: false
 #   interface: ['opt2']
 
 ############ End Of Firewall Rules Configuration ############
+
+############ Virtual IPs Configuration ############
+# VIP matching configuration
+opnsense_vip_match_fields: ["address", "interface"]
+# Optional features
+opnsense_list_vips: true
+############ End Of Virtual IPs Configuration ############

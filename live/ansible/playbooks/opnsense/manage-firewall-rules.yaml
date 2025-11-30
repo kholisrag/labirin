@@ -29,12 +29,15 @@
           - opnsense_host is defined
           - firewall_rule_groups is defined
         fail_msg: "Required variables are missing. Please check vars/main.yaml"
+      tags:
+        - manage_rules
 
     - name: Display firewall being configured
       ansible.builtin.debug:
         msg: "Configuring firewall rules on {{ opnsense_host }}"
+      tags:
+        - manage_rules
 
-    # Task for managing rules by logical groups
     - name: Manage firewall rules by groups
       oxlorg.opnsense.rule_multi:
         rules: "{{ item.rules }}"
@@ -51,13 +54,17 @@
       when:
         - firewall_rule_groups is defined
         - firewall_rule_groups | length > 0
+      tags:
+        - manage_rules
 
-    # List existing rules for verification
     - name: List existing firewall rules
       oxlorg.opnsense.list:
         target: "rule"
       register: existing_rules
       when: opnsense_list_rules | default(false)
+      tags:
+        - list_rules
+        - manage_rules
 
     - name: Display existing rules
       ansible.builtin.debug:
@@ -65,6 +72,9 @@
       when:
         - opnsense_list_rules | default(false)
         - existing_rules is defined
+      tags:
+        - list_rules
+        - manage_rules
 
     # DANGEROUS: Purge non-configured rules
     - name: DANGEROUS | Purge non-configured rules
@@ -74,3 +84,5 @@
           purge_all: true
           filters: "{{ opnsense_purge_filters | default(omit) }}"
       when: opnsense_purge_unmanaged | default(false)
+      tags:
+        - purge_rules

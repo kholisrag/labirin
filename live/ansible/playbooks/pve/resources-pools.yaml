@@ -6,12 +6,15 @@
     - vars/main.yaml
     - vars/vault.yaml
 
+  module_defaults:
+    community.proxmox.proxmox_pool:
+      api_host: "{{ pve_host }}"
+      api_user: "{{ iac_user }}"
+      api_password: "{{ iac_user_password }}"
+
   tasks:
     - name: Ensure resource pools exist
       community.proxmox.proxmox_pool:
-        api_host: "{{ pve_host }}"
-        api_user: "{{ iac_user }}"
-        api_password: "{{ iac_user_password }}"
         poolid: "{{ item.name }}"
         comment: "{{ item.comment | default(omit) }}"
         state: present
@@ -25,9 +28,6 @@
 
     - name: Remove resource pools
       community.proxmox.proxmox_pool:
-        api_host: "{{ pve_host }}"
-        api_user: "{{ iac_user }}"
-        api_password: "{{ iac_user_password }}"
         poolid: "{{ item.name }}"
         state: absent
       loop: "{{ resources_pools }}"

@@ -9,7 +9,7 @@ locals {
   }
 
   name                = basename(get_terragrunt_dir())
-  prefix_name         = "talos-k8s"
+  prefix_name         = "main-talos-k8s"
   prefix_description  = "Main Talos Kubernetes Master Node"
   bios                = "ovmf"
   machine             = "q35"
@@ -140,7 +140,7 @@ inputs = {
       vga                 = local.vga
       network_device = [
         merge(
-          local.network_device,
+          local.network_device_base,
           {
             mac_address = local.network_yaml[format("%s-%s-01", local.prefix_name, local.name)].mac_address
           }
@@ -177,7 +177,7 @@ inputs = {
       vga                 = local.vga
       network_device = [
         merge(
-          local.network_device,
+          local.network_device_base,
           {
             mac_address = local.network_yaml[format("%s-%s-02", local.prefix_name, local.name)].mac_address
           }
@@ -214,7 +214,7 @@ inputs = {
       vga                 = local.vga
       network_device = [
         merge(
-          local.network_device,
+          local.network_device_base,
           {
             mac_address = local.network_yaml[format("%s-%s-03", local.prefix_name, local.name)].mac_address
           }

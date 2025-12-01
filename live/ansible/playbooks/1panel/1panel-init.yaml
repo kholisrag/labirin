@@ -15,12 +15,18 @@
           - ansible_facts['system'] == 'Linux'
         fail_msg: "System does not meet minimum requirements (1GB RAM, Linux OS)"
         success_msg: "System requirements met"
+      tags:
+        - init
+        - 1panel
 
     - name: Update apt cache (Debian/Ubuntu)
       ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
       when: ansible_facts['os_family'] == "Debian"
+      tags:
+        - init
+        - 1panel
 
     - name: Install required packages
       ansible.builtin.package:
@@ -29,11 +35,17 @@
           - wget
           - tar
         state: present
+      tags:
+        - init
+        - 1panel
 
     - name: Check if 1Panel is already installed
       ansible.builtin.stat:
         path: /usr/local/bin/1pctl
       register: onepanel_installed
+      tags:
+        - init
+        - 1panel
 
     - name: Download 1Panel installation script
       ansible.builtin.get_url:
@@ -41,6 +53,9 @@
         dest: /tmp/quick_start.sh
         mode: "0755"
       when: not onepanel_installed.stat.exists
+      tags:
+        - init
+        - 1panel
 
     - name: Create installation response file
       ansible.builtin.copy:
@@ -55,6 +70,9 @@
 
         mode: "0644"
       when: not onepanel_installed.stat.exists
+      tags:
+        - init
+        - 1panel
 
     - name: Install 1Panel non-interactively
       ansible.builtin.shell: |
@@ -67,6 +85,9 @@
       async: 300
       poll: 5
       when: not onepanel_installed.stat.exists
+      tags:
+        - init
+        - 1panel
 
     - name: Display installation output
       ansible.builtin.debug:
@@ -74,6 +95,9 @@
       when:
         - not onepanel_installed.stat.exists
         - install_output is defined
+      tags:
+        - init
+        - 1panel
 
     - name: Clean up temporary installation files
       ansible.builtin.file:
@@ -83,6 +107,9 @@
         - /tmp/1panel_install.log
         - /tmp/1panel_install_responses.txt
         - /tmp/quick_start.sh
+      tags:
+        - init
+        - 1panel
 
     - name: Wait for 1Panel service to start
       ansible.builtin.wait_for:
@@ -90,15 +117,24 @@
         delay: 5
         timeout: 60
       when: not onepanel_installed.stat.exists
+      tags:
+        - init
+        - 1panel
 
     - name: Get 1Panel user information
       ansible.builtin.command: 1pctl user-info
       register: user_info
       changed_when: false
+      tags:
+        - init
+        - 1panel
 
     - name: Display 1Panel access information
       ansible.builtin.debug:
         msg: "{{ user_info.stdout_lines }}"
+      tags:
+        - init
+        - 1panel
 
     - name: Save access information to local file
       ansible.builtin.copy:
@@ -121,6 +157,9 @@
         mode: "0644"
       delegate_to: localhost
       become: false
+      tags:
+        - init
+        - 1panel
 
     - name: Ensure firewall allows 1Panel port (if ufw is active)
       community.general.ufw:
@@ -130,18 +169,27 @@
       when:
         - ansible_facts['os_family'] == "Debian"
       failed_when: false
+      tags:
+        - init
+        - 1panel
 
     - name: Install Pure-FTPd (Debian/Ubuntu)
       ansible.builtin.apt:
         name: pure-ftpd
         state: present
         update_cache: true
+      tags:
+        - init
+        - ftp
 
     - name: Ensure Pure-FTPd configuration directory exists
       ansible.builtin.file:
         path: /etc/pure-ftpd
         state: directory
         mode: "0755"
+      tags:
+        - init
+        - ftp
 
     - name: Configure Pure-FTPd
       ansible.builtin.lineinfile:
@@ -156,12 +204,18 @@
         - { regexp: "^NoAnonymous", line: "NoAnonymous yes" }
         - { regexp: "^PassivePortRange", line: "PassivePortRange 39000 40000" }
       notify: Restart pure-ftpd
+      tags:
+        - init
+        - ftp
 
     - name: Start and enable Pure-FTPd service
       ansible.builtin.systemd:
         name: pure-ftpd
         state: started
         enabled: true
+      tags:
+        - init
+        - ftp
 
     - name: Ensure firewall allows FTP control port (if ufw is active)
       community.general.ufw:
@@ -170,6 +224,9 @@
         proto: tcp
       when: ansible_facts['os_family'] == "Debian"
       failed_when: false
+      tags:
+        - init
+        - ftp
 
     - name: Ensure firewall allows FTP passive ports (if ufw is active)
       community.general.ufw:
@@ -178,11 +235,31 @@
         proto: tcp
       when: ansible_facts['os_family'] == "Debian"
       failed_when: false
+      tags:
+        - init
+        - ftp
 
     - name: Get Pure-FTPd service status
       ansible.builtin.systemd:
         name: pure-ftpd
       register: pureftpd_status
+      tags:
+        - init
+        - ftp
+
+    - name: Ensure .acme directory structure exists
+      become: false
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "~/.acme"
+        - "~/.acme/scripts"
+        - "~/.acme/certs"
+      tags:
+        - init
+        - acme
 
     - name: Display summary
       ansible.builtin.debug:
@@ -195,6 +272,7 @@
           - "FTP Passive Ports: 39000-40000"
           - "Please check the firewall/security group settings to allow these ports"
           - "Pure-FTPd Status: {{ pureftpd_status.status.ActiveState }}"
+      tags: init
 
   handlers:
     - name: Restart pure-ftpd

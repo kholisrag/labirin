@@ -1,0 +1,132 @@
+---
+- name: Centralized Manage Local DNS records on OPNsense with Unbound
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  module_defaults:
+    group/oxlorg.opnsense.all:
+      firewall: "{{ opnsense_host }}"
+      api_credential_file: "{{ opnsense_api_credential_file | default(omit) }}"
+      api_key: "{{ opnsense_api_key | default(omit) }}"
+      api_secret: "{{ opnsense_api_secret | default(omit) }}"
+      ssl_verify: "{{ opnsense_ssl_verify | default(true) }}"
+
+    oxlorg.opnsense.unbound_host:
+      reload: false
+      match_fields: ["description"]
+
+    oxlorg.opnsense.unbound_host_alias:
+      reload: false
+      match_fields: ["description"]
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - opnsense_host is defined
+        fail_msg: "Required variable 'opnsense_host' is missing. Please check vars/main.yaml"
+      tags:
+        - manage_unbound_hosts
+        - manage_unbound_aliases
+
+    - name: Display firewall being configured
+      ansible.builtin.debug:
+        msg: "Configuring Unbound Host Overrides and Aliases on {{ opnsense_host }}"
+      tags:
+        - manage_unbound_hosts
+        - manage_unbound_aliases
+
+    # Unbound Host Overrides Management
+    - name: Manage Unbound Host Overrides
+      oxlorg.opnsense.unbound_host:
+        hostname: "{{ item.hostname }}"
+        domain: "{{ item.domain }}"
+        value: "{{ item.value | default(omit) }}"
+        description: "{{ item.description | default(omit) }}"
+        record_type: "{{ item.record_type | default('A') }}"
+        prio: "{{ item.prio | default(omit) }}"
+        state: "{{ item.state | default('present') }}"
+        enabled: "{{ item.enabled | default(true) }}"
+      loop: "{{ unbound_hosts | default([]) }}"
+      loop_control:
+        label: "{{ item.description | default(item.hostname ~ '.' ~ item.domain) }}"
+      when:
+        - unbound_hosts is defined
+        - unbound_hosts | length > 0
+      tags:
+        - manage_unbound_hosts
+
+    # Unbound Host Aliases Management
+    - name: Manage Unbound Host Aliases
+      oxlorg.opnsense.unbound_host_alias:
+        target: "{{ item.target }}"
+        alias: "{{ item.alias }}"
+        domain: "{{ item.domain }}"
+        description: "{{ item.description | default(omit) }}"
+        state: "{{ item.state | default('present') }}"
+        enabled: "{{ item.enabled | default(true) }}"
+      loop: "{{ unbound_host_aliases | default([]) }}"
+      loop_control:
+        label: "{{ item.description | default(item.alias ~ '.' ~ item.domain ~ ' -> ' ~ item.target) }}"
+      when:
+        - unbound_host_aliases is defined
+        - unbound_host_aliases | length > 0
+      tags:
+        - manage_unbound_aliases
+
+    - name: Reload Unbound configuration
+      oxlorg.opnsense.reload:
+        target: "unbound"
+      when: >-
+        opnsense_reload | default(true) and (
+          (unbound_hosts is defined and unbound_hosts | length > 0) or
+          (unbound_host_aliases is defined and unbound_host_aliases | length > 0)
+        )
+      tags:
+        - manage_unbound_hosts
+        - manage_unbound_aliases
+
+    - name: List existing Unbound Host Overrides
+      oxlorg.opnsense.list:
+        target: "unbound_host"
+      register: existing_unbound_hosts
+      when: opnsense_list_unbound_hosts | default(false)
+      tags:
+        - list_unbound_hosts
+        - manage_unbound_hosts
+
+    - name: Display existing Unbound Host Overrides
+      ansible.builtin.debug:
+        var: existing_unbound_hosts.data
+      when:
+        - opnsense_list_unbound_hosts | default(false)
+        - existing_unbound_hosts is defined
+      tags:
+        - list_unbound_hosts
+        - manage_unbound_hosts
+
+    - name: List existing Unbound Host Aliases
+      oxlorg.opnsense.list:
+        target: "unbound_host_alias"
+      register: existing_unbound_aliases
+      when: opnsense_list_unbound_aliases | default(false)
+      tags:
+        - list_unbound_aliases
+        - manage_unbound_aliases
+
+    - name: Display existing Unbound Host Aliases
+      ansible.builtin.debug:
+        var: existing_unbound_aliases.data
+      when:
+        - opnsense_list_unbound_aliases | default(false)
+        - existing_unbound_aliases is defined
+      tags:
+        - list_unbound_aliases
+        - manage_unbound_aliases

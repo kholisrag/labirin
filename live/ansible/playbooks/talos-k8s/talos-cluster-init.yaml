@@ -152,14 +152,28 @@
         - always
         - worker-discovery
 
-    - name: Convert worker IPs to structured list
+    - name: Convert worker IPs to structured list with VMID
       ansible.builtin.set_fact:
-        worker_hosts: "{{ worker_hosts | default([]) + [{'ip': item}] }}"
-      loop: "{{ worker_ips_list | default([]) }}"
+        worker_hosts: >
+          {%- set result = [] -%}
+          {%- for net_result in worker_network_info.results | default([]) -%}
+            {%- if net_result.stdout is defined -%}
+              {%- set net_data = net_result.stdout | from_json -%}
+              {%- for iface in net_data.result | default([]) -%}
+                {%- if iface.name != 'lo' -%}
+                  {%- for ip_addr in iface['ip-addresses'] | default([]) -%}
+                    {%- if ip_addr['ip-address-type'] == 'ipv4' -%}
+                      {%- set _ = result.append({'ip': ip_addr['ip-address'], 'vm_id': net_result.item.vmid, 'node': net_result.item.node}) -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
       when:
         - use_dynamic_worker_discovery | default(true)
-        - worker_ips_list is defined
-        - worker_ips_list | length > 0
+        - worker_network_info.results is defined
       tags:
         - always
         - worker-discovery
@@ -240,7 +254,58 @@
       changed_when: true
       tags:
         - apply
-        - bootstrap
+
+    - name: Wait between master node reboots
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: "Waiting for master node {{ item.vm_id }} to begin reboot..."
+      loop: "{{ master_hosts }}"
+      tags:
+        - apply
+        - boot-config
+
+    - name: Wait for QEMU Guest Agent to be available on master nodes
+      ansible.builtin.shell: |
+        qm guest cmd {{ item.vm_id }} ping
+      loop: "{{ master_hosts }}"
+      delegate_to: "{{ pve_node }}"
+      register: guest_agent_check
+      until: guest_agent_check.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+      failed_when: false
+      tags:
+        - apply
+        - boot-config
+
+    - name: Configure boot settings and reboot master nodes (one at a time)
+      ansible.builtin.shell: |
+        qm set {{ item.vm_id }} --ide2 none --boot order=scsi0 && \
+        sleep 3 && \
+        qm reboot {{ item.vm_id }} || qm stop {{ item.vm_id }} && qm start {{ item.vm_id }}
+      loop: "{{ master_hosts }}"
+      delegate_to: "{{ pve_node }}"
+      changed_when: true
+      failed_when: false
+      throttle: 1
+      tags:
+        - apply
+        - boot-config
+
+    - name: Verify master nodes are running
+      ansible.builtin.shell: |
+        qm status {{ item.vm_id }} | grep -q running || qm start {{ item.vm_id }}
+      loop: "{{ master_hosts }}"
+      delegate_to: "{{ pve_node }}"
+      changed_when: false
+      failed_when: false
+      register: master_status_check
+      retries: 5
+      delay: 10
+      tags:
+        - apply
+        - boot-config
 
     - name: Apply worker configuration to worker nodes
       ansible.builtin.command: |
@@ -256,15 +321,73 @@
       changed_when: true
       tags:
         - apply
-        - bootstrap
 
-    - name: Wait for nodes to reboot and become ready
+    - name: Wait between worker node reboots
       ansible.builtin.pause:
-        seconds: 90
-        prompt: "Waiting for nodes to apply configuration and reboot..."
+        seconds: 15
+        prompt: "Waiting for worker node {{ item.vm_id }} to begin reboot..."
+      loop: "{{ worker_hosts | default([]) }}"
+      when:
+        - worker_hosts is defined
+        - worker_hosts | length > 0
       tags:
         - apply
-        - bootstrap
+        - boot-config
+
+    - name: Wait for QEMU Guest Agent to be available on worker nodes
+      ansible.builtin.shell: |
+        qm guest cmd {{ item.vm_id }} ping
+      loop: "{{ worker_hosts | default([]) }}"
+      when:
+        - worker_hosts is defined
+        - worker_hosts | length > 0
+        - item.vm_id is defined
+      delegate_to: "{{ pve_node }}"
+      register: guest_agent_check_worker
+      until: guest_agent_check_worker.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+      failed_when: false
+      tags:
+        - apply
+        - boot-config
+
+    - name: Configure boot settings and reboot worker nodes (one at a time)
+      ansible.builtin.shell: |
+        qm set {{ item.vm_id }} --ide2 none --boot order=scsi0 && \
+        sleep 3 && \
+        qm reboot {{ item.vm_id }} || qm stop {{ item.vm_id }} && qm start {{ item.vm_id }}
+      loop: "{{ worker_hosts | default([]) }}"
+      when:
+        - worker_hosts is defined
+        - worker_hosts | length > 0
+        - item.vm_id is defined
+      delegate_to: "{{ pve_node }}"
+      changed_when: true
+      failed_when: false
+      throttle: 1
+      tags:
+        - apply
+        - boot-config
+
+    - name: Verify worker nodes are running
+      ansible.builtin.shell: |
+        qm status {{ item.vm_id }} | grep -q running || qm start {{ item.vm_id }}
+      loop: "{{ worker_hosts | default([]) }}"
+      when:
+        - worker_hosts is defined
+        - worker_hosts | length > 0
+        - item.vm_id is defined
+      delegate_to: "{{ pve_node }}"
+      changed_when: false
+      failed_when: false
+      register: worker_status_check
+      retries: 5
+      delay: 10
+      tags:
+        - apply
+        - boot-config
 
     # ============================================
     # STEP 6: Bootstrap Kubernetes cluster
@@ -295,6 +418,7 @@
       changed_when: true
       tags:
         - bootstrap
+        - etcd
 
     - name: Wait for Kubernetes API to become available
       ansible.builtin.pause:

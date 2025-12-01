@@ -75,6 +75,15 @@
         - not onepanel_installed.stat.exists
         - install_output is defined
 
+    - name: Clean up temporary installation files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/1panel_install.log
+        - /tmp/1panel_install_responses.txt
+        - /tmp/quick_start.sh
+
     - name: Wait for 1Panel service to start
       ansible.builtin.wait_for:
         port: "{{ panel_port }}"

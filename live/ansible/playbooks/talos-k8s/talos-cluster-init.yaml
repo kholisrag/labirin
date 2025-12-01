@@ -110,6 +110,7 @@
 
     - name: Get IP addresses for worker VMs
       ansible.builtin.shell: |
+        set -o pipefail
         pvesh get /nodes/{{ item.node }}/qemu/{{ item.vmid }}/agent/network-get-interfaces --output-format json 2>/dev/null || echo '{}'
       loop: "{{ worker_vms | default([]) }}"
       register: worker_network_info
@@ -266,6 +267,7 @@
 
     - name: Wait for QEMU Guest Agent to be available on master nodes
       ansible.builtin.shell: |
+        set -o pipefail
         qm guest cmd {{ item.vm_id }} ping
       loop: "{{ master_hosts }}"
       delegate_to: "{{ pve_node }}"
@@ -281,6 +283,7 @@
 
     - name: Configure boot settings and reboot master nodes (one at a time)
       ansible.builtin.shell: |
+        set -o pipefail
         qm set {{ item.vm_id }} --ide2 none --boot order=scsi0 && \
         sleep 3 && \
         qm reboot {{ item.vm_id }} || qm stop {{ item.vm_id }} && qm start {{ item.vm_id }}
@@ -293,8 +296,18 @@
         - apply
         - boot-config
 
+    - name: Wait between master node reboots
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: "Waiting for master node {{ item.vm_id }} to begin reboot..."
+      loop: "{{ master_hosts }}"
+      tags:
+        - apply
+        - boot-config
+
     - name: Verify master nodes are running
       ansible.builtin.shell: |
+        set -o pipefail
         qm status {{ item.vm_id }} | grep -q running || qm start {{ item.vm_id }}
       loop: "{{ master_hosts }}"
       delegate_to: "{{ pve_node }}"
@@ -336,6 +349,7 @@
 
     - name: Wait for QEMU Guest Agent to be available on worker nodes
       ansible.builtin.shell: |
+        set -o pipefail
         qm guest cmd {{ item.vm_id }} ping
       loop: "{{ worker_hosts | default([]) }}"
       when:
@@ -353,8 +367,21 @@
         - apply
         - boot-config
 
+    - name: Wait between worker node reboots
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: "Waiting for worker node {{ item.vm_id }} to begin reboot..."
+      loop: "{{ worker_hosts | default([]) }}"
+      when:
+        - worker_hosts is defined
+        - worker_hosts | length > 0
+      tags:
+        - apply
+        - boot-config
+
     - name: Configure boot settings and reboot worker nodes (one at a time)
       ansible.builtin.shell: |
+        set -o pipefail
         qm set {{ item.vm_id }} --ide2 none --boot order=scsi0 && \
         sleep 3 && \
         qm reboot {{ item.vm_id }} || qm stop {{ item.vm_id }} && qm start {{ item.vm_id }}
@@ -373,6 +400,7 @@
 
     - name: Verify worker nodes are running
       ansible.builtin.shell: |
+        set -o pipefail
         qm status {{ item.vm_id }} | grep -q running || qm start {{ item.vm_id }}
       loop: "{{ worker_hosts | default([]) }}"
       when:
@@ -439,7 +467,8 @@
         - verify
 
     - name: Wait for all nodes to be ready
-      ansible.builtin.command: kubectl get nodes
+      ansible.builtin.command: |
+        kubectl get nodes
       register: nodes_status
       until: nodes_status.stdout.find('NotReady') == -1
       retries: 30
@@ -449,7 +478,8 @@
         - verify
 
     - name: Display cluster nodes
-      ansible.builtin.command: kubectl get nodes -o wide
+      ansible.builtin.command: |
+        kubectl get nodes -o wide
       register: nodes_output
       changed_when: false
       tags:

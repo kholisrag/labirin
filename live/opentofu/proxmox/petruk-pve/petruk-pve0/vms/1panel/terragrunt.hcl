@@ -5,6 +5,11 @@ locals {
 
   name  = basename(get_terragrunt_dir())
   vm_id = 102
+
+  network_yaml = {
+    for idx, mac_addresses in yamldecode(sops_decrypt_file(format("%s/network.enc.yaml", get_terragrunt_dir()))).mac_addresses :
+    mac_addresses.name => mac_addresses
+  }
 }
 
 terraform {
@@ -91,9 +96,10 @@ inputs = {
       ]
       network_device = [
         {
-          bridge = "vmbr1"
-          model  = "virtio"
-          queues = 8
+          bridge      = "vmbr1"
+          model       = "virtio"
+          mac_address = local.network_yaml["1panel"].mac_address
+          queues      = 8
         }
       ]
       efi_disk = [

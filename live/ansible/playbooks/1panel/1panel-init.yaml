@@ -1,0 +1,130 @@
+---
+- name: Install and configure 1Panel
+  hosts: onepanel_all
+  become: true
+  vars_files:
+    - vars/vault.yaml
+  vars:
+    install_dir: /opt
+
+  tasks:
+    - name: Check system requirements
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['memtotal_mb'] >= 1024
+          - ansible_facts['system'] == 'Linux'
+        fail_msg: "System does not meet minimum requirements (1GB RAM, Linux OS)"
+        success_msg: "System requirements met"
+
+    - name: Update apt cache (Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Install required packages
+      ansible.builtin.package:
+        name:
+          - curl
+          - wget
+          - tar
+        state: present
+
+    - name: Check if 1Panel is already installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/1pctl
+      register: onepanel_installed
+
+    - name: Download 1Panel installation script
+      ansible.builtin.get_url:
+        url: https://resource.1panel.pro/quick_start.sh
+        dest: /tmp/quick_start.sh
+        mode: "0755"
+      when: not onepanel_installed.stat.exists
+
+    - name: Create installation response file
+      ansible.builtin.copy:
+        dest: /tmp/1panel_install_responses.txt
+        content: |
+          1
+          {{ install_dir }}
+          {{ panel_port }}
+          {{ panel_entrance | default('') }}
+          {{ panel_username }}
+          {{ panel_password }}
+        mode: "0644"
+      when: not onepanel_installed.stat.exists
+
+    - name: Install 1Panel non-interactively
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat /tmp/1panel_install_responses.txt | bash /tmp/quick_start.sh 2>&1 | tee /tmp/1panel_install.log
+      args:
+        creates: /usr/local/bin/1pctl
+        executable: /bin/bash
+      register: install_output
+      async: 300
+      poll: 5
+      when: not onepanel_installed.stat.exists
+
+    - name: Display installation output
+      ansible.builtin.debug:
+        var: install_output.stdout_lines
+      when:
+        - not onepanel_installed.stat.exists
+        - install_output is defined
+
+    - name: Wait for 1Panel service to start
+      ansible.builtin.wait_for:
+        port: "{{ panel_port }}"
+        delay: 5
+        timeout: 60
+      when: not onepanel_installed.stat.exists
+
+    - name: Get 1Panel user information
+      ansible.builtin.command: 1pctl user-info
+      register: user_info
+      changed_when: false
+
+    - name: Display 1Panel access information
+      ansible.builtin.debug:
+        msg: "{{ user_info.stdout_lines }}"
+
+    - name: Save access information to local file
+      ansible.builtin.copy:
+        content: |
+          1Panel Installation Complete
+          ============================
+
+          {{ user_info.stdout }}
+
+          Installation Time: {{ ansible_date_time.iso8601 }}
+          Host: {{ ansible_hostname }}
+          IP: {{ ansible_host }}
+
+          Important Commands:
+          - Check status: 1pctl status
+          - Restart service: 1pctl restart
+          - Get user info: 1pctl user-info
+
+        dest: "{{ playbook_dir }}/temp/1panel_access_info_{{ ansible_hostname }}.txt"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+
+    - name: Ensure firewall allows 1Panel port (if ufw is active)
+      community.general.ufw:
+        rule: allow
+        port: "{{ panel_port }}"
+        proto: tcp
+      when:
+        - ansible_facts['os_family'] == "Debian"
+      failed_when: false
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "1Panel has been successfully installed!"
+          - "Access information saved to: {{ playbook_dir }}/temp/1panel_access_info_{{ ansible_hostname }}.txt"
+          - "Panel Port: {{ panel_port }}"
+          - "Please check the firewall/security group settings to allow port {{ panel_port }}"

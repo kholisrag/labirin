@@ -1,7 +1,7 @@
-1panel_all:
+onepanel_all:
   vars:
     ansible_python_interpreter: /usr/bin/python3
   hosts:
-    1panel_vm:
+    onepanel_vm:
       ansible_host: petruk-pve0-1panel
       ansible_user: ansible

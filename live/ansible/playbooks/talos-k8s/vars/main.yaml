@@ -1,0 +1,15 @@
+---
+# Talos Kubernetes Cluster Configuration
+# ========================================
+
+# Cluster Basic Configuration
+cluster_name: "main-talos-k8s-cluster"
+
+# Worker Node Discovery Configuration
+# Query worker nodes dynamically based on PVE tags
+use_dynamic_worker_discovery: true
+worker_node_tag: "main-talos-worker"
+
+# Feature Flags
+# Encryption for generated Talos configs
+auto_encrypt: true

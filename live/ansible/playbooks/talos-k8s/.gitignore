@@ -1,0 +1,9 @@
+# Generated files - should not be committed
+generated/
+*.retry
+
+# Sensitive files - keep encrypted versions only
+talosconfig
+secrets.yaml
+controlplane.yaml
+worker.yaml

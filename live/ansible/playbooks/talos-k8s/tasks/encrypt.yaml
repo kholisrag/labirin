@@ -1,0 +1,133 @@
+---
+# ============================================
+# Encryption tasks for Talos secrets
+# ============================================
+# This task file handles copying and encrypting
+# sensitive Talos configuration files
+# ============================================
+
+- name: Copy secrets bundle to encrypted directory
+  ansible.builtin.copy:
+    src: "{{ secrets_file }}"
+    dest: "{{ encrypted_dir }}/secrets.yaml"
+    mode: "0600"
+  tags:
+    - encrypt
+
+- name: Copy talosconfig to encrypted directory
+  ansible.builtin.copy:
+    src: "{{ talosconfig_file }}"
+    dest: "{{ encrypted_dir }}/talosconfig"
+    mode: "0600"
+  tags:
+    - encrypt
+
+- name: Copy controlplane config to encrypted directory
+  ansible.builtin.copy:
+    src: "{{ controlplane_config_file }}"
+    dest: "{{ encrypted_dir }}/controlplane.yaml"
+    mode: "0600"
+  tags:
+    - encrypt
+
+- name: Copy worker config to encrypted directory
+  ansible.builtin.copy:
+    src: "{{ worker_config_file }}"
+    dest: "{{ encrypted_dir }}/worker.yaml"
+    mode: "0600"
+  tags:
+    - encrypt
+
+- name: Check if secrets bundle is already encrypted
+  ansible.builtin.command: |
+    head -n 1 {{ encrypted_dir }}/secrets.yaml
+  register: secrets_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - encrypt
+
+- name: Encrypt secrets bundle with ansible-vault
+  ansible.builtin.command: |
+    ansible-vault encrypt {{ encrypted_dir }}/secrets.yaml
+  when:
+    - auto_encrypt | default(false)
+    - secrets_check.stdout is defined
+    - "'$ANSIBLE_VAULT' not in secrets_check.stdout"
+  changed_when: true
+  tags:
+    - encrypt
+
+- name: Check if talosconfig is already encrypted
+  ansible.builtin.command: |
+    head -n 1 {{ encrypted_dir }}/talosconfig
+  register: talosconfig_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - encrypt
+
+- name: Encrypt talosconfig with ansible-vault
+  ansible.builtin.command: |
+    ansible-vault encrypt {{ encrypted_dir }}/talosconfig
+  when:
+    - auto_encrypt | default(false)
+    - talosconfig_check.stdout is defined
+    - "'$ANSIBLE_VAULT' not in talosconfig_check.stdout"
+  changed_when: true
+  tags:
+    - encrypt
+
+- name: Check if controlplane config is already encrypted
+  ansible.builtin.command: |
+    head -n 1 {{ encrypted_dir }}/controlplane.yaml
+  register: controlplane_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - encrypt
+
+- name: Encrypt controlplane config with ansible-vault
+  ansible.builtin.command: |
+    ansible-vault encrypt {{ encrypted_dir }}/controlplane.yaml
+  when:
+    - auto_encrypt | default(false)
+    - controlplane_check.stdout is defined
+    - "'$ANSIBLE_VAULT' not in controlplane_check.stdout"
+  changed_when: true
+  tags:
+    - encrypt
+
+- name: Check if worker config is already encrypted
+  ansible.builtin.command: |
+    head -n 1 {{ encrypted_dir }}/worker.yaml
+  register: worker_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - encrypt
+
+- name: Encrypt worker config with ansible-vault
+  ansible.builtin.command: |
+    ansible-vault encrypt {{ encrypted_dir }}/worker.yaml
+  when:
+    - auto_encrypt | default(false)
+    - worker_check.stdout is defined
+    - "'$ANSIBLE_VAULT' not in worker_check.stdout"
+  changed_when: true
+  tags:
+    - encrypt
+
+- name: Display encryption status
+  ansible.builtin.debug:
+    msg:
+      - "Encryption completed!"
+      - "Encrypted files are stored in: {{ encrypted_dir }}"
+      - "Files encrypted:"
+      - "  - secrets.yaml"
+      - "  - talosconfig"
+      - "  - controlplane.yaml"
+      - "  - worker.yaml"
+  when: auto_encrypt | default(false)
+  tags:
+    - encrypt

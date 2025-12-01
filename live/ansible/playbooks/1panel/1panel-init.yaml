@@ -131,10 +131,73 @@
         - ansible_facts['os_family'] == "Debian"
       failed_when: false
 
+    - name: Install Pure-FTPd (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: pure-ftpd
+        state: present
+        update_cache: true
+
+    - name: Ensure Pure-FTPd configuration directory exists
+      ansible.builtin.file:
+        path: /etc/pure-ftpd
+        state: directory
+        mode: "0755"
+
+    - name: Configure Pure-FTPd
+      ansible.builtin.lineinfile:
+        path: /etc/pure-ftpd/pure-ftpd.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        create: true
+        mode: "0644"
+      loop:
+        - { regexp: "^PureDB", line: "PureDB /etc/pure-ftpd/pureftpd.pdb" }
+        - { regexp: "^VerboseLog", line: "VerboseLog yes" }
+        - { regexp: "^NoAnonymous", line: "NoAnonymous yes" }
+        - { regexp: "^PassivePortRange", line: "PassivePortRange 39000 40000" }
+      notify: Restart pure-ftpd
+
+    - name: Start and enable Pure-FTPd service
+      ansible.builtin.systemd:
+        name: pure-ftpd
+        state: started
+        enabled: true
+
+    - name: Ensure firewall allows FTP control port (if ufw is active)
+      community.general.ufw:
+        rule: allow
+        port: "21"
+        proto: tcp
+      when: ansible_facts['os_family'] == "Debian"
+      failed_when: false
+
+    - name: Ensure firewall allows FTP passive ports (if ufw is active)
+      community.general.ufw:
+        rule: allow
+        port: "39000:40000"
+        proto: tcp
+      when: ansible_facts['os_family'] == "Debian"
+      failed_when: false
+
+    - name: Get Pure-FTPd service status
+      ansible.builtin.systemd:
+        name: pure-ftpd
+      register: pureftpd_status
+
     - name: Display summary
       ansible.builtin.debug:
         msg:
           - "1Panel has been successfully installed!"
+          - "Pure-FTPd has been installed and configured!"
           - "Access information saved to: {{ playbook_dir }}/temp/1panel_access_info_{{ ansible_facts['hostname'] }}.txt"
           - "Panel Port: {{ panel_port }}"
-          - "Please check the firewall/security group settings to allow port {{ panel_port }}"
+          - "FTP Control Port: 21"
+          - "FTP Passive Ports: 39000-40000"
+          - "Please check the firewall/security group settings to allow these ports"
+          - "Pure-FTPd Status: {{ pureftpd_status.status.ActiveState }}"
+
+  handlers:
+    - name: Restart pure-ftpd
+      ansible.builtin.systemd:
+        name: pure-ftpd
+        state: restarted

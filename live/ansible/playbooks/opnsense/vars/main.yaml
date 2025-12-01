@@ -41,3 +41,9 @@ opnsense_list_vips: true
 # Optional features
 opnsense_list_dnsmasq_hosts: true
 ############ End Of Dnsmasq Host Overrides Configuration ############
+
+############ Unbound Host Overrides Configuration ############
+# Optional features
+opnsense_list_unbound_hosts: true
+opnsense_list_unbound_aliases: true
+############ End Of Unbound Host Overrides Configuration ############

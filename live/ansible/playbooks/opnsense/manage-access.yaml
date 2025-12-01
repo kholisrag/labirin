@@ -1,0 +1,66 @@
+---
+- name: Manage OPNsense Access (Users, Groups, and Privileges)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  module_defaults:
+    group/oxlorg.opnsense.all:
+      firewall: "{{ opnsense_host }}"
+      api_credential_file: "{{ opnsense_api_credential_file | default(omit) }}"
+      api_key: "{{ opnsense_api_key | default(omit) }}"
+      api_secret: "{{ opnsense_api_secret | default(omit) }}"
+      ssl_verify: "{{ opnsense_ssl_verify | default(true) }}"
+
+  tasks:
+    - name: Manage Groups
+      oxlorg.opnsense.group:
+        name: "{{ item.name }}"
+        description: "{{ item.description | default(omit) }}"
+        member: "{{ item.member | default(omit) }}"
+        privilege: "{{ item.privilege | default(omit) }}"
+        source_net: "{{ item.source_net | default(omit) }}"
+        state: "{{ item.state | default('present') }}"
+      loop: "{{ opnsense_groups | default([]) }}"
+      when: opnsense_groups is defined and opnsense_groups is iterable and opnsense_groups is not mapping
+      tags:
+        - groups
+
+    - name: Manage Users
+      oxlorg.opnsense.user:
+        name: "{{ item.name }}"
+        expires: "{{ item.expires | default(omit) }}"
+        authorized_keys: "{{ item.authorized_keys | default(omit) }}"
+        shell: "{{ item.shell | default(omit) }}"
+        password: "{{ item.password | default(omit) }}"
+        update_password: "{{ item.update_password | default('always') }}"
+        scrambled_password: "{{ item.scrambled_password | default(false) }}"
+        landing_page: "{{ item.landing_page | default(omit) }}"
+        comment: "{{ item.comment | default(omit) }}"
+        email: "{{ item.email | default(omit) }}"
+        language: "{{ item.language | default(omit) }}"
+        description: "{{ item.description | default(omit) }}"
+        membership: "{{ item.membership | default(omit) }}"
+        privilege: "{{ item.privilege | default(omit) }}"
+        state: "{{ item.state | default('present') }}"
+      loop: "{{ opnsense_users | default([]) }}"
+      when: opnsense_users is defined and opnsense_users is iterable and opnsense_users is not mapping
+      tags:
+        - users
+
+    - name: Manage Privileges
+      oxlorg.opnsense.privilege:
+        id: "{{ item.id }}"
+        user: "{{ item.user | default(omit) }}"
+        group: "{{ item.group | default(omit) }}"
+        state: "{{ item.state | default('present') }}"
+      loop: "{{ opnsense_privileges | default([]) }}"
+      when: opnsense_privileges is defined and opnsense_privileges is iterable and opnsense_privileges is not mapping
+      tags:
+        - privileges

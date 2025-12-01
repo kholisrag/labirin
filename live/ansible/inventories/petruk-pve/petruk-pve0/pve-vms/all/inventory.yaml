@@ -1,0 +1,14 @@
+all_vms:
+  hosts:
+    onepanel_vm:
+      ansible_host: petruk-pve0-1panel
+      ansible_user: ansible
+      ansible_python_interpreter: /usr/bin/python3
+    cloudflared_vm:
+      ansible_host: petruk-pve0-cloudflared
+      ansible_user: ansible
+      ansible_python_interpreter: /usr/bin/python3
+    opnsense_vm:
+      ansible_host: petruk-pve0-opnsense
+      ansible_user: ansible
+      ansible_python_interpreter: /usr/local/bin/python3

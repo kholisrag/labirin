@@ -1,0 +1,66 @@
+---
+- name: Setup ACME SSL Certificate Auto-Upload to 1Panel
+  hosts: onepanel_all
+  become: false
+  vars_files:
+    - vars/vault.yaml
+
+  tasks:
+    - name: Gather facts if not already gathered
+      ansible.builtin.setup:
+      when: ansible_facts.user_dir is not defined
+      tags:
+        - setup
+        - upload
+
+    - name: Ensure scripts directory exists
+      ansible.builtin.file:
+        path: "{{ scripts_dir }}"
+        state: directory
+        mode: "0700"
+      tags:
+        - setup
+        - upload
+
+    - name: Deploy 1Panel SSL uploader script from template
+      ansible.builtin.template:
+        src: templates/1panel-ssl-uploader.sh.j2
+        dest: "{{ uploader_script }}"
+        mode: "0750"
+      tags:
+        - setup
+        - upload
+
+    - name: Test run the uploader script (optional)
+      ansible.builtin.command:
+        cmd: "{{ uploader_script }}"
+      register: upload_result
+      changed_when: "'uploaded successfully' in upload_result.stdout"
+      when: run_upload | default(false) | bool
+      tags:
+        - upload
+        - test
+
+    - name: Display upload result
+      ansible.builtin.debug:
+        msg: "{{ upload_result.stdout_lines }}"
+      when: upload_result is defined and upload_result.stdout_lines is defined
+      tags:
+        - upload
+        - test
+
+    - name: Display script location
+      ansible.builtin.debug:
+        msg:
+          - "✓ 1Panel SSL uploader script deployed successfully!"
+          - "Script location: {{ uploader_script }}"
+          - "This script will be automatically triggered by OPNsense ACME Automation"
+          - ""
+          - "To manually test the upload, run:"
+          - "  ansible-playbook acme-cert-updater.yaml -e run_upload=true"
+          - ""
+          - "Or SSH to the host and run:"
+          - "  {{ uploader_script }}"
+      tags:
+        - setup
+        - upload

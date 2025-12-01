@@ -1,0 +1,104 @@
+#!/bin/bash
+# 1Panel SSL Certificate Uploader
+# {{ ansible_managed }}
+# This Script will be Triggered by OPNsense ACME Automation
+
+set -euo pipefail
+
+# Configuration from Ansible
+API_KEY="{{ panel_api_key }}"
+UPLOAD_URL="{{ panel_upload_url }}"
+SSL_ID={{ ssl_id }}
+DESCRIPTION="{{ cert_description }}"
+CERT_DIR="{{ cert_directory }}"
+
+# Certificate paths
+PRIVATE_KEY_PATH="${CERT_DIR}/key.pem"
+CERTIFICATE_PATH="${CERT_DIR}/fullchain.pem"
+
+# Log file
+LOG_FILE="{{ scripts_dir }}/upload.log"
+
+# Function to log messages
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# Validate input files exist
+if [ ! -f "$PRIVATE_KEY_PATH" ]; then
+    log "ERROR: Private key file not found: $PRIVATE_KEY_PATH"
+    exit 1
+fi
+
+if [ ! -f "$CERTIFICATE_PATH" ]; then
+    log "ERROR: Certificate file not found: $CERTIFICATE_PATH"
+    exit 1
+fi
+
+# Function to generate authentication token
+generate_token() {
+    local api_key="$1"
+    local timestamp=$(date +%s)
+    local token_string="1panel${api_key}${timestamp}"
+
+    # Try md5sum first (Linux), fall back to md5 (macOS)
+    if command -v md5sum &>/dev/null; then
+        local token=$(echo -n "$token_string" | md5sum | awk '{print $1}')
+    elif command -v md5 &>/dev/null; then
+        local token=$(echo -n "$token_string" | md5)
+    else
+        log "ERROR: Neither md5sum nor md5 command found"
+        exit 1
+    fi
+
+    echo "$timestamp $token"
+}
+
+log "=========================================="
+log "Starting certificate upload to 1Panel"
+log "Domain: {{ cert_domain }}"
+log "SSL ID: $SSL_ID"
+
+# Generate authentication token
+read TIMESTAMP TOKEN < <(generate_token "$API_KEY")
+
+# Read and format certificate files
+# Convert multi-line PEM to single line with \n escapes for JSON
+PRIVATE_KEY_CONTENT=$(cat "$PRIVATE_KEY_PATH" | awk '{printf "%s\\n", $0}' | sed 's/\\n$//')
+CERTIFICATE_CONTENT=$(cat "$CERTIFICATE_PATH" | awk '{printf "%s\\n", $0}' | sed 's/\\n$//')
+
+# Prepare upload JSON data
+UPLOAD_DATA=$(cat <<EOF
+{
+    "privateKey": "$PRIVATE_KEY_CONTENT",
+    "certificate": "$CERTIFICATE_CONTENT",
+    "privateKeyPath": "",
+    "certificatePath": "",
+    "type": "paste",
+    "sslID": $SSL_ID,
+    "description": "$DESCRIPTION"
+}
+EOF
+)
+
+# Upload certificate to 1Panel
+log "Uploading to: $UPLOAD_URL"
+UPLOAD_RESPONSE=$(curl -k -s -X POST "$UPLOAD_URL" \
+    -H "1Panel-Token: $TOKEN" \
+    -H "1Panel-Timestamp: $TIMESTAMP" \
+    -H "Content-Type: application/json" \
+    -d "$UPLOAD_DATA")
+
+log "Response: $UPLOAD_RESPONSE"
+
+# Check if upload was successful
+if echo "$UPLOAD_RESPONSE" | grep -q '"code":200' || echo "$UPLOAD_RESPONSE" | grep -q '"message":"success"'; then
+    log "✓ Certificate uploaded successfully!"
+    exit 0
+elif echo "$UPLOAD_RESPONSE" | grep -q '"code":' ; then
+    log "✗ Certificate upload failed!"
+    exit 1
+else
+    log "⚠ Upload completed with unknown status"
+    exit 0
+fi

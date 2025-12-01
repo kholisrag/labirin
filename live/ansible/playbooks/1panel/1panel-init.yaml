@@ -50,7 +50,7 @@
           {{ install_dir }}
           {{ panel_port }}
           {{ panel_entrance | default('') }}
-          {{ panel_username | default('')}}
+          {{ panel_username | default('') }}
           {{ panel_password | default('') }}
 
         mode: "0644"

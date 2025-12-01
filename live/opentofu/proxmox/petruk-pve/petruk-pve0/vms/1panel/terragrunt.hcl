@@ -4,7 +4,7 @@ locals {
   node_vars       = read_terragrunt_config(find_in_parent_folders("node.hcl"))
 
   name  = basename(get_terragrunt_dir())
-  vm_id = 103
+  vm_id = 102
 }
 
 terraform {
@@ -106,7 +106,7 @@ inputs = {
         {
           interface    = "scsi0"
           datastore_id = "local-lvm"
-          size         = 20
+          size         = 50
           cache        = "none"
           aio          = "io_uring"
           backup       = true

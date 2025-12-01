@@ -9,13 +9,13 @@
   tasks:
     - name: Ensure .ssh directory exists
       ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.ssh"
+        path: "{{ ansible_facts['env']['HOME'] }}/.ssh"
         state: directory
         mode: "0700"
 
     - name: Add SSH host configurations
       community.general.ssh_config:
-        ssh_config_file: "{{ ansible_env.HOME }}/.ssh/config"
+        ssh_config_file: "{{ ansible_facts['env']['HOME'] }}/.ssh/config"
         host: "{{ item.host }}"
         hostname: "{{ item.hostname }}"
         remote_user: "{{ item.username }}"

@@ -1,0 +1,7 @@
+opnsense_all:
+  vars:
+    ansible_python_interpreter: /usr/local/bin/python3
+  hosts:
+    opnsense_vm:
+      ansible_host: petruk-pve0-opnsense
+      ansible_user: ansible

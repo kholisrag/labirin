@@ -98,16 +98,16 @@
 
           {{ user_info.stdout }}
 
-          Installation Time: {{ ansible_date_time.iso8601 }}
-          Host: {{ ansible_hostname }}
-          IP: {{ ansible_host }}
+          Installation Time: {{ ansible_facts['date_time']['iso8601'] }}
+          Host: {{ ansible_facts['hostname'] }}
+          IP: {{ ansible_facts['default_ipv4']['address'] | default(ansible_host) }}
 
           Important Commands:
           - Check status: 1pctl status
           - Restart service: 1pctl restart
           - Get user info: 1pctl user-info
 
-        dest: "{{ playbook_dir }}/temp/1panel_access_info_{{ ansible_hostname }}.txt"
+        dest: "{{ playbook_dir }}/temp/1panel_access_info_{{ ansible_facts['hostname'] }}.txt"
         mode: "0644"
       delegate_to: localhost
       become: false
@@ -125,6 +125,6 @@
       ansible.builtin.debug:
         msg:
           - "1Panel has been successfully installed!"
-          - "Access information saved to: {{ playbook_dir }}/temp/1panel_access_info_{{ ansible_hostname }}.txt"
+          - "Access information saved to: {{ playbook_dir }}/temp/1panel_access_info_{{ ansible_facts['hostname'] }}.txt"
           - "Panel Port: {{ panel_port }}"
           - "Please check the firewall/security group settings to allow port {{ panel_port }}"

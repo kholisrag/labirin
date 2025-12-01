@@ -1,0 +1,72 @@
+---
+# Playbook to retrieve ACME SSH public key from OPNsense and upload to target VMs
+# Reference: https://forum.opnsense.org/index.php?msg=152622
+#
+# This playbook:
+# 1. Retrieves the public key from /var/etc/acme-client/sftp-config/id.ed25519.pub on OPNsense
+# 2. Uploads it to specified target VMs
+# 3. Adds the key to the authorized_keys file for SSH access
+
+- name: Retrieve ACME SSH Public Key from OPNsense
+  hosts: opnsense_vm
+  gather_facts: false
+
+  tasks:
+    - name: Check if ACME SSH public key exists
+      ansible.builtin.stat:
+        path: /var/etc/acme-client/sftp-config/id.ed25519.pub
+      register: acme_pubkey_stat
+
+    - name: Fail if public key does not exist
+      ansible.builtin.fail:
+        msg: "ACME SSH public key not found at /var/etc/acme-client/sftp-config/id.ed25519.pub"
+      when: not acme_pubkey_stat.stat.exists
+
+    - name: Read ACME SSH public key
+      ansible.builtin.slurp:
+        src: /var/etc/acme-client/sftp-config/id.ed25519.pub
+      register: acme_pubkey_content
+
+    - name: Set public key fact
+      ansible.builtin.set_fact:
+        opnsense_acme_pubkey: "{{ acme_pubkey_content.content | b64decode | trim }}"
+
+    - name: Display retrieved public key
+      ansible.builtin.debug:
+        msg: "Retrieved public key: {{ opnsense_acme_pubkey[:50] }}..."
+
+- name: Upload ACME SSH Public Key to Target VMs
+  hosts: "{{ acme_ssh_target_vms | join(',')}}"
+  gather_facts: true
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+  tasks:
+    - name: Ensure .ssh directory exists
+      ansible.builtin.file:
+        path: "/home/{{ ansible_facts['user_id'] }}/.ssh"
+        state: directory
+        owner: "{{ ansible_facts['user_id'] }}"
+        group: "{{ ansible_facts['user_id'] }}"
+        mode: "0700"
+      when: ansible_facts['user_id'] != 'root'
+
+    - name: Ensure .ssh directory exists for root
+      ansible.builtin.file:
+        path: "/root/.ssh"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: ansible_facts['user_id'] == 'root'
+
+    - name: Add OPNsense ACME public key to authorized_keys
+      ansible.posix.authorized_key:
+        user: "{{ ansible_facts['user_id'] }}"
+        state: present
+        key: "{{ hostvars['opnsense_vm']['opnsense_acme_pubkey'] }}"
+      register: authorized_key_result
+
+    - name: Display result
+      ansible.builtin.debug:
+        msg: "Public key {{ 'added' if authorized_key_result.changed else 'already present' }} for {{ inventory_hostname }}"

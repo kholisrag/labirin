@@ -50,8 +50,9 @@
           {{ install_dir }}
           {{ panel_port }}
           {{ panel_entrance | default('') }}
-          {{ panel_username }}
-          {{ panel_password }}
+          {{ panel_username | default('')}}
+          {{ panel_password | default('') }}
+
         mode: "0644"
       when: not onepanel_installed.stat.exists
 

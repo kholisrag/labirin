@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  name: cloudflare-tunnel-ingress-controller-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: eks-kloia-test
+  source:
+    chart: cloudflare-tunnel-ingress-controller
+    repoURL: https://helm.strrl.dev
+    targetRevision: 0.0.21
+    helm:
+      releaseName: cloudflare-tunnel-ingress-controller
+      valueFiles:
+        - secrets+age-import:///helm-secrets-private-keys/keys.txt?https://raw.githubusercontent.com/kholisrag/labirin/main/live/argocd/aws/eks/kloia-test/essentials/cluster-addons/cloudflare-tunnel-ingress-controller/secrets.enc.yaml
+      valuesObject:
+        fullnameOverride: cloudflare-tunnel-ingress-controller
+  destination:
+    name: in-cluster
+    namespace: cloudflare-tunnel-ingress-controller
+  syncPolicy:
+    automated:
+      selfHeal: true

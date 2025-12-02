@@ -1,0 +1,21 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: adservice
+  namespace: microservices-demo
+spec:
+  refreshInterval: "5s"
+  secretStoreRef:
+    name: vault
+    kind: ClusterSecretStore
+  target:
+    name: adservice-secrets
+  data:
+    - secretKey: username
+      remoteRef:
+        key: testing/config
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: testing/config
+        property: password

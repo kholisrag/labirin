@@ -1,0 +1,35 @@
+module "ecr" {
+  source  = "terraform-aws-modules/ecr/aws"
+  version = "3.1.0"
+
+  create                                           = var.create
+  tags                                             = var.tags
+  repository_type                                  = var.repository_type
+  region                                           = var.region
+  create_repository                                = var.create_repository
+  repository_name                                  = var.repository_name
+  repository_image_tag_mutability                  = var.repository_image_tag_mutability
+  repository_encryption_type                       = var.repository_encryption_type
+  repository_kms_key                               = var.repository_kms_key
+  repository_image_scan_on_push                    = var.repository_image_scan_on_push
+  repository_policy                                = var.repository_policy
+  repository_force_delete                          = var.repository_force_delete
+  repository_image_tag_mutability_exclusion_filter = var.repository_image_tag_mutability_exclusion_filter
+  attach_repository_policy                         = var.attach_repository_policy
+  create_repository_policy                         = var.create_repository_policy
+  repository_read_access_arns                      = var.repository_read_access_arns
+  repository_lambda_read_access_arns               = var.repository_lambda_read_access_arns
+  repository_read_write_access_arns                = var.repository_read_write_access_arns
+  repository_policy_statements                     = var.repository_policy_statements
+  create_lifecycle_policy                          = var.create_lifecycle_policy
+  repository_lifecycle_policy                      = var.repository_lifecycle_policy
+  public_repository_catalog_data                   = var.public_repository_catalog_data
+  create_registry_policy                           = var.create_registry_policy
+  registry_policy                                  = var.registry_policy
+  registry_pull_through_cache_rules                = var.registry_pull_through_cache_rules
+  manage_registry_scanning_configuration           = var.manage_registry_scanning_configuration
+  registry_scan_type                               = var.registry_scan_type
+  registry_scan_rules                              = var.registry_scan_rules
+  create_registry_replication_configuration        = var.create_registry_replication_configuration
+  registry_replication_rules                       = var.registry_replication_rules
+}

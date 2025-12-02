@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  name: vault-kustomization
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: eks-kloia-test
+  source:
+    repoURL: git@github.com:kholisrag/labirin.git
+    path: modules/argocd/vault-k8s/0.31.0
+    targetRevision: main
+  destination:
+    name: in-cluster
+    namespace: vault
+  syncPolicy:
+    automated:
+      selfHeal: true

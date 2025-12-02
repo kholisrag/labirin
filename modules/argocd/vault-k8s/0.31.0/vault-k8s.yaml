@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  name: vault-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: eks-kloia-test
+  source:
+    chart: vault
+    repoURL: https://helm.releases.hashicorp.com
+    targetRevision: 0.31.0
+    helm:
+      releaseName: vault
+      valuesObject:
+        ui:
+          enabled: true
+        server:
+          affinity: ""
+          ha:
+            enabled: true
+            raft:
+              enabled: true
+              setNodeId: true
+              config: |
+                ui = true
+                cluster_name = "vault-integrated-storage"
+                storage "raft" {
+                  path    = "/vault/data/"
+                }
+
+                listener "tcp" {
+                  address = "[::]:8200"
+                  cluster_address = "[::]:8201"
+                  tls_disable = "true"
+                }
+                service_registration "kubernetes" {}
+  destination:
+    name: in-cluster
+    namespace: vault
+  syncPolicy:
+    automated:
+      selfHeal: true
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[].clientConfig.caBundle

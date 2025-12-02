@@ -1,5 +1,6 @@
 # Generated files - should not be committed
 generated/
+extra-manifests/
 *.retry
 
 # Sensitive files - keep encrypted versions only

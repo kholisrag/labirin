@@ -1,0 +1,47 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  name: kubernetes-replicator-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: eks-kloia-test
+  source:
+    chart: kubernetes-replicator
+    repoURL: https://helm.mittwald.de
+    targetRevision: 2.12.1
+    helm:
+      releaseName: kubernetes-replicator
+      valuesObject:
+        args:
+          - -resync-period=30m
+          - -log-format=json
+          - -log-level=warn
+        serviceAccount:
+          create: true
+          annotations: {}
+          name: kubernetes-replicator
+          privileges:
+            - apiGroups: ["", "apps", "extensions"]
+              resources: ["secrets", "configmaps", "roles", "rolebindings"]
+              privileges: ["get", "list", "watch", "create", "update", "patch"]
+        resources:
+          limits:
+            cpu: 300m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 256Mi
+        labels:
+          app: "kubernetes-replicator"
+        podLabels:
+          app: "kubernetes-replicator"
+  destination:
+    name: in-cluster
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      selfHeal: true

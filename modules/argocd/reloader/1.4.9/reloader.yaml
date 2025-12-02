@@ -1,0 +1,47 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  name: reloader-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: eks-kloia-test
+  source:
+    chart: reloader
+    repoURL: https://stakater.github.io/stakater-charts
+    targetRevision: 2.2.3
+    helm:
+      releaseName: reloader
+      valuesObject:
+        fullnameOverride: reloader
+        image:
+          tag: v1.4.9
+        reloader:
+          readOnlyRootFileSystem: true
+          logFormat: json
+          watchGlobally: true
+          deployment:
+            labels:
+              provider: "stakater"
+              group: "com.stakater.platform"
+              version: "v1.1.0"
+              component: "app"
+              system: "reloader"
+              team: "lk6-infra"
+              service: "reloader"
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 10m
+                memory: 256Mi
+  destination:
+    name: in-cluster
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      selfHeal: true

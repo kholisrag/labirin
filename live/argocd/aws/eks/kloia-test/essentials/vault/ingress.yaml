@@ -1,0 +1,22 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cloudflare-tunnel-ingress-controller.strrl.dev/backend-protocol: "http"
+    cloudflare-tunnel-ingress-controller.strrl.dev/proxy-ssl-verify: "off"
+  name: vault
+  namespace: vault
+spec:
+  ingressClassName: cloudflare-tunnel
+  rules:
+    - host: vault-kloia-test.khol.is
+      http:
+        paths:
+          - backend:
+              service:
+                name: vault-ui
+                port:
+                  number: 8200
+            path: /
+            pathType: Prefix

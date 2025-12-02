@@ -1,0 +1,42 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cloudflare-tunnel-ingress-controller.strrl.dev/backend-protocol: "http"
+    cloudflare-tunnel-ingress-controller.strrl.dev/proxy-ssl-verify: "off"
+  name: monitoring
+  namespace: monitoring
+spec:
+  ingressClassName: cloudflare-tunnel
+  rules:
+    - host: grafana-kloia-test.khol.is
+      http:
+        paths:
+          - backend:
+              service:
+                name: kube-prometheus-stack-grafana
+                port:
+                  number: 80
+            path: /
+            pathType: Prefix
+    - host: alertmanager-kloia-test.khol.is
+      http:
+        paths:
+          - backend:
+              service:
+                name: kube-prometheus-stack-alertmanager
+                port:
+                  number: 9093
+            path: /
+            pathType: Prefix
+    - host: prometheus-kloia-test.khol.is
+      http:
+        paths:
+          - backend:
+              service:
+                name: kube-prometheus-stack-prometheus
+                port:
+                  number: 9090
+            path: /
+            pathType: Prefix

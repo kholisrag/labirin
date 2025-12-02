@@ -1,5 +1,5 @@
 ---
-- name: Centralized OPNsense Firewall Rules Management
+- name: Centralized OPNsense Firewall Rules and Aliases Management
   hosts: localhost
   gather_facts: false
 
@@ -22,22 +22,78 @@
       match_fields: "{{ opnsense_rule_match_fields | default(['description']) }}"
       reload: "{{ opnsense_reload | default(true) }}"
 
+    oxlorg.opnsense.alias_multi:
+      reload: "{{ opnsense_reload | default(true) }}"
+
   tasks:
     - name: Validate required variables
       ansible.builtin.assert:
         that:
           - opnsense_host is defined
-          - firewall_rule_groups is defined
+          - (firewall_rule_groups is defined) or (firewall_alias_groups is defined)
         fail_msg: "Required variables are missing. Please check vars/main.yaml"
       tags:
         - manage_rules
+        - manage_aliases
 
     - name: Display firewall being configured
       ansible.builtin.debug:
-        msg: "Configuring firewall rules on {{ opnsense_host }}"
+        msg: "Configuring firewall on {{ opnsense_host }}"
       tags:
         - manage_rules
+        - manage_aliases
 
+    # ===== ALIAS MANAGEMENT =====
+    - name: Manage firewall aliases by groups
+      oxlorg.opnsense.alias_multi:
+        aliases: "{{ item.aliases }}"
+        multi_control:
+          fail_verify: "{{ item.fail_verify | default(true) }}"
+          fail_processing: "{{ item.fail_processing | default(false) }}"
+          output_info: "{{ item.output_info | default(false) }}"
+          override: "{{ item.override | default(omit) }}"
+          state: "{{ item.state | default(omit) }}"
+          enabled: "{{ item.enabled | default(omit) }}"
+      loop: "{{ firewall_alias_groups | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default('Unnamed alias group') }}"
+      when:
+        - firewall_alias_groups is defined
+        - firewall_alias_groups | length > 0
+      tags:
+        - manage_aliases
+
+    - name: List existing firewall aliases
+      oxlorg.opnsense.list:
+        target: "alias"
+      register: existing_aliases
+      when: opnsense_list_aliases | default(false)
+      tags:
+        - list_aliases
+        - manage_aliases
+
+    - name: Display existing aliases
+      ansible.builtin.debug:
+        var: existing_aliases.data
+      when:
+        - opnsense_list_aliases | default(false)
+        - existing_aliases is defined
+      tags:
+        - list_aliases
+        - manage_aliases
+
+    # DANGEROUS: Purge non-configured aliases
+    - name: DANGEROUS | Purge non-configured aliases
+      oxlorg.opnsense.alias_multi:
+        aliases: "{{ (firewall_alias_groups | default([]) | map(attribute='aliases') | flatten) }}"
+        multi_control:
+          purge_all: true
+          filters: "{{ opnsense_alias_purge_filters | default(omit) }}"
+      when: opnsense_purge_unmanaged_firewall_aliases | default(false)
+      tags:
+        - purge_aliases
+
+    # ===== RULE MANAGEMENT =====
     - name: Manage firewall rules by groups
       oxlorg.opnsense.rule_multi:
         rules: "{{ item.rules }}"
@@ -83,6 +139,6 @@
         multi_control:
           purge_all: true
           filters: "{{ opnsense_purge_filters | default(omit) }}"
-      when: opnsense_purge_unmanaged | default(false)
+      when: opnsense_purge_unmanaged_firewall_rules | default(false)
       tags:
         - purge_rules

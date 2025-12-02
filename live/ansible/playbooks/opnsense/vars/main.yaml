@@ -8,6 +8,7 @@ opnsense_rule_match_fields: ["description"]
 opnsense_reload: true
 # Optional features
 opnsense_list_rules: true
+opnsense_list_aliases: true
 # Multi-control settings (used when managing all rules at once)
 firewall_multi_control:
   # Fail if rule verification fails
@@ -21,7 +22,8 @@ firewall_multi_control:
   #   interface: ['lan']
 
 # DANGEROUS: Set to true to remove rules not in this config
-opnsense_purge_unmanaged: false
+opnsense_purge_unmanaged_firewall_rules: false
+opnsense_purge_unmanaged_firewall_aliases: false
 # Purge filters (only used if opnsense_purge_unmanaged is true)
 # opnsense_purge_filters:
 #   ip_protocol: 'inet'
@@ -38,12 +40,10 @@ opnsense_list_vips: true
 ############ End Of Virtual IPs Configuration ############
 
 ############ Dnsmasq Host Overrides Configuration ############
-# Optional features
 opnsense_list_dnsmasq_hosts: true
 ############ End Of Dnsmasq Host Overrides Configuration ############
 
 ############ Unbound Host Overrides Configuration ############
-# Optional features
 opnsense_list_unbound_hosts: true
 opnsense_list_unbound_aliases: true
 ############ End Of Unbound Host Overrides Configuration ############

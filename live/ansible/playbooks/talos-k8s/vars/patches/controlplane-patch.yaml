@@ -1,7 +1,7 @@
 machine:
-  # Remove external load balancer exclusion label for MetalLB
   nodeLabels:
     node.kubernetes.io/pools: main-talos-master
+    # Remove external load balancer exclusion label for MetalLB
     node.kubernetes.io/exclude-from-external-load-balancers:
       $patch: delete
 cluster:

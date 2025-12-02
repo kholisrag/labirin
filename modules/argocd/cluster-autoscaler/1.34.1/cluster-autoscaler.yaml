@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  name: cluster-autoscaler-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: eks-kloia-test
+  source:
+    chart: cluster-autoscaler
+    repoURL: https://kubernetes.github.io/autoscaler
+    targetRevision: 9.52.1
+    helm:
+      releaseName: cluster-autoscaler
+      valuesObject:
+        autoDiscovery:
+          clusterName: "kloia-test"
+        rbac:
+          serviceAccount:
+            create: true
+            annotations:
+              eks.amazonaws.com/role-arn: "arn:aws:iam::888688231966:role/cluster-autoscaler-20251202151909385400000001"
+            name: "cluster-autoscaler"
+        awsRegion: "ap-southeast-1"
+        fullnameOverride: "cluster-autoscaler"
+        deployment:
+          annotations:
+            reloader.stakater.com/auto: "true"
+        nodeSelector:
+          kubernetes.io/os: linux
+        resources: {}
+  destination:
+    name: in-cluster
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      selfHeal: true

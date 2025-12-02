@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+  name: kube-state-metrics-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: eks-kloia-test
+  source:
+    chart: kube-state-metrics
+    repoURL: https://prometheus-community.github.io/helm-charts
+    targetRevision: 6.4.2
+    helm:
+      releaseName: kube-state-metrics
+      valuesObject:
+        fullnameOverride: kube-state-metrics
+        prometheusScrape: true
+        image:
+          tag: v2.17.0
+        extraArgs:
+          - --metric-labels-allowlist=cronjobs=[*],daemonsets=[*],deployments=[*],horizontalpodautoscalers=[*],nodes=[*],pods=[*],services=[*],statefulsets=[*]
+        rbac:
+          create: true
+        kubeRBACProxy:
+          enabled: false
+        releaseLabel: true
+  destination:
+    name: in-cluster
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      selfHeal: true

@@ -52,7 +52,7 @@ locals {
   memory = [
     {
       dedicated = 4096
-      floating  = 4096
+      floating  = 0
     }
   ]
   vga = [

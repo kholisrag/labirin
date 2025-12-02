@@ -77,7 +77,7 @@ inputs = {
       memory = [
         {
           dedicated = 16384
-          floating  = 8192
+          floating  = 0
         }
       ]
 

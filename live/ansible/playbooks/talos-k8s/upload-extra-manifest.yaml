@@ -65,6 +65,25 @@
             autoMount:
               enabled: false
             hostRoot: /sys/fs/cgroup
+          hubble:
+            ui:
+              enabled: true
+              rollOutPods: true
+            relay:
+              enabled: true
+              rollOutPods: true
+          bpf:
+            masquerade: true
+          endpointRoutes:
+            enabled: true
+          autoDirectNodeRoutes: true
+          localRedirectPolicies:
+            enabled: true
+          operator:
+            rollOutPods: true
+          envoy:
+            rollOutPods: true
+          rollOutCiliumPods: true
         custom_manifests: []
 
     # Additional manifests to include

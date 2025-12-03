@@ -1,0 +1,14 @@
+machine:
+  kubelet:
+    extraArgs:
+      rotate-server-certificates: "true"
+  nodeLabels:
+    node.kubernetes.io/pools: main-talos-worker
+
+cluster:
+  network:
+    # Disable default CNI to use Cillium
+    cni:
+      name: custom
+      urls:
+        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.0.yaml

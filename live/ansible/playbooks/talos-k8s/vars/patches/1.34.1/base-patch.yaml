@@ -10,6 +10,8 @@ machine:
       cloud-provider: external
       # Enable kubelet certificate rotation for metrics-server
       rotate-server-certificates: "true"
+      # Set max pods per node
+      max-pods: "110"
   seccompProfiles:
     - name: audit.json
       value:

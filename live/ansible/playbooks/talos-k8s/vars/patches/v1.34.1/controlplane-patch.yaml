@@ -1,0 +1,31 @@
+machine:
+  nodeLabels:
+    node.kubernetes.io/pools: main-talos-master
+    # Remove external load balancer exclusion label for MetalLB
+    node.kubernetes.io/exclude-from-external-load-balancers:
+      $patch: delete
+  features:
+    kubernetesTalosAPIAccess:
+      enabled: true
+      allowedRoles:
+        - os:reader
+      allowedKubernetesNamespaces:
+        - kube-system
+cluster:
+  # Allow workload scheduling on control plane nodes (for HA with fewer nodes)
+  allowSchedulingOnControlPlanes: true
+  etcd:
+    extraArgs:
+      # Expose etcd metrics endpoint
+      listen-metrics-urls: http://0.0.0.0:2381
+  externalCloudProvider:
+    enabled: true
+    manifests:
+      - https://static.internal.khol.is/talos-init/proxmox/proxmox-cloud-controller-manager-secrets.yaml
+      - https://static.internal.khol.is/talos-init/proxmox-cloud-controller-manager-v0.12.2.yaml
+      - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi.yaml
+      - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi-secrets.yaml
+  # Extra Manifests
+  extraManifests:
+    - https://static.internal.khol.is/talos-init/kubelet-serving-cert-approver-v0.10.0-ha.yaml
+    - https://static.internal.khol.is/talos-init/metrics-server-v0.8.0-ha.yaml

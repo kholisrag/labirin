@@ -49,7 +49,7 @@
 
 - name: Encrypt secrets bundle with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt {{ encrypted_dir }}/secrets.yaml
+    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/secrets.yaml
   when:
     - auto_encrypt | default(false)
     - secrets_check.stdout is defined
@@ -69,7 +69,7 @@
 
 - name: Encrypt talosconfig with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt {{ encrypted_dir }}/talosconfig
+    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/talosconfig
   when:
     - auto_encrypt | default(false)
     - talosconfig_check.stdout is defined
@@ -89,7 +89,7 @@
 
 - name: Encrypt controlplane config with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt {{ encrypted_dir }}/controlplane.yaml
+    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/controlplane.yaml
   when:
     - auto_encrypt | default(false)
     - controlplane_check.stdout is defined
@@ -109,7 +109,7 @@
 
 - name: Encrypt worker config with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt {{ encrypted_dir }}/worker.yaml
+    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/worker.yaml
   when:
     - auto_encrypt | default(false)
     - worker_check.stdout is defined

@@ -14,6 +14,7 @@ machine:
     - name: audit.json
       value:
         defaultAction: SCMP_ACT_LOG
+
 cluster:
   network:
     # Define pod and service subnets
@@ -21,11 +22,6 @@ cluster:
       - 10.32.0.0/16
     serviceSubnets:
       - 10.16.0.0/12
-    # Disable default CNI to use Cillium
-    cni:
-      name: custom
-      urls:
-        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.0.yaml
   proxy:
     # Disable kube-proxy to use Cillium Support Gateway API
     disabled: true

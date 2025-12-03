@@ -6,7 +6,14 @@ machine:
   # Enable kubelet certificate rotation for metrics-server
   kubelet:
     extraArgs:
+      # offload to external cloud provider: proxmox ccm
+      cloud-provider: external
+      # Enable kubelet certificate rotation for metrics-server
       rotate-server-certificates: "true"
+  seccompProfiles:
+    - name: audit.json
+      value:
+        defaultAction: SCMP_ACT_LOG
 cluster:
   network:
     # Define pod and service subnets
@@ -16,7 +23,9 @@ cluster:
       - 10.16.0.0/12
     # Disable default CNI to use Cillium
     cni:
-      name: none
+      name: custom
+      urls:
+        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.0.yaml
   proxy:
     # Disable kube-proxy to use Cillium Support Gateway API
     disabled: true

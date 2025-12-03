@@ -13,7 +13,9 @@
     controlplane_config_file: "{{ output_dir }}/controlplane.yaml"
     worker_config_file: "{{ output_dir }}/worker.yaml"
     encrypted_dir: "{{ playbook_dir }}/secrets"
-    patches_dir: "{{ playbook_dir }}/vars/patches"
+
+    kubernetes_version: "v1.34.1"
+    patches_dir: "{{ playbook_dir }}/vars/patches/{{ kubernetes_version }}"
 
   tasks:
     # ============================================
@@ -225,6 +227,7 @@
     - name: Generate base machine configurations
       ansible.builtin.command: |
         talosctl gen config {{ cluster_name }} https://{{ cluster_endpoint }}:6443 \
+          --kubernetes-version {{ kubernetes_version }} \
           --with-secrets {{ secrets_file }} \
           --output-dir {{ output_dir }} \
           {% if talos_factory_image_url is defined %}--install-image {{ talos_factory_image_url }} {% endif %} \

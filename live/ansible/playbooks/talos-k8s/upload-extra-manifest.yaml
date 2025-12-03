@@ -22,6 +22,12 @@
       - name: "metrics-server-v0.8.0"
         url: "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml"
         destination: "talos-init/metrics-server-v0.8.0.yaml"
+      - name: "proxmox-cloud-controller-manager"
+        url: "https://raw.githubusercontent.com/sergelogvinov/proxmox-cloud-controller-manager/refs/tags/v0.12.2/docs/deploy/cloud-controller-manager-talos.yml"
+        destination: "talos-init/proxmox-cloud-controller-manager-v0.12.2.yaml"
+      - name: "proxmox-csi-plugin"
+        url: "https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/refs/tags/v0.16.0/docs/deploy/proxmox-csi-plugin-talos.yml"
+        destination: "talos-init/proxmox-csi-plugin-v0.16.0.yaml"
 
     # Helm charts to template
     helm_charts:
@@ -63,9 +69,17 @@
 
     # Additional manifests to include
     local_manifests:
-      - name: "proxmox-csi-storage-class"
-        source: "{{ playbook_dir }}/vars/manifests/proxmox-csi-storage-class.yaml"
-        destination: "talos-init/proxmox/proxmox-csi-storage-class.yaml"
+      - name: "proxmox-ccm-secrets"
+        source: "{{ playbook_dir }}/vars/manifests/proxmox-ccm-secrets.enc.yaml"
+        destination: "talos-init/proxmox/proxmox-cloud-controller-manager-secrets.yaml"
+        encrypt: true
+      - name: "proxmox-csi"
+        source: "{{ playbook_dir }}/vars/manifests/proxmox-csi.yaml"
+        destination: "talos-init/proxmox/proxmox-csi.yaml"
+      - name: "proxmox-csi-secrets"
+        source: "{{ playbook_dir }}/vars/manifests/proxmox-csi-secrets.enc.yaml"
+        destination: "talos-init/proxmox/proxmox-csi-secrets.yaml"
+        encrypt: true
 
   tasks:
     - name: Create temporary working directory
@@ -84,7 +98,7 @@
         loop_var: item
         label: "{{ item.name }}"
 
-    - name: Copy local manifests to work directory
+    - name: Copy local manifests to work directory (unencrypted)
       ansible.builtin.copy:
         src: "{{ item.source }}"
         dest: "{{ work_dir }}/local-{{ item.name }}.yaml"
@@ -93,7 +107,21 @@
       loop_control:
         loop_var: item
         label: "{{ item.name }}"
-      when: local_manifests is defined and local_manifests | length > 0
+      when:
+        - local_manifests is defined and local_manifests | length > 0
+        - not (item.encrypt | default(false))
+
+    - name: Decrypt encrypted local manifests
+      ansible.builtin.shell: |
+        sops -d "{{ item.source }}" > "{{ work_dir }}/local-{{ item.name }}.yaml"
+      loop: "{{ local_manifests }}"
+      loop_control:
+        loop_var: item
+        label: "{{ item.name }}"
+      when:
+        - local_manifests is defined and local_manifests | length > 0
+        - item.encrypt | default(false)
+      changed_when: false
 
     - name: Add Helm repositories
       ansible.builtin.command:

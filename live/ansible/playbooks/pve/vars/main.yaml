@@ -104,6 +104,34 @@ pve_users:
       Sys.Modify
       Sys.Audit
 
+  - username: "kubernetes@pve"
+    role: "ProxmoxCCM"
+    password: "{{ proxmox_ccm_user_password }}"
+    token_name: "proxmoxccmtoken"
+    pve_privileges: >-
+      VM.Audit
+      Sys.Audit
+
+  - username: "kubernetes-csi@pve"
+    role: "ProxmoxCSI"
+    password: "{{ proxmox_csi_user_password }}"
+    token_name: "proxmoxcsitoken"
+    pve_privileges: >-
+      Sys.Audit
+      VM.Audit
+      VM.Allocate
+      VM.Clone
+      VM.Config.CPU
+      VM.Config.Disk
+      VM.Config.HWType
+      VM.Config.Memory
+      VM.Config.Options
+      VM.Migrate
+      VM.PowerMgmt
+      Datastore.Allocate
+      Datastore.AllocateSpace
+      Datastore.Audit
+
 cloud_images:
   - name: debian-13-genericcloud-amd64.qcow2
     url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2

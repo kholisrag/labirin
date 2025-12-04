@@ -1,8 +1,9 @@
 machine:
   nodeLabels:
-    # node labels for proxmoxproxmox-csi-plugin
-    topology.kubernetes.io/region: petruk-pve
-    topology.kubernetes.io/zone: petruk-pve0
+    # node labels for proxmox-csi-plugin
+    homelab.khol.is/proxmox-csi: "true"
+    homelab.khol.is/proxmox-ccm: "true"
+    homelab.khol.is/custom-coredns: "true"
   # Enable kubelet certificate rotation for metrics-server
   kubelet:
     extraArgs:

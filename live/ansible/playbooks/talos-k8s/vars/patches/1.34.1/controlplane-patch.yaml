@@ -1,11 +1,13 @@
 machine:
   nodeLabels:
-    node.kubernetes.io/pools: main-talos-master
+    # Label for Proxmox node pool identification
+    homelab.khol.is/proxmox-pools: main-talos-master
     # Remove external load balancer exclusion label for MetalLB
     node.kubernetes.io/exclude-from-external-load-balancers:
       $patch: delete
 
   features:
+    # Enable Talos Kubernetes API Access feature for Proxmox CCM
     kubernetesTalosAPIAccess:
       enabled: true
       allowedRoles:
@@ -16,28 +18,34 @@ machine:
 cluster:
   # Allow workload scheduling on control plane nodes (for HA with fewer nodes)
   allowSchedulingOnControlPlanes: true
-
+  coreDNS:
+    # Disable default CoreDNS to use custom one with OPNsense homelab configuration
+    disabled: true
+  etcd:
+    extraArgs:
+      # Expose etcd metrics endpoint
+      listen-metrics-urls: http://0.0.0.0:2381
   network:
     # Disable default CNI to use Cillium
     cni:
       name: custom
       urls:
-        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.0.yaml
-
-  etcd:
-    extraArgs:
-      # Expose etcd metrics endpoint
-      listen-metrics-urls: http://0.0.0.0:2381
-
+        # Cilium CNI for Talos
+        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.4.yaml
   externalCloudProvider:
     enabled: true
     manifests:
+      # Custom CoreDNS for Talos with OPNsense homelab configuration
+      - https://static.internal.khol.is/talos-init/coredns-custom-talos-opnsense-homelab-v1.13.1.yaml
+      # Proxmox CCM Access Secrets and Deployment
       - https://static.internal.khol.is/talos-init/proxmox/proxmox-cloud-controller-manager-secrets.yaml
       - https://static.internal.khol.is/talos-init/proxmox-cloud-controller-manager-v0.12.2.yaml
+      # Proxmox CSI Access Secrets and Deployment
       - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi.yaml
       - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi-secrets.yaml
-
-  # Extra Manifests
+      - https://static.internal.khol.is/talos-init/proxmox-csi-plugin-v0.16.0.yaml
   extraManifests:
+    # kubelet-serving-cert-approver for automatically approve rotate-server-certificates
     - https://static.internal.khol.is/talos-init/kubelet-serving-cert-approver-v0.10.0-ha.yaml
+    # metrics-server for cluster resource metrics
     - https://static.internal.khol.is/talos-init/metrics-server-v0.8.0-ha.yaml

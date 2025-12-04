@@ -1,9 +1,7 @@
 machine:
-  kubelet:
-    extraArgs:
-      rotate-server-certificates: "true"
   nodeLabels:
-    node.kubernetes.io/pools: main-talos-worker
+    # Label for Proxmox node pool identification
+    homelab.khol.is/proxmox-pools: main-talos-worker
 
 cluster:
   network:
@@ -11,4 +9,4 @@ cluster:
     cni:
       name: custom
       urls:
-        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.0.yaml
+        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.4.yaml

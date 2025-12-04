@@ -31,12 +31,13 @@
 
     # Helm charts to template
     helm_charts:
-      - name: "cilium-cni-talos-v1.18.0"
+      - name: "cilium-cni-talos-v1.18.4"
+        release_name: "cilium"
         chart: "cilium/cilium"
-        version: "1.18.0"
+        version: "1.18.4"
         namespace: "kube-system"
         repo_url: "https://helm.cilium.io/"
-        destination: "talos-init/talos-cni-cilium-v1.18.0.yaml"
+        destination: "talos-init/talos-cni-cilium-v1.18.4.yaml"
         values: |
           ipam:
             mode: kubernetes
@@ -90,6 +91,131 @@
           envoy:
             rollOutPods: true
           rollOutCiliumPods: true
+        custom_manifests: []
+
+      - name: "coredns-custom-talos-opnsense-homelab-v1.13.1"
+        release_name: "coredns"
+        chart: "coredns/coredns"
+        version: "1.45.0"
+        namespace: "kube-system"
+        repo_url: "https://coredns.github.io/helm"
+        destination: "talos-init/coredns-custom-talos-opnsense-homelab-v1.13.1.yaml"
+        values: |
+          image:
+            repository: coredns/coredns
+          replicaCount: 3
+          resources:
+            limits:
+              cpu: 200m
+              memory: 170Mi
+            requests:
+              cpu: 100m
+              memory: 70Mi
+          rollingUpdate:
+            maxUnavailable: 1
+            maxSurge: 0
+          prometheus:
+            service:
+              enabled: true
+              annotations:
+                prometheus.io/scrape: "true"
+                prometheus.io/port: "9153"
+          serviceAccount:
+            create: true
+            name: coredns
+          rbac:
+            create: true
+          isClusterService: true
+          service:
+            name: kube-dns
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "9153"
+          priorityClassName: "system-cluster-critical"
+          podSecurityContext: {}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - NET_BIND_SERVICE
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          nodeSelector:
+            kubernetes.io/os: linux
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - key: k8s-app
+                          operator: In
+                          values:
+                            - kube-dns
+                    topologyKey: kubernetes.io/hostname
+          tolerations:
+            - key: "node-role.kubernetes.io/control-plane"
+              operator: Exists
+              effect: NoSchedule
+            - key: "node.cloudprovider.kubernetes.io/uninitialized"
+              operator: Exists
+              effect: NoSchedule
+          servers:
+            - zones:
+                - zone: .
+              port: 53
+              plugins:
+                - name: errors
+                - name: health
+                  configBlock: |-
+                    lameduck 5s
+                - name: ready
+                - name: log
+                  parameters: .
+                  configBlock: |-
+                    class error
+                - name: prometheus
+                  parameters: :9153
+                - name: kubernetes
+                  parameters: cluster.local in-addr.arpa ip6.arpa
+                  configBlock: |-
+                    pods insecure
+                    fallthrough in-addr.arpa ip6.arpa
+                    ttl 30
+                - name: forward
+                  parameters: . 10.10.1.1 /etc/resolv.conf
+                  configBlock: |-
+                    max_concurrent 1000
+                    policy sequential
+                    health_check 5s
+                - name: cache
+                  parameters: 30
+                  configBlock: |-
+                    disable success cluster.local
+                    disable denial cluster.local
+                - name: loop
+                - name: reload
+                - name: loadbalance
+
+          livenessProbe:
+            enabled: true
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+            successThreshold: 1
+          readinessProbe:
+            enabled: true
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+            successThreshold: 1
+          env:
+            - name: GOMEMLIMIT
+              value: "161MiB"
         custom_manifests: []
 
     # Additional manifests to include
@@ -174,7 +300,7 @@
     - name: Generate Helm chart manifests
       ansible.builtin.command:
         cmd: >
-          helm template {{ item.name }} {{ item.chart }}
+          helm template {{ item.release_name }} {{ item.chart }}
           --version {{ item.version }}
           --namespace {{ item.namespace }}
           --values {{ work_dir }}/{{ item.name }}-values.yaml

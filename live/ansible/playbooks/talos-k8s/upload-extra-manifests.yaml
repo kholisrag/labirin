@@ -1,0 +1,195 @@
+---
+- name: Upload Extra K8s Manifests to Internal Static CDN
+  hosts: localhost
+  gather_facts: true
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  vars:
+    work_dir: "{{ playbook_dir }}/extra-manifests/k8s-manifests-{{ ansible_facts['date_time']['epoch'] }}"
+
+  tasks:
+    - name: Create temporary working directory
+      ansible.builtin.file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download remote manifests
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ work_dir }}/remote-{{ item.name }}.yaml"
+        mode: "0644"
+      loop: "{{ remote_manifests }}"
+      loop_control:
+        loop_var: item
+        label: "{{ item.name }}"
+
+    - name: Copy local manifests to work directory (unencrypted)
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        dest: "{{ work_dir }}/local-{{ item.name }}.yaml"
+        mode: "0644"
+      loop: "{{ local_manifests }}"
+      loop_control:
+        loop_var: item
+        label: "{{ item.name }}"
+      when:
+        - local_manifests is defined and local_manifests | length > 0
+        - not (item.encrypt | default(false))
+
+    - name: Decrypt encrypted local manifests
+      ansible.builtin.shell: |
+        sops -d "{{ item.source }}" > "{{ work_dir }}/local-{{ item.name }}.yaml"
+      loop: "{{ local_manifests }}"
+      loop_control:
+        loop_var: item
+        label: "{{ item.name }}"
+      when:
+        - local_manifests is defined and local_manifests | length > 0
+        - item.encrypt | default(false)
+      changed_when: false
+
+    - name: Add Helm repositories
+      ansible.builtin.command:
+        cmd: helm repo add {{ item.repo_name }} {{ item.repo_url }}
+      loop: "{{ helm_charts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: not (item.oci | default(false))
+      changed_when: false
+      failed_when: false
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        cmd: helm repo update
+      changed_when: false
+
+    - name: Create Helm values files
+      ansible.builtin.copy:
+        dest: "{{ work_dir }}/{{ item.name }}-values.yaml"
+        content: "{{ item['values'] }}"
+        mode: "0644"
+      loop: "{{ helm_charts }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Generate Helm chart manifests
+      ansible.builtin.command:
+        cmd: >
+          helm template {{ item.release_name }} {{ item.chart }}
+          --version {{ item.version }}
+          --namespace {{ item.namespace }}
+          --values {{ work_dir }}/{{ item.name }}-values.yaml
+      loop: "{{ helm_charts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: helm_manifests
+      changed_when: false
+
+    - name: Create custom manifests for each helm chart
+      ansible.builtin.copy:
+        dest: "{{ work_dir }}/{{ item.0.name }}-custom.yaml"
+        content: "{{ item.1.content }}"
+        mode: "0644"
+      loop: "{{ helm_charts | subelements('custom_manifests', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} - {{ item.1.name }}"
+
+    - name: Save Helm generated manifests to temp files
+      ansible.builtin.copy:
+        dest: "{{ work_dir }}/{{ item.item.name }}-helm-output.yaml"
+        content: "{{ item.stdout }}"
+        mode: "0644"
+      loop: "{{ helm_manifests.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Combine custom manifests and helm output for each chart
+      ansible.builtin.shell: |
+        set -o pipefail
+        OUTPUT_FILE="{{ work_dir }}/helm-{{ item.name }}.yaml"
+        HELM_OUTPUT="{{ work_dir }}/{{ item.name }}-helm-output.yaml"
+        CUSTOM_MANIFEST="{{ work_dir }}/{{ item.name }}-custom.yaml"
+
+        # Start with empty file
+        > "$OUTPUT_FILE"
+
+        # Add custom manifest if it exists
+        if [ -f "$CUSTOM_MANIFEST" ]; then
+          cat "$CUSTOM_MANIFEST" >> "$OUTPUT_FILE"
+          echo "" >> "$OUTPUT_FILE"
+        fi
+
+        # Add helm generated manifest
+        cat "$HELM_OUTPUT" >> "$OUTPUT_FILE"
+      args:
+        executable: /bin/bash
+      loop: "{{ helm_charts }}"
+      loop_control:
+        loop_var: item
+        label: "{{ item.name }}"
+      changed_when: false
+
+    - name: Build manifest to destination mapping
+      ansible.builtin.set_fact:
+        manifest_map: |
+          {% set result = [] %}
+          {% for item in remote_manifests %}
+          {{ result.append({'local': work_dir ~ '/remote-' ~ item.name ~ '.yaml', 'remote': item.destination}) or '' }}
+          {% endfor %}
+          {% for item in (local_manifests | default([])) %}
+          {{ result.append({'local': work_dir ~ '/local-' ~ item.name ~ '.yaml', 'remote': item.destination}) or '' }}
+          {% endfor %}
+          {% for item in helm_charts %}
+          {{ result.append({'local': work_dir ~ '/helm-' ~ item.name ~ '.yaml', 'remote': item.destination}) or '' }}
+          {% endfor %}
+          {{ result }}
+
+    - name: Parse manifest mapping
+      ansible.builtin.set_fact:
+        manifest_map: "{{ manifest_map | from_yaml }}"
+
+    - name: Display files to be uploaded
+      ansible.builtin.debug:
+        msg: "Uploading {{ manifest_map | length }} manifest files to {{ static_cdn_internal_pve_vm_name }}"
+
+    - name: Ensure destination directories exist on remote host
+      ansible.builtin.file:
+        path: "{{ static_cdn_internal_dir_path }}/{{ item.remote | dirname }}"
+        state: directory
+        mode: "0775"
+        owner: "{{ static_cdn_internal_user }}"
+        group: "{{ static_cdn_internal_user }}"
+      delegate_to: "{{ static_cdn_internal_pve_vm_name }}"
+      become: true
+      loop: "{{ manifest_map }}"
+      loop_control:
+        label: "{{ item.remote | dirname }}"
+
+    - name: Upload manifests to remote host using destination paths
+      ansible.builtin.copy:
+        src: "{{ item.local }}"
+        dest: "{{ static_cdn_internal_dir_path }}/{{ item.remote }}"
+        mode: "0644"
+        owner: "{{ static_cdn_internal_user }}"
+        group: "{{ static_cdn_internal_user }}"
+      delegate_to: "{{ static_cdn_internal_pve_vm_name }}"
+      become: true
+      loop: "{{ manifest_map }}"
+      loop_control:
+        label: "{{ item.remote }}"
+
+    - name: Display upload completion message
+      ansible.builtin.debug:
+        msg:
+          - "✅ Manifests uploaded successfully to {{ static_cdn_internal_pve_vm_name }}:{{ static_cdn_internal_dir_path }}"
+          - "📋 Individual manifests ({{ manifest_map | length }} files):"
+          - "{% for item in manifest_map %}  - https://{{ static_cdn_internal_domain }}/{{ item.remote }}{% endfor %}"
+
+    - name: Cleanup temporary directory (optional)
+      ansible.builtin.file:
+        path: "{{ work_dir }}"
+        state: absent
+      when: cleanup_temp | default(true) | bool

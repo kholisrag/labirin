@@ -76,11 +76,17 @@
             masquerade: true
           endpointRoutes:
             enabled: true
-          autoDirectNodeRoutes: true
           localRedirectPolicies:
             enabled: true
           operator:
             rollOutPods: true
+            tolerations:
+              - key: "node-role.kubernetes.io/control-plane"
+                operator: Exists
+              - key: "node.kubernetes.io/not-ready"
+                operator: Exists
+              - key: "node.cloudprovider.kubernetes.io/uninitialized"
+                operator: Exists
           envoy:
             rollOutPods: true
           rollOutCiliumPods: true

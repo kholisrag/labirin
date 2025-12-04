@@ -69,7 +69,9 @@ locals {
       pre_enrolled_keys = false
     }
   ]
-  boot_order = ["ide2", "scsi0"]
+  # Commented after successfully init talos cluster
+  # boot_order = ["ide2", "scsi0"]
+  boot_order = ["scsi0"]
   disk = [
     {
       interface    = "scsi0"
@@ -140,9 +142,12 @@ inputs = {
       boot_order          = local.boot_order
       disk                = local.disk
       cdrom = [
-        merge(local.cdrom_base, {
-          file_id = dependency.iso_images.outputs.download_file_output["talos"].id
-        })
+        merge(
+          local.cdrom_base,
+          {
+            file_id = "none" # dependency.iso_images.outputs.download_file_output["talos"].id
+          }
+        )
       ]
       serial_device = local.serial_device
       rng           = local.rng
@@ -171,9 +176,12 @@ inputs = {
       boot_order          = local.boot_order
       disk                = local.disk
       cdrom = [
-        merge(local.cdrom_base, {
-          file_id = dependency.iso_images.outputs.download_file_output["talos"].id
-        })
+        merge(
+          local.cdrom_base,
+          {
+            file_id = "none" # dependency.iso_images.outputs.download_file_output["talos"].id
+          }
+        )
       ]
       serial_device = local.serial_device
       rng           = local.rng
@@ -202,9 +210,12 @@ inputs = {
       boot_order          = local.boot_order
       disk                = local.disk
       cdrom = [
-        merge(local.cdrom_base, {
-          file_id = dependency.iso_images.outputs.download_file_output["talos"].id
-        })
+        merge(
+          local.cdrom_base,
+          {
+            file_id = "none" # dependency.iso_images.outputs.download_file_output["talos"].id
+          }
+        )
       ]
       serial_device = local.serial_device
       rng           = local.rng

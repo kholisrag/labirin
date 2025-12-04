@@ -27,6 +27,7 @@ cluster:
       listen-metrics-urls: http://0.0.0.0:2381
   network:
     # Disable default CNI to use Cillium
+    # need to specify custom CNI manifest below on both controlplane and worker talos patches, and cannot in base patch
     cni:
       name: custom
       urls:
@@ -37,6 +38,8 @@ cluster:
     manifests:
       # Custom CoreDNS for Talos with OPNsense homelab configuration
       - https://static.internal.khol.is/talos-init/coredns-custom-talos-opnsense-homelab-v1.13.1.yaml
+      # Talos CCM
+      - https://static.internal.khol.is/talos-init/talos-cloud-controller-manager-proxmox-v0.5.2.yaml
       # Proxmox CCM Access Secrets and Deployment
       - https://static.internal.khol.is/talos-init/proxmox/proxmox-cloud-controller-manager-secrets.yaml
       - https://static.internal.khol.is/talos-init/proxmox-cloud-controller-manager-v0.12.2.yaml

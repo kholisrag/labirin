@@ -1,11 +1,14 @@
 machine:
   nodeLabels:
-    # node labels for proxmox-csi-plugin
+    # node labels for convenience
     homelab.khol.is/proxmox-csi: "true"
     homelab.khol.is/proxmox-ccm: "true"
     homelab.khol.is/custom-coredns: "true"
   # Enable kubelet certificate rotation for metrics-server
   kubelet:
+    # Explicitly set clusterDNS to match custom coredns service
+    clusterDNS:
+      - 10.16.0.10
     extraArgs:
       # offload to external cloud provider: proxmox ccm
       cloud-provider: external
@@ -13,6 +16,7 @@ machine:
       rotate-server-certificates: "true"
       # Set max pods per node
       max-pods: "110"
+  # Add seccomp profile for auditing
   seccompProfiles:
     - name: audit.json
       value:
@@ -24,6 +28,8 @@ cluster:
     podSubnets:
       - 10.32.0.0/16
     serviceSubnets:
+      # Don't forget to update CoreDNS clusterIP accordingly
+      # Check more in upload-extra-manifest.yaml ansible playbook
       - 10.16.0.0/12
   proxy:
     # Disable kube-proxy to use Cillium Support Gateway API

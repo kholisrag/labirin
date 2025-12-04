@@ -6,6 +6,7 @@ machine:
 cluster:
   network:
     # Disable default CNI to use Cillium
+    # need to specify custom CNI manifest below on both controlplane and worker talos patches, and cannot in base patch
     cni:
       name: custom
       urls:

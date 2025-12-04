@@ -225,6 +225,31 @@
     # ============================================
     # STEP 4: Generate machine configurations
     # ============================================
+    - name: Check if configuration files already exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ controlplane_config_file }}"
+        - "{{ worker_config_file }}"
+        - "{{ talosconfig_file }}"
+      register: config_files_stat
+      tags:
+        - generate
+        - config
+
+    - name: Delete existing configuration files before regenerating
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ controlplane_config_file }}"
+        - "{{ worker_config_file }}"
+        - "{{ talosconfig_file }}"
+      when: config_files_stat.results | selectattr('stat.exists') | list | length > 0
+      tags:
+        - generate
+        - config
+
     - name: Generate base machine configurations
       ansible.builtin.command: |
         talosctl gen config {{ cluster_name }} https://{{ cluster_endpoint }}:6443 \
@@ -237,8 +262,7 @@
           --config-patch-worker @{{ patches_dir }}/worker-patch.yaml \
           {% if additional_sans is defined and additional_sans | length > 0 %}--additional-sans {{ additional_sans | join(',') }} {% endif %} \
           --force
-      args:
-        creates: "{{ controlplane_config_file }}"
+      changed_when: true
       tags:
         - generate
         - config
@@ -474,7 +498,10 @@
       ansible.builtin.command: |
         kubectl get nodes
       register: nodes_status
-      until: nodes_status.rc == 0 and nodes_status.stdout.find('NotReady') == -1
+      until: >-
+        nodes_status.rc == 0 and
+        'NotReady' not in nodes_status.stdout and
+        (nodes_status.stdout_lines | select('search', 'Ready') | list | length) >= (master_hosts | length + (worker_hosts | default([]) | length))
       retries: 60
       delay: 30
       changed_when: false

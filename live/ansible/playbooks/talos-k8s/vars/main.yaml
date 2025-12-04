@@ -241,8 +241,35 @@ helm_charts:
         # - cloud-node-lifecycle is handled by proxmox-ccm
       # Ref: https://github.com/siderolabs/talos-cloud-controller-manager/blob/main/docs/config.md
       transformations:
+        # Transformation for all talos master nodes in proxmox
+        - name: proxmox-main-talos-master-nodes
+          nodeSelector:
+            - matchExpressions:
+                # Match Talos nodes running on Proxmox platform
+                - key: platform
+                  operator: In
+                  values:
+                    - nocloud
+                # Match nodes with talos hostname pattern
+                - key: hostname
+                  operator: Regexp
+                  values:
+                    - ^main-talos-master-.+$
+          # Add worker role label
+          labels:
+            node-role.kubernetes.io/control-plane: ""
+          # Set platform metadata
+          platformMetadata:
+            # set region to match proxmox cluster name
+            Region: "petruk-pve"
+            # set zone to match proxmox node name
+            Zone: "petruk-pve0"
+            # Set providerID for Proxmox CSI to identify VMs
+            ProviderID: "proxmox://petruk-pve/{{ '{{' }} .UUID {{ '}}' }}"
+          features:
+            publicIPDiscovery: false
         # Transformation for all talos non-master nodes in proxmox
-        - name: proxmox-talos-nodes
+        - name: proxmox-main-talos-worker-nodes
           nodeSelector:
             - matchExpressions:
                 # Match Talos nodes running on Proxmox platform

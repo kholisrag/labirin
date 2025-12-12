@@ -17,5 +17,6 @@
     "editor.formatOnSave": true,
     "editor.formatOnSaveMode": "file"
   },
-  "ansible.mcpServer.enabled": true
+  "ansible.mcpServer.enabled": true,
+  "ansible.python.interpreterPath": "/Users/petrukngantuk/go/src/github.com/kholisrag/labirin/.labirin_venv/bin/python"
 }

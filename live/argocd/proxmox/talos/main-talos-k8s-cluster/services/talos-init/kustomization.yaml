@@ -2,4 +2,18 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.4.yaml
+  # Custom CoreDNS for Talos with OPNsense homelab configuration
+  - https://static.internal.khol.is/talos-init/coredns-custom-talos-opnsense-homelab-v1.13.1.yaml
+  # Talos CCM
+  - https://static.internal.khol.is/talos-init/talos-cloud-controller-manager-proxmox-v0.5.2.yaml
+  # Proxmox CCM Access Secrets and Deployment
+  - https://static.internal.khol.is/talos-init/proxmox/proxmox-cloud-controller-manager-secrets.yaml
+  - https://static.internal.khol.is/talos-init/proxmox-cloud-controller-manager-v0.12.2.yaml
+  # Proxmox CSI Access Secrets and Deployment
+  - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi.yaml
+  - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi-secrets.yaml
+  - https://static.internal.khol.is/talos-init/proxmox-csi-plugin-v0.16.0.yaml
+  # kubelet-serving-cert-approver for automatically approve rotate-server-certificates
+  - https://static.internal.khol.is/talos-init/kubelet-serving-cert-approver-v0.10.0-ha.yaml
+  # metrics-server for cluster resource metrics
+  - https://static.internal.khol.is/talos-init/metrics-server-v0.8.0-ha.yaml

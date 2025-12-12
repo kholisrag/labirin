@@ -3,7 +3,7 @@ kind: Application
 metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
-  name: essentials-kustomization
+  name: services-kustomization
   namespace: argocd
   finalizers:
     - resources-finalizer.argocd.argoproj.io

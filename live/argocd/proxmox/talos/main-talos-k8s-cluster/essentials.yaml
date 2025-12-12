@@ -11,7 +11,7 @@ spec:
   project: proxmox-talos-main-talos-cluster
   source:
     repoURL: git@github.com:kholisrag/labirin.git
-    path: live/argocd/proxmox/talos/main-talos-cluster/essentials
+    path: live/argocd/proxmox/talos/main-talos-k8s-cluster/essentials
     targetRevision: main
   destination:
     name: in-cluster

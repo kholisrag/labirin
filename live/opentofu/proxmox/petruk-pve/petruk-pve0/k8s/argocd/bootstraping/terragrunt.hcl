@@ -9,7 +9,7 @@ locals {
   }
 
   argocd_image_repository = "ghcr.io/kholisrag/argocd-ksops-helm-secrets"
-  argocd_image_tag        = "v3.2.1-669b755"
+  argocd_image_tag        = "v3.2.1-2df5573"
 }
 
 terraform {

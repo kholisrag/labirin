@@ -4,8 +4,8 @@
     "https://raw.githubusercontent.com/canonical/cloud-init/main/cloudinit/config/schemas/versions.schema.cloud-config.json": "**/cloudinit/*.{yml,yaml}"
   },
   "files.associations": {
-    "live/ansible/**/*.yaml": "ansible",
-    "live/ansible/**/*.yml": "ansible",
+    "**/live/ansible/**/*.yaml": "ansible",
+    "**/live/ansible/**/*.yml": "ansible",
     "*.hcl": "opentofu",
     "*.tf": "opentofu",
     "*.tfvars": "opentofu",
@@ -16,5 +16,6 @@
     "editor.defaultFormatter": "opentofu.vscode-opentofu",
     "editor.formatOnSave": true,
     "editor.formatOnSaveMode": "file"
-  }
+  },
+  "ansible.mcpServer.enabled": true
 }

@@ -57,7 +57,8 @@
           - "This script will be automatically triggered by OPNsense ACME Automation"
           - ""
           - "To manually test the upload, run:"
-          - "  ansible-playbook acme-cert-updater.yaml -e run_upload=true"
+          - "  ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel
+            live/ansible/playbooks/1panel/acme-cert-updater.yaml -e run_upload=true"
           - ""
           - "Or SSH to the host and run:"
           - "  {{ uploader_script }}"

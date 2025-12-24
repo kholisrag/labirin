@@ -6,6 +6,20 @@
 # Talos configuration files from encrypted storage
 # ============================================
 
+- name: Find repository root
+  ansible.builtin.command:
+    cmd: git rev-parse --show-toplevel
+  register: repo_root_result
+  changed_when: false
+  tags:
+    - decrypt
+
+- name: Set repository root fact
+  ansible.builtin.set_fact:
+    repo_root: "{{ repo_root_result.stdout }}"
+  tags:
+    - decrypt
+
 - name: Check if encrypted secrets exist
   ansible.builtin.stat:
     path: "{{ encrypted_dir }}/{{ item }}"
@@ -39,7 +53,7 @@
 
 - name: Decrypt secrets bundle with ansible-vault
   ansible.builtin.command: |
-    ansible-vault decrypt {{ encrypted_dir }}/secrets.yaml --output={{ output_dir }}/secrets.yaml
+    ansible-vault decrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/secrets.yaml --output={{ output_dir }}/secrets.yaml
   when:
     - encrypted_files_check.results[0].stat.exists
     - secrets_encrypted_check.stdout is defined
@@ -72,7 +86,7 @@
 
 - name: Decrypt talosconfig with ansible-vault
   ansible.builtin.command: |
-    ansible-vault decrypt {{ encrypted_dir }}/talosconfig --output={{ output_dir }}/talosconfig
+    ansible-vault decrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/talosconfig --output={{ output_dir }}/talosconfig
   when:
     - encrypted_files_check.results[1].stat.exists
     - talosconfig_encrypted_check.stdout is defined
@@ -105,7 +119,7 @@
 
 - name: Decrypt controlplane config with ansible-vault
   ansible.builtin.command: |
-    ansible-vault decrypt {{ encrypted_dir }}/controlplane.yaml --output={{ output_dir }}/controlplane.yaml
+    ansible-vault decrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/controlplane.yaml --output={{ output_dir }}/controlplane.yaml
   when:
     - encrypted_files_check.results[2].stat.exists
     - controlplane_encrypted_check.stdout is defined
@@ -138,7 +152,7 @@
 
 - name: Decrypt worker config with ansible-vault
   ansible.builtin.command: |
-    ansible-vault decrypt {{ encrypted_dir }}/worker.yaml --output={{ output_dir }}/worker.yaml
+    ansible-vault decrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/worker.yaml --output={{ output_dir }}/worker.yaml
   when:
     - encrypted_files_check.results[3].stat.exists
     - worker_encrypted_check.stdout is defined

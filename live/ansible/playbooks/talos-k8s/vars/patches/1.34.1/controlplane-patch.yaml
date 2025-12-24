@@ -46,7 +46,7 @@ cluster:
       # Proxmox CSI Access Secrets and Deployment
       - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi.yaml
       - https://static.internal.khol.is/talos-init/proxmox/proxmox-csi-secrets.yaml
-      - https://static.internal.khol.is/talos-init/proxmox-csi-plugin-v0.16.0.yaml
+      - https://static.internal.khol.is/talos-init/proxmox-csi-plugin-v0.17.0.yaml
   extraManifests:
     # kubelet-serving-cert-approver for automatically approve rotate-server-certificates
     - https://static.internal.khol.is/talos-init/kubelet-serving-cert-approver-v0.10.0-ha.yaml

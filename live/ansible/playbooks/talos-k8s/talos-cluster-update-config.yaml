@@ -1,0 +1,326 @@
+---
+- name: Update Talos Kubernetes Cluster Configuration
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  vars:
+    output_dir: "{{ playbook_dir }}/generated"
+    secrets_file: "{{ output_dir }}/secrets.yaml"
+    talosconfig_file: "{{ output_dir }}/talosconfig"
+    controlplane_config_file: "{{ output_dir }}/controlplane.yaml"
+    worker_config_file: "{{ output_dir }}/worker.yaml"
+
+    kubernetes_version: "1.34.1"
+    patches_dir: "{{ playbook_dir }}/vars/patches/{{ kubernetes_version }}"
+
+  tasks:
+    # ============================================
+    # STEP 1: Pre-flight checks
+    # ============================================
+    - name: Check required files exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ secrets_file }}"
+        - "{{ talosconfig_file }}"
+      register: required_files
+      tags:
+        - always
+
+    - name: Fail if required files are missing
+      ansible.builtin.fail:
+        msg: "Required file {{ item.item }} not found. Run talos-cluster-init.yaml first."
+      when: not item.stat.exists
+      loop: "{{ required_files.results }}"
+      tags:
+        - always
+
+    - name: Ensure talosconfig is loaded
+      ansible.builtin.command: |
+        talosctl config merge {{ talosconfig_file }}
+      changed_when: false
+      tags:
+        - always
+
+    - name: Configure talosctl endpoints
+      ansible.builtin.command: |
+        talosctl config endpoint {{ master_hosts | map(attribute='ip') | join(' ') }}
+      changed_when: false
+      tags:
+        - always
+
+    - name: Display cluster configuration
+      ansible.builtin.debug:
+        msg:
+          - "Cluster Name: {{ cluster_name }}"
+          - "Cluster Endpoint: {{ cluster_endpoint }}"
+          - "Master Nodes: {{ master_hosts | length }}"
+          - "Kubernetes Version: {{ kubernetes_version }}"
+      tags:
+        - always
+
+    # ============================================
+    # STEP 2: Regenerate machine configurations with new patches
+    # ============================================
+    - name: Backup existing configuration files
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ item }}.backup-{{ lookup('pipe', 'date +%s') }}"
+        mode: "0600"
+        remote_src: true
+      loop:
+        - "{{ controlplane_config_file }}"
+        - "{{ worker_config_file }}"
+      when: item is file
+      failed_when: false
+      tags:
+        - generate
+        - config
+
+    - name: Delete existing configuration files before regenerating
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ controlplane_config_file }}"
+        - "{{ worker_config_file }}"
+      tags:
+        - generate
+        - config
+
+    - name: Regenerate machine configurations with updated patches
+      ansible.builtin.command: |
+        talosctl gen config {{ cluster_name }} https://{{ cluster_endpoint }}:6443 \
+          --kubernetes-version {{ kubernetes_version }} \
+          --with-secrets {{ secrets_file }} \
+          --output-dir {{ output_dir }} \
+          {% if talos_factory_image_url is defined %}--install-image {{ talos_factory_image_url }} {% endif %} \
+          --config-patch @{{ patches_dir }}/base-patch.yaml \
+          --config-patch-control-plane @{{ patches_dir }}/controlplane-patch.yaml \
+          --config-patch-worker @{{ patches_dir }}/worker-patch.yaml \
+          {% if additional_sans is defined and additional_sans | length > 0 %}--additional-sans {{ additional_sans | join(',') }} {% endif %} \
+          --force
+      changed_when: true
+      tags:
+        - generate
+        - config
+
+    # ============================================
+    # STEP 3: Apply updated configuration to nodes
+    # ============================================
+    - name: Apply updated controlplane configuration to master nodes
+      ansible.builtin.command: |
+        talosctl apply machineconfig \
+          --nodes {{ item.ip }} \
+          --file {{ controlplane_config_file }}
+      loop: "{{ master_hosts }}"
+      register: apply_result
+      until: apply_result.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: true
+      tags:
+        - apply
+        - controlplane
+
+    - name: Wait for master nodes to apply configuration
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting for master nodes to apply new configuration..."
+      tags:
+        - apply
+        - controlplane
+
+    - name: Verify master nodes are healthy
+      ansible.builtin.command: |
+        talosctl health --nodes {{ item.ip }}
+      loop: "{{ master_hosts }}"
+      register: health_check
+      until: health_check.rc == 0
+      retries: 10
+      delay: 15
+      changed_when: false
+      failed_when: false
+      tags:
+        - apply
+        - verify
+
+    # ============================================
+    # STEP 3.5: Discover worker nodes from Proxmox
+    # ============================================
+    - name: Get all VMs from Proxmox cluster
+      ansible.builtin.command: |
+        pvesh get /cluster/resources --type vm --output-format json
+      register: all_vms_raw
+      when: use_dynamic_worker_discovery | default(true)
+      delegate_to: "{{ pve_node }}"
+      changed_when: false
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Parse VMs and filter by worker tag
+      ansible.builtin.set_fact:
+        worker_vms: >-
+          {{
+            (all_vms_raw.stdout | from_json)
+            | selectattr('status', 'equalto', 'running')
+            | selectattr('tags', 'defined')
+            | selectattr('tags', 'search', worker_node_tag)
+            | list
+          }}
+      when:
+        - use_dynamic_worker_discovery | default(true)
+        - all_vms_raw.stdout is defined
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Get IP addresses for worker VMs
+      ansible.builtin.shell: |
+        set -o pipefail
+        pvesh get /nodes/{{ item.node }}/qemu/{{ item.vmid }}/agent/network-get-interfaces --output-format json 2>/dev/null || echo '{}'
+      loop: "{{ worker_vms | default([]) }}"
+      register: worker_network_info
+      when:
+        - use_dynamic_worker_discovery | default(true)
+        - worker_vms is defined
+        - worker_vms | length > 0
+      delegate_to: "{{ pve_node }}"
+      changed_when: false
+      failed_when: false
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Convert worker IPs to structured list with VMID
+      ansible.builtin.set_fact:
+        worker_hosts: >
+          {%- set result = [] -%}
+          {%- for net_result in worker_network_info.results | default([]) -%}
+            {%- if net_result.stdout is defined -%}
+              {%- set net_data = net_result.stdout | from_json -%}
+              {%- for iface in net_data.result | default([]) -%}
+                {%- if iface.name != 'lo' -%}
+                  {%- for ip_addr in iface['ip-addresses'] | default([]) -%}
+                    {%- if ip_addr['ip-address-type'] == 'ipv4' -%}
+                      {%- set _ = result.append({'ip': ip_addr['ip-address'], 'vm_id': net_result.item.vmid, 'node': net_result.item.node}) -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+      when:
+        - use_dynamic_worker_discovery | default(true)
+        - worker_network_info.results is defined
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Display discovered worker nodes
+      ansible.builtin.debug:
+        msg:
+          - "Dynamic worker discovery: {{ 'Enabled' if use_dynamic_worker_discovery | default(true) else 'Disabled' }}"
+          - "Worker tag: {{ worker_node_tag }}"
+          - "Discovered worker nodes: {{ (worker_hosts | default([])) | length }}"
+          - "Worker IPs: {{ (worker_hosts | default([])) | map(attribute='ip') | join(', ') if worker_hosts is defined else 'None' }}"
+      when: use_dynamic_worker_discovery | default(true)
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Apply updated worker configuration to worker nodes
+      ansible.builtin.command: |
+        talosctl apply machineconfig \
+          --nodes {{ item.ip }} \
+          --file {{ worker_config_file }}
+      loop: "{{ worker_hosts | default([]) }}"
+      when: worker_hosts is defined and worker_hosts | length > 0
+      register: apply_worker_result
+      until: apply_worker_result.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: true
+      tags:
+        - apply
+        - worker
+
+    - name: Wait for worker nodes to apply configuration
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting for worker nodes to apply new configuration..."
+      when: worker_hosts is defined and worker_hosts | length > 0
+      tags:
+        - apply
+        - worker
+
+    - name: Verify worker nodes are healthy
+      ansible.builtin.command: |
+        talosctl health --nodes {{ item.ip }}
+      loop: "{{ worker_hosts | default([]) }}"
+      when: worker_hosts is defined and worker_hosts | length > 0
+      register: worker_health_check
+      until: worker_health_check.rc == 0
+      retries: 10
+      delay: 15
+      changed_when: false
+      failed_when: false
+      tags:
+        - apply
+        - verify
+
+    # ============================================
+    # STEP 4: Verify cluster health
+    # ============================================
+    - name: Wait for all nodes to be ready
+      ansible.builtin.command: |
+        kubectl get nodes
+      register: nodes_status
+      until: >-
+        nodes_status.rc == 0 and
+        'NotReady' not in nodes_status.stdout and
+        (nodes_status.stdout_lines | select('search', 'Ready') | list | length) >= (master_hosts | length + (worker_hosts | default([]) | length))
+      retries: 30
+      delay: 20
+      changed_when: false
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Display cluster nodes
+      ansible.builtin.command: |
+        kubectl get nodes -o wide
+      register: nodes_output
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Show nodes status
+      ansible.builtin.debug:
+        var: nodes_output.stdout_lines
+      tags:
+        - verify
+
+    # ============================================
+    # STEP 5: Display summary
+    # ============================================
+    - name: Display update summary
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Talos Cluster Configuration Updated!"
+          - "========================================"
+          - ""
+          - "Cluster Name: {{ cluster_name }}"
+          - "Master Nodes Updated: {{ master_hosts | length }}"
+          - "Worker Nodes Updated: {{ (worker_hosts | default([])) | length }}"
+          - ""
+          - "Configuration files: {{ output_dir }}"
+          - ""
+      tags:
+        - always

@@ -1,0 +1,402 @@
+---
+- name: Upgrade Talos Kubernetes Cluster
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  vars:
+    output_dir: "{{ playbook_dir }}/generated"
+    talosconfig_file: "{{ output_dir }}/talosconfig"
+
+    # Target Talos version to upgrade to
+    target_talos_version: "1.12.0"
+    # Use https://factory.talos.dev/ to generate the image URL
+    target_talos_image: "factory.talos.dev/nocloud-installer-secureboot/4a273f126bf4564b7c3932f648f68fd87d5f2b643a393ddcdeb4b5e78ba45a9b:v1.12.0"
+
+  tasks:
+    # ============================================
+    # STEP 1: Pre-flight checks
+    # ============================================
+    - name: Check required files exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ talosconfig_file }}"
+      register: required_files
+      tags:
+        - always
+
+    - name: Fail if required files are missing
+      ansible.builtin.fail:
+        msg: "Required file {{ item.item }} not found. Run talos-cluster-init.yaml first."
+      when: not item.stat.exists
+      loop: "{{ required_files.results }}"
+      tags:
+        - always
+
+    - name: Ensure talosconfig is loaded
+      ansible.builtin.command: |
+        talosctl config merge {{ talosconfig_file }}
+      changed_when: false
+      tags:
+        - always
+
+    - name: Configure talosctl endpoints
+      ansible.builtin.command: |
+        talosctl config endpoint {{ master_hosts | map(attribute='ip') | join(' ') }}
+      changed_when: false
+      tags:
+        - always
+
+    - name: Display cluster configuration
+      ansible.builtin.debug:
+        msg:
+          - "Cluster Name: {{ cluster_name }}"
+          - "Cluster Endpoint: {{ cluster_endpoint }}"
+          - "Master Nodes: {{ master_hosts | length }}"
+          - "Target Talos Version: {{ target_talos_version }}"
+      tags:
+        - always
+
+    # ============================================
+    # STEP 2: Check current talosctl version
+    # ============================================
+    - name: Get current talosctl version
+      ansible.builtin.command: talosctl version --client --short
+      register: talosctl_version_output
+      changed_when: false
+      tags:
+        - always
+        - version-check
+
+    - name: Parse talosctl version
+      ansible.builtin.set_fact:
+        current_talosctl_version: "{{ talosctl_version_output.stdout | regex_search('v[0-9]+\\.[0-9]+\\.[0-9]+') }}"
+      tags:
+        - always
+        - version-check
+
+    - name: Display talosctl version information
+      ansible.builtin.debug:
+        msg:
+          - "Current talosctl version: {{ current_talosctl_version }}"
+          - "Target Talos version: v{{ target_talos_version }}"
+          - "Versions match: {{ current_talosctl_version == 'v' + target_talos_version }}"
+      tags:
+        - always
+        - version-check
+
+    - name: Warning if talosctl version doesn't match target
+      ansible.builtin.debug:
+        msg:
+          - "WARNING: talosctl version ({{ current_talosctl_version }}) doesn't match target (v{{ target_talos_version }})"
+          - "Please upgrade talosctl first: brew upgrade siderolabs/tap/talosctl"
+          - "Or download from: https://github.com/siderolabs/talos/releases/tag/v{{ target_talos_version }}"
+      when: current_talosctl_version != 'v' + target_talos_version
+      tags:
+        - always
+        - version-check
+
+    - name: Fail if talosctl version doesn't match (safety check)
+      ansible.builtin.fail:
+        msg: >
+          talosctl version mismatch. Current: {{ current_talosctl_version }}, Target: v{{ target_talos_version }}.
+          Please upgrade talosctl before proceeding with cluster upgrade.
+      when:
+        - current_talosctl_version != 'v' + target_talos_version
+        - enforce_talosctl_version | default(true)
+      tags:
+        - always
+        - version-check
+
+    # ============================================
+    # STEP 3: Get current cluster node versions
+    # ============================================
+    - name: Get Talos version on master nodes
+      ansible.builtin.command: |
+        talosctl version --nodes {{ item.ip }} --short
+      loop: "{{ master_hosts }}"
+      register: master_versions
+      changed_when: false
+      failed_when: false
+      tags:
+        - always
+        - version-check
+
+    - name: Display current master node versions
+      ansible.builtin.debug:
+        msg: "Node {{ item.item.ip }}: {{ item.stdout | default('Failed to get version') }}"
+      loop: "{{ master_versions.results }}"
+      tags:
+        - always
+        - version-check
+
+    # ============================================
+    # STEP 3.5: Discover worker nodes from Proxmox
+    # ============================================
+    - name: Get all VMs from Proxmox cluster
+      ansible.builtin.command: |
+        pvesh get /cluster/resources --type vm --output-format json
+      register: all_vms_raw
+      when: use_dynamic_worker_discovery | default(true)
+      delegate_to: "{{ pve_node }}"
+      changed_when: false
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Parse VMs and filter by worker tag
+      ansible.builtin.set_fact:
+        worker_vms: >-
+          {{
+            (all_vms_raw.stdout | from_json)
+            | selectattr('status', 'equalto', 'running')
+            | selectattr('tags', 'defined')
+            | selectattr('tags', 'search', worker_node_tag)
+            | list
+          }}
+      when:
+        - use_dynamic_worker_discovery | default(true)
+        - all_vms_raw.stdout is defined
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Get IP addresses for worker VMs
+      ansible.builtin.shell: |
+        set -o pipefail
+        pvesh get /nodes/{{ item.node }}/qemu/{{ item.vmid }}/agent/network-get-interfaces \
+          --output-format json 2>/dev/null || echo '{}'
+      loop: "{{ worker_vms | default([]) }}"
+      register: worker_network_info
+      when:
+        - use_dynamic_worker_discovery | default(true)
+        - worker_vms is defined
+        - worker_vms | length > 0
+      delegate_to: "{{ pve_node }}"
+      changed_when: false
+      failed_when: false
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Convert worker IPs to structured list with VMID
+      ansible.builtin.set_fact:
+        worker_hosts: >
+          {%- set result = [] -%}
+          {%- for net_result in worker_network_info.results | default([]) -%}
+            {%- if net_result.stdout is defined -%}
+              {%- set net_data = net_result.stdout | from_json -%}
+              {%- for iface in net_data.result | default([]) -%}
+                {%- if iface.name != 'lo' -%}
+                  {%- for ip_addr in iface['ip-addresses'] | default([]) -%}
+                    {%- if ip_addr['ip-address-type'] == 'ipv4' -%}
+                      {%- set _ = result.append({'ip': ip_addr['ip-address'], 'vm_id': net_result.item.vmid, 'node': net_result.item.node}) -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+      when:
+        - use_dynamic_worker_discovery | default(true)
+        - worker_network_info.results is defined
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Display discovered worker nodes
+      ansible.builtin.debug:
+        msg:
+          - "Dynamic worker discovery: {{ 'Enabled' if use_dynamic_worker_discovery | default(true) else 'Disabled' }}"
+          - "Worker tag: {{ worker_node_tag }}"
+          - "Discovered worker nodes: {{ (worker_hosts | default([])) | length }}"
+          - "Worker IPs: {{ (worker_hosts | default([])) | map(attribute='ip') | join(', ') if worker_hosts is defined else 'None' }}"
+      when: use_dynamic_worker_discovery | default(true)
+      tags:
+        - always
+        - worker-discovery
+
+    - name: Get Talos version on worker nodes
+      ansible.builtin.command: |
+        talosctl version --nodes {{ item.ip }} --short
+      loop: "{{ worker_hosts | default([]) }}"
+      when: worker_hosts is defined and worker_hosts | length > 0
+      register: worker_versions
+      changed_when: false
+      failed_when: false
+      tags:
+        - always
+        - version-check
+
+    - name: Display current worker node versions
+      ansible.builtin.debug:
+        msg: "Node {{ item.item.ip }}: {{ item.stdout | default('Failed to get version') }}"
+      loop: "{{ worker_versions.results | default([]) }}"
+      when: worker_hosts is defined and worker_hosts | length > 0
+      tags:
+        - always
+        - version-check
+
+    # ============================================
+    # STEP 4: Upgrade control plane nodes
+    # ============================================
+    - name: Upgrade first master node (with preserve flag)
+      ansible.builtin.command: |
+        talosctl upgrade \
+          --nodes {{ master_hosts[0].ip }} \
+          --image {{ target_talos_image }} \
+          --preserve=true \
+          --wait=true
+      register: first_master_upgrade
+      changed_when: true
+      tags:
+        - upgrade
+        - controlplane
+
+    - name: Wait for first master node to be healthy
+      ansible.builtin.command: |
+        talosctl health --nodes {{ master_hosts[0].ip }}
+      register: first_master_health
+      until: first_master_health.rc == 0
+      retries: 30
+      delay: 20
+      changed_when: false
+      tags:
+        - upgrade
+        - controlplane
+        - verify
+
+    - name: Upgrade remaining master nodes sequentially
+      ansible.builtin.command: |
+        talosctl upgrade \
+          --nodes {{ item.ip }} \
+          --image {{ target_talos_image }} \
+          --preserve=true \
+          --wait=true
+      loop: "{{ master_hosts[1:] }}"
+      when: master_hosts | length > 1
+      register: master_upgrade
+      changed_when: true
+      tags:
+        - upgrade
+        - controlplane
+
+    - name: Wait for each master node to be healthy
+      ansible.builtin.command: |
+        talosctl health --nodes {{ item.ip }}
+      loop: "{{ master_hosts[1:] }}"
+      when: master_hosts | length > 1
+      register: master_health
+      until: master_health.rc == 0
+      retries: 30
+      delay: 20
+      changed_when: false
+      tags:
+        - upgrade
+        - controlplane
+        - verify
+
+    # ============================================
+    # STEP 5: Upgrade worker nodes
+    # ============================================
+    - name: Upgrade worker nodes sequentially
+      ansible.builtin.command: |
+        talosctl upgrade \
+          --nodes {{ item.ip }} \
+          --image {{ target_talos_image }} \
+          --preserve=true \
+          --wait=true
+      loop: "{{ worker_hosts | default([]) }}"
+      when: worker_hosts is defined and worker_hosts | length > 0
+      register: worker_upgrade
+      changed_when: true
+      tags:
+        - upgrade
+        - worker
+
+    - name: Wait for each worker node to be healthy
+      ansible.builtin.command: |
+        talosctl health --nodes {{ item.ip }}
+      loop: "{{ worker_hosts | default([]) }}"
+      when: worker_hosts is defined and worker_hosts | length > 0
+      register: worker_health
+      until: worker_health.rc == 0
+      retries: 30
+      delay: 20
+      changed_when: false
+      tags:
+        - upgrade
+        - worker
+        - verify
+
+    # ============================================
+    # STEP 6: Verify cluster health
+    # ============================================
+    - name: Wait for all nodes to be ready
+      ansible.builtin.command: |
+        kubectl get nodes
+      register: nodes_status
+      until: >-
+        nodes_status.rc == 0 and
+        'NotReady' not in nodes_status.stdout and
+        (nodes_status.stdout_lines | select('search', 'Ready') | list | length) >= (master_hosts | length + (worker_hosts | default([]) | length))
+      retries: 30
+      delay: 20
+      changed_when: false
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Display cluster nodes
+      ansible.builtin.command: |
+        kubectl get nodes -o wide
+      register: nodes_output
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Show nodes status
+      ansible.builtin.debug:
+        var: nodes_output.stdout_lines
+      tags:
+        - verify
+
+    - name: Verify Talos version on all nodes
+      ansible.builtin.command: |
+        talosctl version --nodes {{ item.ip }} --short
+      loop: "{{ master_hosts + (worker_hosts | default([])) }}"
+      register: final_versions
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Display final node versions
+      ansible.builtin.debug:
+        msg: "Node {{ item.item.ip }}: {{ item.stdout }}"
+      loop: "{{ final_versions.results }}"
+      tags:
+        - verify
+
+    # ============================================
+    # STEP 7: Display summary
+    # ============================================
+    - name: Display upgrade summary
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Talos Cluster Upgrade Complete!"
+          - "========================================"
+          - ""
+          - "Cluster Name: {{ cluster_name }}"
+          - "Target Talos Version: v{{ target_talos_version }}"
+          - "Master Nodes Upgraded: {{ master_hosts | length }}"
+          - "Worker Nodes Upgraded: {{ (worker_hosts | default([])) | length }}"
+          - ""
+          - "All nodes have been upgraded to Talos v{{ target_talos_version }}"
+          - ""
+      tags:
+        - always

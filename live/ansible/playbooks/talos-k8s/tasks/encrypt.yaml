@@ -6,6 +6,20 @@
 # sensitive Talos configuration files
 # ============================================
 
+- name: Find repository root
+  ansible.builtin.command:
+    cmd: git rev-parse --show-toplevel
+  register: repo_root_result
+  changed_when: false
+  tags:
+    - encrypt
+
+- name: Set repository root fact
+  ansible.builtin.set_fact:
+    repo_root: "{{ repo_root_result.stdout }}"
+  tags:
+    - encrypt
+
 - name: Copy secrets bundle to encrypted directory
   ansible.builtin.copy:
     src: "{{ secrets_file }}"
@@ -49,7 +63,7 @@
 
 - name: Encrypt secrets bundle with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/secrets.yaml
+    ansible-vault encrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/secrets.yaml
   when:
     - auto_encrypt | default(false)
     - secrets_check.stdout is defined
@@ -69,7 +83,7 @@
 
 - name: Encrypt talosconfig with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/talosconfig
+    ansible-vault encrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/talosconfig
   when:
     - auto_encrypt | default(false)
     - talosconfig_check.stdout is defined
@@ -89,7 +103,7 @@
 
 - name: Encrypt controlplane config with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/controlplane.yaml
+    ansible-vault encrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/controlplane.yaml
   when:
     - auto_encrypt | default(false)
     - controlplane_check.stdout is defined
@@ -109,7 +123,7 @@
 
 - name: Encrypt worker config with ansible-vault
   ansible.builtin.command: |
-    ansible-vault encrypt --vault-password-file={{ playbook_dir }}/../../../../.vault_pass {{ encrypted_dir }}/worker.yaml
+    ansible-vault encrypt --vault-password-file={{ repo_root }}/.vault_pass {{ encrypted_dir }}/worker.yaml
   when:
     - auto_encrypt | default(false)
     - worker_check.stdout is defined

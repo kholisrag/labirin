@@ -1,0 +1,102 @@
+---
+# Reusable tasks to download and use a specific talosctl version
+# This ensures compatibility between talosctl and the Talos cluster version
+
+- name: Extract Talos version from factory image URL
+  ansible.builtin.set_fact:
+    talos_version: "{{ talos_factory_image_url | regex_search('v[0-9]+\\.[0-9]+\\.[0-9]+') }}"
+  when: talos_factory_image_url is defined
+  tags:
+    - always
+
+- name: Set default Talos version if not found
+  ansible.builtin.set_fact:
+    talos_version: "v1.11.5"
+  when: talos_version is not defined or talos_version == ""
+  tags:
+    - always
+
+- name: Detect system architecture
+  ansible.builtin.command: uname -m
+  register: system_arch_raw
+  changed_when: false
+  tags:
+    - always
+
+- name: Map architecture to Talos naming
+  ansible.builtin.set_fact:
+    talos_arch: "{{ 'arm64' if system_arch_raw.stdout == 'arm64' or system_arch_raw.stdout == 'aarch64' else 'amd64' }}"
+  tags:
+    - always
+
+- name: Detect operating system
+  ansible.builtin.command: uname -s
+  register: system_os_raw
+  changed_when: false
+  tags:
+    - always
+
+- name: Map OS to Talos naming
+  ansible.builtin.set_fact:
+    talos_os: "{{ system_os_raw.stdout | lower }}"
+  tags:
+    - always
+
+- name: Set talosctl download URL
+  ansible.builtin.set_fact:
+    talosctl_url: "https://github.com/siderolabs/talos/releases/download/{{ talos_version }}/talosctl-{{ talos_os }}-{{ talos_arch }}"
+  tags:
+    - always
+
+- name: Set talosctl binary path
+  ansible.builtin.set_fact:
+    talosctl_bin: "{{ playbook_dir }}/bin/talosctl-{{ talos_version }}"
+  tags:
+    - always
+
+- name: Display talosctl information
+  ansible.builtin.debug:
+    msg:
+      - "Talos Version: {{ talos_version }}"
+      - "System: {{ talos_os }}-{{ talos_arch }}"
+      - "Download URL: {{ talosctl_url }}"
+      - "Binary Path: {{ talosctl_bin }}"
+  tags:
+    - always
+
+- name: Create bin directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/bin"
+    state: directory
+    mode: "0755"
+  tags:
+    - always
+
+- name: Check if talosctl binary already exists
+  ansible.builtin.stat:
+    path: "{{ talosctl_bin }}"
+  register: talosctl_stat
+  tags:
+    - always
+
+- name: Download talosctl binary
+  ansible.builtin.get_url:
+    url: "{{ talosctl_url }}"
+    dest: "{{ talosctl_bin }}"
+    mode: "0755"
+  when: not talosctl_stat.stat.exists
+  tags:
+    - always
+
+- name: Verify talosctl binary
+  ansible.builtin.command: "{{ talosctl_bin }} version --client"
+  register: talosctl_version_output
+  changed_when: false
+  tags:
+    - always
+
+- name: Display talosctl version
+  ansible.builtin.debug:
+    var: talosctl_version_output.stdout_lines
+  tags:
+    - always

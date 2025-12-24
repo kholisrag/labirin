@@ -14,7 +14,6 @@
     worker_config_file: "{{ output_dir }}/worker.yaml"
     encrypted_dir: "{{ playbook_dir }}/secrets"
 
-    talos_version: "v1.11.5"
     kubernetes_version: "1.34.1"
     patches_dir: "{{ playbook_dir }}/vars/patches/{{ kubernetes_version }}"
 
@@ -76,7 +75,6 @@
           - "Cluster Endpoint: {{ cluster_endpoint }}"
           - "Master Nodes: {{ master_hosts | length }}"
           - "Kubernetes Version: {{ kubernetes_version }}"
-          - "Talos Version: {{ talos_version }}"
       tags:
         - always
 

@@ -4,6 +4,15 @@
 
 # Cluster Basic Configuration
 cluster_name: "main-talos-k8s-cluster"
+## https://factory.talos.dev/
+# customization:
+#     extraKernelArgs:
+#         - console=ttyS0
+#     systemExtensions:
+#         officialExtensions:
+#             - siderolabs/qemu-guest-agent
+#     bootloader: sd-boot
+talos_factory_image_url: "factory.talos.dev/nocloud-installer-secureboot/6d4f69d1202eef52ebc4476239fb6366ffbe4d0efc22983a34f21c401a38a0fc:v1.11.5"
 
 # Worker Node Discovery Configuration
 # Query worker nodes dynamically based on PVE tags
@@ -31,9 +40,10 @@ remote_manifests:
   - name: "proxmox-cloud-controller-manager"
     url: "https://raw.githubusercontent.com/sergelogvinov/proxmox-cloud-controller-manager/refs/tags/v0.12.2/docs/deploy/cloud-controller-manager-talos.yml"
     destination: "talos-init/proxmox-cloud-controller-manager-v0.12.2.yaml"
-  - name: "proxmox-csi-plugin"
-    url: "https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/refs/tags/v0.16.0/docs/deploy/proxmox-csi-plugin-talos.yml"
-    destination: "talos-init/proxmox-csi-plugin-v0.16.0.yaml"
+  ## Use Helm Chart instead
+  # - name: "proxmox-csi-plugin"
+  #   url: "https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/refs/tags/v0.16.0/docs/deploy/proxmox-csi-plugin-talos.yml"
+  #   destination: "talos-init/proxmox-csi-plugin-v0.16.0.yaml"
 
 # Helm charts to template
 helm_charts:
@@ -305,6 +315,41 @@ helm_charts:
         - effect: NoSchedule
           operator: Exists
 
+  - name: "proxmox-csi-plugin-v0.17.0"
+    oci: true
+    release_name: "proxmox-csi-plugin"
+    chart: "oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin"
+    version: "0.5.3"
+    namespace: "csi-proxmox"
+    destination: "talos-init/proxmox-csi-plugin-v0.17.0.yaml"
+    values: |
+      createNamespace: false
+      node:
+        nodeSelector:
+          node.cloudprovider.kubernetes.io/platform: nocloud
+        tolerations:
+          - operator: Exists
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      storageClass:
+        - name: proxmox-local-lvm
+          storage: local-lvm
+          reclaimPolicy: Delete
+          fstype: ext4
+          ssd: true
+        - name: proxmox-ssd
+          storage: ssd
+          reclaimPolicy: Delete
+          fstype: ext4
+          ssd: true
+        - name: proxmox-sas
+          storage: sas
+          reclaimPolicy: Delete
+          fstype: ext4
+          ssd: false
 # Additional manifests to include
 local_manifests:
   - name: "proxmox-ccm-secrets"

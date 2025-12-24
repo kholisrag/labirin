@@ -191,13 +191,37 @@
       tags:
         - verify
 
+    - name: Get node name from Talos
+      ansible.builtin.shell: |
+        set -o pipefail
+        {{ talosctl_bin }} -n {{ target_node_ip }} get nodename -o jsonpath='{.spec.nodename}'
+      register: node_name_result
+      changed_when: false
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Set node name fact
+      ansible.builtin.set_fact:
+        target_node_name: "{{ node_name_result.stdout | trim }}"
+      when: node_name_result.rc == 0
+      tags:
+        - verify
+
+    - name: Display target node name
+      ansible.builtin.debug:
+        msg: "Target node name: {{ target_node_name | default('unknown') }}"
+      tags:
+        - verify
+
     - name: Wait for node to join Kubernetes cluster
       ansible.builtin.command: |
         kubectl get nodes
       register: nodes_status
       until: >-
         nodes_status.rc == 0 and
-        target_node_ip in nodes_status.stdout
+        target_node_name is defined and
+        target_node_name in nodes_status.stdout
       retries: 30
       delay: 10
       changed_when: false

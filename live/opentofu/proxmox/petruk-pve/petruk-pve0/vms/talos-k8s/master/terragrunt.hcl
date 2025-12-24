@@ -9,7 +9,7 @@ locals {
   }
 
   name                = basename(get_terragrunt_dir())
-  prefix_name         = "main-talos-k8s"
+  prefix_name         = "main-talos"
   prefix_description  = "Main Talos Kubernetes Master Node"
   bios                = "ovmf"
   machine             = "q35"

@@ -2,3 +2,4 @@ https://helm.mittwald.de
 https://token.actions.githubusercontent.com/
 https://*.kloia-test.khol.is/
 http://0.0.0.0:2381/
+.*ssh:.*

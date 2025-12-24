@@ -1,4 +1,11 @@
 instance:
+  sync:
+    interval: 1m
+    kind: GitRepository
+    url: ssh://git@github.com:kholisrag/labirin.git
+    ref: refs/heads/main
+    path: live/fluxcd/proxmox/talos/main-talos-k8s-cluster
+    pullSecret: git-ssh-auth
   components:
     - source-controller
     - kustomize-controller
@@ -7,6 +14,9 @@ instance:
     - image-reflector-controller
     - image-automation-controller
     - source-watcher
+  # storage:
+  #   class: "proxmox-data"
+  #   size: "10Gi"
   kustomize:
     patches:
       - target:

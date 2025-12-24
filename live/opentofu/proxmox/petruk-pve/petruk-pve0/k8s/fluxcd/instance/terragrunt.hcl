@@ -30,6 +30,7 @@ inputs = {
 
   kubectl_manifest_files = {
     "flux-sops-age-keys" = sops_decrypt_file(format("%s/flux-sops-age-keys.enc.yaml", get_terragrunt_dir()))
+    "git-ssh-auth"       = sops_decrypt_file(format("%s/git-ssh-auth.enc.yaml", get_terragrunt_dir()))
   }
 
   helm_releases = {

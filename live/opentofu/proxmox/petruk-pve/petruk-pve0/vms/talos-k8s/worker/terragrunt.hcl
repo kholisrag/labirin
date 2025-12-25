@@ -4,7 +4,7 @@ locals {
   node_vars       = read_terragrunt_config(find_in_parent_folders("node.hcl"))
 
   name                = basename(get_terragrunt_dir())
-  prefix_name         = "main-talos-k8s"
+  prefix_name         = "main-talos"
   prefix_description  = "Main Talos Kubernetes Worker Node"
   bios                = "ovmf"
   machine             = "q35"

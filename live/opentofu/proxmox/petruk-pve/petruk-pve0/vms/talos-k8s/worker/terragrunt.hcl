@@ -12,7 +12,7 @@ locals {
   protection          = false
   on_boot             = true
   reboot_after_update = false
-  scsi_hardware       = "virtio-scsi-pci"
+  scsi_hardware       = "virtio-scsi-single"
   pool_id             = "k8s-worker-pool"
   tags = [
     "k8s-worker",

@@ -1,6 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# This is List of Yaml that used in
+# https://github.com/kholisrag/labirin/blob/main/live/ansible/playbooks/talos-k8s/vars/patches
+# So using this we can automatically apply when the yaml updated with https://github.com/kholisrag/labirin/blob/main/live/ansible/playbooks/talos-k8s/upload-extra-manifests.yaml
 resources:
   # kubelet-serving-cert-approver for automatically approve rotate-server-certificates
   - https://static.internal.khol.is/talos-init/kubelet-serving-cert-approver-v0.10.0-ha.yaml

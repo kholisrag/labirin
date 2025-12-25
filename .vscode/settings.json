@@ -6,6 +6,7 @@
   "files.associations": {
     "**/live/ansible/**/*.yaml": "ansible",
     "**/live/ansible/**/*.yml": "ansible",
+    "**/live/ansible/**/manifests/*.yaml": "yaml",
     "*.hcl": "opentofu",
     "*.tf": "opentofu",
     "*.tfvars": "opentofu",

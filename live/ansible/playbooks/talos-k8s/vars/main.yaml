@@ -271,7 +271,7 @@ helm_charts:
                   operator: Regexp
                   values:
                     - ^main-talos-master-.+$
-          # Add worker role label
+          # Add control-plane role label
           labels:
             node-role.kubernetes.io/control-plane: ""
           # Set platform metadata

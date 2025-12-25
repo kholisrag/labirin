@@ -119,6 +119,16 @@ dependency "iso_images" {
 inputs = {
   vms = {
     format("%s-%s-01", local.prefix_name, local.name) = {
+      cloud_init = {
+        datastore_id = "ssd"
+        meta_data = yamlencode({
+          "hostname"    = format("%s-%s-01", local.prefix_name, local.name)
+          "instance-id" = "106"
+          "provider-id" = "proxmox"
+          "region"      = local.datacenter_vars.locals.datacenter
+          "zone"        = local.node_vars.locals.node
+        })
+      }
       node_name           = local.node_vars.locals.node
       vm_id               = 106
       description         = format("%s 01", local.prefix_description)
@@ -158,6 +168,16 @@ inputs = {
       rng           = local.rng
     },
     format("%s-%s-02", local.prefix_name, local.name) = {
+      cloud_init = {
+        datastore_id = "ssd"
+        meta_data = yamlencode({
+          "hostname"    = format("%s-%s-02", local.prefix_name, local.name)
+          "instance-id" = "107"
+          "provider-id" = "proxmox"
+          "region"      = local.datacenter_vars.locals.datacenter
+          "zone"        = local.node_vars.locals.node
+        })
+      }
       node_name           = local.node_vars.locals.node
       vm_id               = 107
       description         = format("%s 02", local.prefix_description)
@@ -197,6 +217,16 @@ inputs = {
       rng           = local.rng
     },
     format("%s-%s-03", local.prefix_name, local.name) = {
+      cloud_init = {
+        datastore_id = "ssd"
+        meta_data = yamlencode({
+          "hostname"    = format("%s-%s-03", local.prefix_name, local.name)
+          "instance-id" = "108"
+          "provider-id" = "proxmox"
+          "region"      = local.datacenter_vars.locals.datacenter
+          "zone"        = local.node_vars.locals.node
+        })
+      }
       node_name           = local.node_vars.locals.node
       vm_id               = 108
       description         = format("%s 03", local.prefix_description)

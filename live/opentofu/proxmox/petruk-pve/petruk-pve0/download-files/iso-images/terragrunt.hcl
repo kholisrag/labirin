@@ -37,12 +37,20 @@ inputs = {
       file_name               = local.config_yaml["opnsense"].file_name
       overwrite_unmanaged     = true
     }
-    talos = {
+    "talos-v1.11.5" = {
       content_type        = local.content_type
       datastore_id        = local.datastore_id
       node_name           = local.node_vars.locals.node
-      url                 = local.config_yaml["talos"].url
-      file_name           = local.config_yaml["talos"].file_name
+      url                 = local.config_yaml["talos-v1.11.5"].url
+      file_name           = local.config_yaml["talos-v1.11.5"].file_name
+      overwrite_unmanaged = true
+    }
+    "talos-v1.12.0" = {
+      content_type        = local.content_type
+      datastore_id        = local.datastore_id
+      node_name           = local.node_vars.locals.node
+      url                 = local.config_yaml["talos-v1.12.0"].url
+      file_name           = local.config_yaml["talos-v1.12.0"].file_name
       overwrite_unmanaged = true
     }
   }

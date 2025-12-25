@@ -14,9 +14,9 @@ instance:
     - image-reflector-controller
     - image-automation-controller
     - source-watcher
-  # storage:
-  #   class: "proxmox-ssd"
-  #   size: "2Gi"
+  storage:
+    class: "proxmox-ssd"
+    size: "2Gi"
   kustomize:
     patches:
       - target:

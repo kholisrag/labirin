@@ -17,7 +17,10 @@ locals {
 # Cloud-init snippet files
 # This creates custom cloud-init snippet files for VMs with custom cloud-init config
 resource "proxmox_virtual_environment_file" "user_data_snippet" {
-  for_each = local.vms_with_cloudinit
+  for_each = {
+    for vm_name, vm_config in local.vms_with_cloudinit : vm_name => vm_config
+    if try(vm_config.cloud_init.user_data, null) != null
+  }
 
   content_type = "snippets"
   datastore_id = try(each.value.cloud_init.datastore_id, "ssd")
@@ -40,7 +43,7 @@ resource "proxmox_virtual_environment_file" "network_data_snippet" {
   node_name    = each.value.node_name
 
   source_raw {
-    data      = sensitive(each.value.cloud_init.network_data)
+    data      = sensitive(try(each.value.cloud_init.network_data, ""))
     file_name = format("tf-%s-%s-network-data.yaml", each.value.node_name, each.value.name)
   }
 }
@@ -56,7 +59,7 @@ resource "proxmox_virtual_environment_file" "meta_data_snippet" {
   node_name    = each.value.node_name
 
   source_raw {
-    data      = sensitive(each.value.cloud_init.meta_data)
+    data      = sensitive(try(each.value.cloud_init.meta_data, ""))
     file_name = format("tf-%s-%s-meta-data.yaml", each.value.node_name, each.value.name)
   }
 }
@@ -72,7 +75,7 @@ resource "proxmox_virtual_environment_file" "vendor_data_snippet" {
   node_name    = each.value.node_name
 
   source_raw {
-    data      = sensitive(each.value.cloud_init.vendor_data)
+    data      = sensitive(try(each.value.cloud_init.vendor_data, ""))
     file_name = format("tf-%s-%s-vendor-data.yaml", each.value.node_name, each.value.name)
   }
 }
@@ -268,7 +271,7 @@ resource "proxmox_virtual_environment_vm" "vm" {
       # Use snippet file IDs if cloud_init is configured, otherwise use explicit file_ids
       user_data_file_id = try(
         lookup(each.value.initialization[0], "user_data_file_id", null),
-        try(each.value.cloud_init, null) != null ? proxmox_virtual_environment_file.user_data_snippet[each.key].id : null,
+        try(each.value.cloud_init.user_data, null) != null ? proxmox_virtual_environment_file.user_data_snippet[each.key].id : null,
         null
       )
       network_data_file_id = try(

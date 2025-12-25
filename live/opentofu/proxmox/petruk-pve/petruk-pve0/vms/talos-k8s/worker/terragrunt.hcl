@@ -149,6 +149,11 @@ inputs = {
           }
         )
       ]
+      smbios = [
+        {
+          serial = format("h=%s-%s-01;i=106", local.prefix_name, local.name)
+        }
+      ]
       serial_device = local.serial_device
       rng           = local.rng
     },
@@ -183,6 +188,11 @@ inputs = {
           }
         )
       ]
+      smbios = [
+        {
+          serial = format("h=%s-%s-02;i=107", local.prefix_name, local.name)
+        }
+      ]
       serial_device = local.serial_device
       rng           = local.rng
     },
@@ -216,6 +226,11 @@ inputs = {
             file_id = "none" # dependency.iso_images.outputs.download_file_output["talos"].id
           }
         )
+      ]
+      smbios = [
+        {
+          serial = format("h=%s-%s-03;i=108", local.prefix_name, local.name)
+        }
       ]
       serial_device = local.serial_device
       rng           = local.rng

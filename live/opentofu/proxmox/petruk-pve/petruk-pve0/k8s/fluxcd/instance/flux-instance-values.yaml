@@ -15,8 +15,8 @@ instance:
     - image-automation-controller
     - source-watcher
   # storage:
-  #   class: "proxmox-data"
-  #   size: "10Gi"
+  #   class: "proxmox-ssd"
+  #   size: "2Gi"
   kustomize:
     patches:
       - target:

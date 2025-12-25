@@ -260,7 +260,7 @@ helm_charts:
         - --allocate-node-cidrs
         - --cidr-allocator-type=CloudAllocator
         - --node-cidr-mask-size-ipv4=24
-        - --node-cidr-mask-size-ipv6=80
+        # - --node-cidr-mask-size-ipv6=80 # Currently Only use Single Stack IPv4
       # Ref: https://github.com/siderolabs/talos-cloud-controller-manager/blob/main/docs/config.md
       transformations:
         # Transformation for all talos master nodes in proxmox

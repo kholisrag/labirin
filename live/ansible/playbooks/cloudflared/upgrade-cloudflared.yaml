@@ -1,0 +1,31 @@
+---
+- name: Upgrade Cloudflared
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Upgrade cloudflared package
+      ansible.builtin.apt:
+        name: cloudflared
+        state: present
+      notify: Restart cloudflared service
+
+    - name: Display cloudflared version
+      ansible.builtin.command: cloudflared --version
+      register: cloudflared_version
+      changed_when: false
+
+    - name: Show installed version
+      ansible.builtin.debug:
+        msg: "Cloudflared version: {{ cloudflared_version.stdout }}"
+
+  handlers:
+    - name: Restart cloudflared service
+      ansible.builtin.systemd:
+        name: cloudflared
+        state: restarted

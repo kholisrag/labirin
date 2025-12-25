@@ -2,12 +2,14 @@
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: essentials
+  name: namespaces
   namespace: flux-system
 spec:
   interval: 15m
-  path: "live/fluxcd/proxmox/talos/main-talos-k8s-cluster/essentials"
+  path: "live/fluxcd/proxmox/talos/main-talos-k8s-cluster/essentials/namespaces"
   prune: true
   sourceRef:
     kind: GitRepository
     name: flux-system
+  dependsOn:
+    - name: cluster-addons

@@ -254,7 +254,13 @@ helm_charts:
       enabledControllers:
         - cloud-node
         - node-csr-approval
+        - node-ipam-controller
         # - cloud-node-lifecycle is handled by proxmox-ccm
+      extraArgs:
+        - --allocate-node-cidrs
+        - --cidr-allocator-type=CloudAllocator
+        - --node-cidr-mask-size-ipv4=24
+        - --node-cidr-mask-size-ipv6=80
       # Ref: https://github.com/siderolabs/talos-cloud-controller-manager/blob/main/docs/config.md
       transformations:
         # Transformation for all talos master nodes in proxmox

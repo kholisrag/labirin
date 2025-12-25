@@ -1,6 +1,6 @@
 roles:
   - name: sebdanielsson.cloudflared
-    version: "2.4.3"
+    version: "2.5.1"
 collections:
   - name: community.general
     version: ">=11.4.1,<12.0.0"

@@ -1,0 +1,129 @@
+---
+# Task file to upgrade a single worker node and re-discover its IP after upgrade
+# This handles the case where worker nodes get new DHCP IPs after upgrading
+
+- name: Check current worker node version
+  ansible.builtin.command: |
+    talosctl version --nodes {{ worker_node.ip }} --short
+  register: worker_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Parse worker node version
+  ansible.builtin.set_fact:
+    worker_current_version: >-
+      {{ (worker_version_check.stdout | regex_search('Tag:\s+v[0-9]+\.[0-9]+\.[0-9]+') | default('Tag: v0.0.0') | regex_replace('Tag:\s+v', '')) }}
+  when: worker_version_check.rc == 0
+
+- name: Display worker node version check
+  ansible.builtin.debug:
+    msg:
+      - "Worker node {{ worker_node.ip }} (VM ID: {{ worker_node.vm_id }}):"
+      - "  Current version: v{{ worker_current_version | default('unknown') }}"
+      - "  Target version: v{{ target_talos_version }}"
+      - "  Needs upgrade: {{ worker_current_version | default('') != target_talos_version }}"
+
+- name: Skip upgrade if already at target version
+  ansible.builtin.debug:
+    msg: "Worker node {{ worker_node.ip }} is already at target version v{{ target_talos_version }}, skipping upgrade"
+  when: worker_current_version | default('') == target_talos_version
+
+- name: Upgrade worker node
+  ansible.builtin.command: |
+    talosctl upgrade \
+      --nodes {{ worker_node.ip }} \
+      --image {{ target_talos_image }} \
+      --preserve=true \
+      --wait=false
+  when: worker_current_version | default('') != target_talos_version
+  register: worker_upgrade_result
+  changed_when: true
+  failed_when: false
+
+- name: Wait for worker node to start rebooting
+  ansible.builtin.pause:
+    seconds: 30
+  when: worker_current_version | default('') != target_talos_version
+
+- name: Wait for worker VM to be running in Proxmox
+  ansible.builtin.command: |
+    pvesh get /nodes/{{ worker_node.node }}/qemu/{{ worker_node.vm_id }}/status/current --output-format json
+  register: vm_status
+  until: (vm_status.stdout | from_json).status == 'running'
+  retries: 30
+  delay: 10
+  delegate_to: "{{ pve_node }}"
+  changed_when: false
+  when: worker_current_version | default('') != target_talos_version
+
+- name: Re-discover worker node IP from Proxmox
+  ansible.builtin.shell: |
+    set -o pipefail
+    pvesh get /nodes/{{ worker_node.node }}/qemu/{{ worker_node.vm_id }}/agent/network-get-interfaces \
+      --output-format json 2>/dev/null || echo '{}'
+  register: new_worker_network_info
+  until: new_worker_network_info.stdout != '{}'
+  retries: 30
+  delay: 10
+  delegate_to: "{{ pve_node }}"
+  changed_when: false
+  when: worker_current_version | default('') != target_talos_version
+
+- name: Parse new worker IP
+  ansible.builtin.set_fact:
+    new_worker_ip: >
+      {%- set net_data = new_worker_network_info.stdout | from_json -%}
+      {%- for iface in net_data.result | default([]) -%}
+        {%- if iface.name != 'lo' -%}
+          {%- for ip_addr in iface['ip-addresses'] | default([]) -%}
+            {%- if ip_addr['ip-address-type'] == 'ipv4' -%}
+              {{ ip_addr['ip-address'] }}
+      {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+  when: worker_current_version | default('') != target_talos_version
+
+- name: Set new_worker_ip to current IP if no upgrade needed
+  ansible.builtin.set_fact:
+    new_worker_ip: "{{ worker_node.ip }}"
+  when: worker_current_version | default('') == target_talos_version
+
+- name: Display new worker IP
+  ansible.builtin.debug:
+    msg:
+      - "Worker node upgraded successfully"
+      - "  Old IP: {{ worker_node.ip }}"
+      - "  New IP: {{ new_worker_ip }}"
+      - "  VM ID: {{ worker_node.vm_id }}"
+  when: worker_current_version | default('') != target_talos_version
+
+- name: Wait for Talos API to be available on new IP
+  ansible.builtin.command: |
+    talosctl version --nodes {{ new_worker_ip }} --short
+  register: talos_version_check
+  until: talos_version_check.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when: worker_current_version | default('') != target_talos_version
+
+- name: Verify worker node health on new IP
+  ansible.builtin.command: |
+    talosctl health --nodes {{ new_worker_ip }}
+  register: worker_health_check
+  until: worker_health_check.rc == 0
+  retries: 30
+  delay: 20
+  changed_when: false
+  when: worker_current_version | default('') != target_talos_version
+
+- name: Display worker upgrade completion
+  ansible.builtin.debug:
+    msg:
+      - "✓ Worker node upgrade complete"
+      - "  VM ID: {{ worker_node.vm_id }}"
+      - "  New IP: {{ new_worker_ip }}"
+      - "  Status: Healthy"
+  when: worker_current_version | default('') != target_talos_version

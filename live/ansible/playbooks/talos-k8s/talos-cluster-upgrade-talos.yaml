@@ -50,6 +50,16 @@
       tags:
         - always
 
+    - name: Validate target_talos_image for Proxmox compatibility
+      ansible.builtin.fail:
+        msg: >
+          Invalid target_talos_image: {{ target_talos_image }}.
+          For Proxmox installations, the image must be from 'factory.talos.dev/nocloud-installer-secureboot'.
+          Please use https://factory.talos.dev/ to generate a compatible image URL.
+      when: "'factory.talos.dev/nocloud-installer-secureboot' not in target_talos_image"
+      tags:
+        - always
+
     - name: Display cluster configuration
       ansible.builtin.debug:
         msg:
@@ -57,6 +67,8 @@
           - "Cluster Endpoint: {{ cluster_endpoint }}"
           - "Master Nodes: {{ master_hosts | length }}"
           - "Target Talos Version: {{ target_talos_version }}"
+          - "Target Talos Image: {{ target_talos_image }}"
+          - "Image Type: Proxmox Compatible (nocloud-installer-secureboot)"
       tags:
         - always
 
@@ -186,14 +198,20 @@
       ansible.builtin.set_fact:
         worker_hosts: >
           {%- set result = [] -%}
+          {%- set seen_vmids = [] -%}
           {%- for net_result in worker_network_info.results | default([]) -%}
-            {%- if net_result.stdout is defined -%}
+            {%- if net_result.stdout is defined and net_result.item.vmid not in seen_vmids -%}
               {%- set net_data = net_result.stdout | from_json -%}
               {%- for iface in net_data.result | default([]) -%}
                 {%- if iface.name != 'lo' -%}
                   {%- for ip_addr in iface['ip-addresses'] | default([]) -%}
-                    {%- if ip_addr['ip-address-type'] == 'ipv4' -%}
-                      {%- set _ = result.append({'ip': ip_addr['ip-address'], 'vm_id': net_result.item.vmid, 'node': net_result.item.node}) -%}
+                    {%- if ip_addr['ip-address-type'] == 'ipv4' and net_result.item.vmid not in seen_vmids -%}
+                      {%- set _ = result.append({
+                            'ip': ip_addr['ip-address'],
+                            'vm_id': net_result.item.vmid,
+                            'node': net_result.item.node
+                          }) -%}
+                      {%- set _ = seen_vmids.append(net_result.item.vmid) -%}
                     {%- endif -%}
                   {%- endfor -%}
                 {%- endif -%}
@@ -244,6 +262,25 @@
     # ============================================
     # STEP 4: Upgrade control plane nodes
     # ============================================
+    - name: Parse first master node version
+      ansible.builtin.set_fact:
+        first_master_current_version: >-
+          {{ (master_versions.results[0].stdout | regex_search('Tag:\s+v[0-9]+\.[0-9]+\.[0-9]+') | default('Tag: v0.0.0') | regex_replace('Tag:\s+v', '')) }}
+      tags:
+        - upgrade
+        - controlplane
+
+    - name: Display first master node version check
+      ansible.builtin.debug:
+        msg:
+          - "First master node ({{ master_hosts[0].ip }}):"
+          - "  Current version: v{{ first_master_current_version }}"
+          - "  Target version: v{{ target_talos_version }}"
+          - "  Needs upgrade: {{ first_master_current_version != target_talos_version }}"
+      tags:
+        - upgrade
+        - controlplane
+
     - name: Upgrade first master node (with preserve flag)
       ansible.builtin.command: |
         talosctl upgrade \
@@ -251,6 +288,7 @@
           --image {{ target_talos_image }} \
           --preserve=true \
           --wait=true
+      when: first_master_current_version != target_talos_version
       register: first_master_upgrade
       changed_when: true
       tags:
@@ -260,6 +298,7 @@
     - name: Wait for first master node to be healthy
       ansible.builtin.command: |
         talosctl health --nodes {{ master_hosts[0].ip }}
+      when: first_master_current_version != target_talos_version
       register: first_master_health
       until: first_master_health.rc == 0
       retries: 30
@@ -270,6 +309,38 @@
         - controlplane
         - verify
 
+    - name: Parse remaining master nodes versions
+      ansible.builtin.set_fact:
+        remaining_masters_versions: >-
+          {%- set result = [] -%}
+          {%- for i in range(1, master_hosts | length) -%}
+            {%- set version = (
+                  master_versions.results[i].stdout
+                  | regex_search('Tag:\s+v[0-9]+\.[0-9]+\.[0-9]+')
+                  | default('Tag: v0.0.0')
+                  | regex_replace('Tag:\s+v', '')
+                ) -%}
+            {%- set _ = result.append({'ip': master_hosts[i].ip, 'current_version': version, 'needs_upgrade': version != target_talos_version}) -%}
+          {%- endfor -%}
+          {{ result }}
+      when: master_hosts | length > 1
+      tags:
+        - upgrade
+        - controlplane
+
+    - name: Display remaining master nodes version check
+      ansible.builtin.debug:
+        msg:
+          - "Master node {{ item.ip }}:"
+          - "  Current version: v{{ item.current_version }}"
+          - "  Target version: v{{ target_talos_version }}"
+          - "  Needs upgrade: {{ item.needs_upgrade }}"
+      loop: "{{ remaining_masters_versions }}"
+      when: master_hosts | length > 1
+      tags:
+        - upgrade
+        - controlplane
+
     - name: Upgrade remaining master nodes sequentially
       ansible.builtin.command: |
         talosctl upgrade \
@@ -277,8 +348,10 @@
           --image {{ target_talos_image }} \
           --preserve=true \
           --wait=true
-      loop: "{{ master_hosts[1:] }}"
-      when: master_hosts | length > 1
+      loop: "{{ remaining_masters_versions }}"
+      when:
+        - master_hosts | length > 1
+        - item.needs_upgrade
       register: master_upgrade
       changed_when: true
       tags:
@@ -288,8 +361,10 @@
     - name: Wait for each master node to be healthy
       ansible.builtin.command: |
         talosctl health --nodes {{ item.ip }}
-      loop: "{{ master_hosts[1:] }}"
-      when: master_hosts | length > 1
+      loop: "{{ remaining_masters_versions }}"
+      when:
+        - master_hosts | length > 1
+        - item.needs_upgrade
       register: master_health
       until: master_health.rc == 0
       retries: 30
@@ -303,35 +378,18 @@
     # ============================================
     # STEP 5: Upgrade worker nodes
     # ============================================
-    - name: Upgrade worker nodes sequentially
-      ansible.builtin.command: |
-        talosctl upgrade \
-          --nodes {{ item.ip }} \
-          --image {{ target_talos_image }} \
-          --preserve=true \
-          --wait=true
+    # Note: Worker nodes may get new DHCP IPs after upgrade, so we need to
+    # re-discover their IPs from Proxmox after each upgrade
+    - name: Upgrade worker nodes one at a time with IP re-discovery
+      ansible.builtin.include_tasks:
+        file: tasks/upgrade-worker-with-rediscovery.yaml
       loop: "{{ worker_hosts | default([]) }}"
+      loop_control:
+        loop_var: worker_node
       when: worker_hosts is defined and worker_hosts | length > 0
-      register: worker_upgrade
-      changed_when: true
       tags:
         - upgrade
         - worker
-
-    - name: Wait for each worker node to be healthy
-      ansible.builtin.command: |
-        talosctl health --nodes {{ item.ip }}
-      loop: "{{ worker_hosts | default([]) }}"
-      when: worker_hosts is defined and worker_hosts | length > 0
-      register: worker_health
-      until: worker_health.rc == 0
-      retries: 30
-      delay: 20
-      changed_when: false
-      tags:
-        - upgrade
-        - worker
-        - verify
 
     # ============================================
     # STEP 6: Verify cluster health
@@ -371,6 +429,7 @@
       loop: "{{ master_hosts + (worker_hosts | default([])) }}"
       register: final_versions
       changed_when: false
+      failed_when: false
       tags:
         - verify
 
@@ -378,6 +437,7 @@
       ansible.builtin.debug:
         msg: "Node {{ item.item.ip }}: {{ item.stdout }}"
       loop: "{{ final_versions.results }}"
+      when: item.rc == 0
       tags:
         - verify
 

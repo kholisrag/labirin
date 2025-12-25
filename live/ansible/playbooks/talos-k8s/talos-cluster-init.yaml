@@ -1,4 +1,23 @@
 ---
+# Talos Kubernetes Cluster Initialization Playbook
+# =================================================
+#
+# Usage modes:
+#   1. Full cluster init (default):
+#      ansible-playbook talos-cluster-init.yaml
+#
+#   2. Register workers only to existing cluster:
+#      ansible-playbook talos-cluster-init.yaml -e worker_only_mode=true
+#      or
+#      ansible-playbook talos-cluster-init.yaml --tags register-worker
+#
+# When worker_only_mode=true, the playbook will:
+#   - Use existing secrets and talosconfig
+#   - Only regenerate worker configuration
+#   - Skip master node configuration
+#   - Skip cluster bootstrapping
+#   - Only apply config to discovered worker nodes
+#
 - name: Init Talos Kubernetes Cluster
   hosts: localhost
   gather_facts: false
@@ -16,6 +35,9 @@
 
     kubernetes_version: "1.34.1"
     patches_dir: "{{ playbook_dir }}/vars/patches/{{ kubernetes_version }}"
+
+    # Worker-only mode: Set to true to only register workers to existing cluster
+    worker_only_mode: false
 
   tasks:
     # ============================================
@@ -42,6 +64,31 @@
         fail_msg: "Required variables not defined. Check vars/vault.yaml and vars/main.yaml"
       tags:
         - always
+
+    - name: Check worker-only mode prerequisites
+      when: worker_only_mode | default(false) | bool
+      tags:
+        - always
+        - register-worker
+      block:
+        - name: Check if secrets file exists (required for worker-only mode)
+          ansible.builtin.stat:
+            path: "{{ secrets_file }}"
+          register: secrets_file_check
+
+        - name: Check if talosconfig exists (required for worker-only mode)
+          ansible.builtin.stat:
+            path: "{{ talosconfig_file }}"
+          register: talosconfig_check
+
+        - name: Fail if required files missing for worker-only mode
+          ansible.builtin.fail:
+            msg: |
+              Worker-only mode requires existing cluster files:
+              - secrets.yaml: {{ 'Found' if secrets_file_check.stat.exists else 'MISSING' }}
+              - talosconfig: {{ 'Found' if talosconfig_check.stat.exists else 'MISSING' }}
+              Please run full cluster init first or ensure files exist in {{ output_dir }}
+          when: not secrets_file_check.stat.exists or not talosconfig_check.stat.exists
 
     - name: Check talosctl is installed
       ansible.builtin.command: |
@@ -75,8 +122,10 @@
           - "Cluster Endpoint: {{ cluster_endpoint }}"
           - "Master Nodes: {{ master_hosts | length }}"
           - "Kubernetes Version: {{ kubernetes_version }}"
+          - "Worker-only mode: {{ worker_only_mode | default(false) }}"
       tags:
         - always
+        - register-worker
 
     # ============================================
     # STEP 1.5: Discover worker nodes from Proxmox
@@ -91,6 +140,7 @@
       tags:
         - always
         - worker-discovery
+        - register-worker
 
     - name: Parse VMs and filter by worker tag
       ansible.builtin.set_fact:
@@ -108,6 +158,7 @@
       tags:
         - always
         - worker-discovery
+        - register-worker
 
     - name: Get IP addresses for worker VMs
       ansible.builtin.shell: |
@@ -125,6 +176,7 @@
       tags:
         - always
         - worker-discovery
+        - register-worker
 
     - name: Extract worker IP addresses
       ansible.builtin.set_fact:
@@ -153,6 +205,7 @@
       tags:
         - always
         - worker-discovery
+        - register-worker
 
     - name: Convert worker IPs to structured list with VMID
       ansible.builtin.set_fact:
@@ -179,6 +232,7 @@
       tags:
         - always
         - worker-discovery
+        - register-worker
 
     - name: Display discovered worker nodes
       ansible.builtin.debug:
@@ -191,6 +245,7 @@
       tags:
         - always
         - worker-discovery
+        - register-worker
 
     # ============================================
     # STEP 2: Generate Talos secrets bundle
@@ -199,6 +254,7 @@
       ansible.builtin.stat:
         path: "{{ secrets_file }}"
       register: secrets_stat
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - secrets
         - generate
@@ -206,7 +262,9 @@
     - name: Generate Talos secrets bundle
       ansible.builtin.command: |
         talosctl gen secrets -o {{ secrets_file }}
-      when: not secrets_stat.stat.exists
+      when:
+        - not (worker_only_mode | default(false) | bool)
+        - not secrets_stat.stat.exists
       changed_when: true
       tags:
         - secrets
@@ -216,6 +274,7 @@
       ansible.builtin.file:
         path: "{{ secrets_file }}"
         mode: "0600"
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - secrets
         - generate
@@ -223,6 +282,7 @@
     # ============================================
     # STEP 4: Generate machine configurations
     # ============================================
+    # Full cluster init: regenerate all configs
     - name: Check if configuration files already exist
       ansible.builtin.stat:
         path: "{{ item }}"
@@ -231,6 +291,7 @@
         - "{{ worker_config_file }}"
         - "{{ talosconfig_file }}"
       register: config_files_stat
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - generate
         - config
@@ -243,7 +304,9 @@
         - "{{ controlplane_config_file }}"
         - "{{ worker_config_file }}"
         - "{{ talosconfig_file }}"
-      when: config_files_stat.results | selectattr('stat.exists') | list | length > 0
+      when:
+        - not (worker_only_mode | default(false) | bool)
+        - config_files_stat.results | selectattr('stat.exists') | list | length > 0
       tags:
         - generate
         - config
@@ -260,10 +323,41 @@
           --config-patch-worker @{{ patches_dir }}/worker-patch.yaml \
           {% if additional_sans is defined and additional_sans | length > 0 %}--additional-sans {{ additional_sans | join(',') }} {% endif %} \
           --force
+      when: not (worker_only_mode | default(false) | bool)
       changed_when: true
       tags:
         - generate
         - config
+
+    # Worker-only mode: regenerate only worker config
+    - name: Delete existing worker configuration for regeneration (worker-only mode)
+      ansible.builtin.file:
+        path: "{{ worker_config_file }}"
+        state: absent
+      when: worker_only_mode | default(false) | bool
+      tags:
+        - generate
+        - config
+        - register-worker
+
+    - name: Generate worker configuration only (worker-only mode)
+      ansible.builtin.command: |
+        talosctl gen config {{ cluster_name }} https://{{ cluster_endpoint }}:6443 \
+          --kubernetes-version {{ kubernetes_version }} \
+          --with-secrets {{ secrets_file }} \
+          --output-dir {{ output_dir }} \
+          {% if talos_factory_image_url is defined %}--install-image {{ talos_factory_image_url }} {% endif %} \
+          --config-patch @{{ patches_dir }}/base-patch.yaml \
+          --config-patch-worker @{{ patches_dir }}/worker-patch.yaml \
+          {% if additional_sans is defined and additional_sans | length > 0 %}--additional-sans {{ additional_sans | join(',') }} {% endif %} \
+          --output-types worker \
+          --force
+      when: worker_only_mode | default(false) | bool
+      changed_when: true
+      tags:
+        - generate
+        - config
+        - register-worker
 
     # ============================================
     # STEP 5: Apply configuration to nodes
@@ -279,6 +373,7 @@
       retries: 3
       delay: 10
       changed_when: true
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - apply
 
@@ -287,6 +382,7 @@
         seconds: 15
         prompt: "Waiting for master node {{ item.vm_id }} to begin reboot..."
       loop: "{{ master_hosts }}"
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - apply
         - boot-config
@@ -303,6 +399,7 @@
       delay: 10
       changed_when: false
       failed_when: false
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - apply
         - boot-config
@@ -318,6 +415,7 @@
       changed_when: true
       failed_when: false
       throttle: 1
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - apply
         - boot-config
@@ -327,6 +425,7 @@
         seconds: 15
         prompt: "Waiting for master node {{ item.vm_id }} to begin reboot..."
       loop: "{{ master_hosts }}"
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - apply
         - boot-config
@@ -342,6 +441,7 @@
       register: master_status_check
       retries: 5
       delay: 10
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - apply
         - boot-config
@@ -360,6 +460,7 @@
       changed_when: true
       tags:
         - apply
+        - register-worker
 
     - name: Wait between worker node reboots
       ansible.builtin.pause:
@@ -372,6 +473,7 @@
       tags:
         - apply
         - boot-config
+        - register-worker
 
     - name: Wait for QEMU Guest Agent to be available on worker nodes
       ansible.builtin.shell: |
@@ -392,6 +494,7 @@
       tags:
         - apply
         - boot-config
+        - register-worker
 
     - name: Wait between worker node reboots
       ansible.builtin.pause:
@@ -404,6 +507,7 @@
       tags:
         - apply
         - boot-config
+        - register-worker
 
     - name: Configure boot settings and reboot worker nodes (one at a time)
       ansible.builtin.shell: |
@@ -423,6 +527,7 @@
       tags:
         - apply
         - boot-config
+        - register-worker
 
     - name: Verify worker nodes are running
       ansible.builtin.shell: |
@@ -442,6 +547,7 @@
       tags:
         - apply
         - boot-config
+        - register-worker
 
     # ============================================
     # STEP 6: Bootstrap Kubernetes cluster
@@ -450,6 +556,7 @@
       ansible.builtin.command: |
         talosctl config merge {{ talosconfig_file }}
       changed_when: true
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - bootstrap
         - kubeconfig
@@ -458,6 +565,7 @@
       ansible.builtin.command: |
         talosctl config endpoint {{ master_hosts | map(attribute='ip') | join(' ') }}
       changed_when: true
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - bootstrap
         - kubeconfig
@@ -470,6 +578,7 @@
       delay: 30
       until: bootstrap_result.rc == 0
       changed_when: true
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - bootstrap
         - etcd
@@ -478,6 +587,7 @@
       ansible.builtin.pause:
         seconds: 60
         prompt: "Waiting for Kubernetes API server to start..."
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - bootstrap
 
@@ -488,6 +598,7 @@
       ansible.builtin.command: |
         talosctl kubeconfig --nodes {{ master_hosts[0].ip }} --force
       changed_when: true
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - kubeconfig
         - verify
@@ -506,6 +617,7 @@
       failed_when: false
       tags:
         - verify
+        - register-worker
 
     - name: Display cluster nodes
       ansible.builtin.command: |
@@ -514,12 +626,14 @@
       changed_when: false
       tags:
         - verify
+        - register-worker
 
     - name: Show nodes status
       ansible.builtin.debug:
         var: nodes_output.stdout_lines
       tags:
         - verify
+        - register-worker
 
     # ============================================
     # STEP 8: Encrypt sensitive files
@@ -527,13 +641,14 @@
     - name: Include encryption tasks
       ansible.builtin.include_tasks:
         file: tasks/encrypt.yaml
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - encrypt
 
     # ============================================
     # STEP 9: Display summary and next steps
     # ============================================
-    - name: Display cluster information
+    - name: Display cluster information (full init)
       ansible.builtin.debug:
         msg:
           - "========================================"
@@ -550,5 +665,25 @@
           - "Talosctl is configured with endpoints: {{ master_hosts | map(attribute='ip') | join(', ') }}"
           - "Kubeconfig is merged to ~/.kube/config"
           - ""
+      when: not (worker_only_mode | default(false) | bool)
       tags:
         - always
+
+    - name: Display worker registration summary
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Worker Nodes Registered!"
+          - "========================================"
+          - ""
+          - "Cluster Name: {{ cluster_name }}"
+          - "Cluster Endpoint: https://{{ cluster_endpoint }}:6443"
+          - "Worker Nodes Added: {{ (worker_hosts | default([])) | length }}"
+          - "Worker IPs: {{ (worker_hosts | default([])) | map(attribute='ip') | join(', ') if worker_hosts is defined else 'None' }}"
+          - ""
+          - "Run 'kubectl get nodes' to verify worker nodes have joined the cluster."
+          - ""
+      when: worker_only_mode | default(false) | bool
+      tags:
+        - always
+        - register-worker

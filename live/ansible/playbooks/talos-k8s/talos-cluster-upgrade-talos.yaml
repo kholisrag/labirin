@@ -13,6 +13,7 @@
     # Target Talos version to upgrade to
     target_talos_version: "1.12.0"
     # Use https://factory.talos.dev/ to generate the image URL
+    # v1.12.0 https://factory.talos.dev/?arch=amd64&board=undefined&bootloader=sd-boot&cmdline=console%3DttyS0&cmdline-set=true&extensions=-&extensions=siderolabs%2Fqemu-guest-agent&platform=nocloud&secureboot=true&target=cloud&version=1.12.0
     target_talos_image: "factory.talos.dev/nocloud-installer-secureboot/4a273f126bf4564b7c3932f648f68fd87d5f2b643a393ddcdeb4b5e78ba45a9b:v1.12.0"
 
   tasks:

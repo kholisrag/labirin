@@ -9,5 +9,4 @@ secrets.yaml
 controlplane.yaml
 worker.yaml
 
-!secrets/*.yaml
-!secrets/talosconfig
+secrets/*.plain.yaml

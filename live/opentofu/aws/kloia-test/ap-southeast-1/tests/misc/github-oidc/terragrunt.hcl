@@ -21,7 +21,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/aws/github-actions-oidc-role//0.0.5", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=aws-github-actions-oidc-role/v0.1.0"
 }
 
 include "parent" {

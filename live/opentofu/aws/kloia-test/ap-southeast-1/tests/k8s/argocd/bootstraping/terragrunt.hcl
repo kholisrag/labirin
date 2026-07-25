@@ -14,7 +14,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/kubernetes/manifests/eks//0.1.0", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=kubernetes-manifests-eks/v0.1.0"
 }
 
 include "parent" {

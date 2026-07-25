@@ -31,7 +31,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/aws/vpc//v6.5.1", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=aws-vpc/v0.1.0"
 }
 
 include "parent" {

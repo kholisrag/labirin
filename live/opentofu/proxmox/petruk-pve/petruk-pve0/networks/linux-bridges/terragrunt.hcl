@@ -11,7 +11,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/proxmox/networks/linux-bridges//0.1.0", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=proxmox-networks-linux-bridges/v0.1.0"
 }
 
 prevent_destroy = true

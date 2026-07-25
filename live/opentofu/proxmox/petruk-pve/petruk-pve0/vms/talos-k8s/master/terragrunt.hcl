@@ -106,7 +106,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/proxmox/vms//0.2.0", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=proxmox-vms/v0.1.0"
 }
 
 prevent_destroy = true

@@ -14,7 +14,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/proxmox/download-files//0.1.0", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=proxmox-download-files/v0.1.0"
 }
 
 include "parent" {

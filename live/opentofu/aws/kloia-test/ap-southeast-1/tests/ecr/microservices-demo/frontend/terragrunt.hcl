@@ -22,7 +22,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/aws/ecr//3.1.0", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=aws-ecr/v0.1.0"
 }
 
 include "parent" {

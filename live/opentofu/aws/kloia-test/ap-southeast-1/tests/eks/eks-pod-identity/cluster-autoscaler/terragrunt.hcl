@@ -22,7 +22,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/aws/eks-pod-identity//2.5.0", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=aws-eks-pod-identity/v0.1.0"
 }
 
 include "parent" {

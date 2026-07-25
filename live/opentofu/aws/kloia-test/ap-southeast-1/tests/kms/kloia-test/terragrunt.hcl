@@ -21,7 +21,7 @@ locals {
 }
 
 terraform {
-  source = format("%s/modules/opentofu/aws/kms//4.1.1", get_repo_root())
+  source = "git::https://github.com/kholisrag/iac-modules.git?ref=aws-kms/v0.1.0"
 }
 
 include "parent" {

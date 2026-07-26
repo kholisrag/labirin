@@ -1,0 +1,22 @@
+# Managed by Ansible - live/ansible/playbooks/fireactions/
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target local-fs.target
+
+[Service]
+Type=notify
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart={{ fireactions_bin_dir }}/containerd
+Delegate=yes
+KillMode=process
+Restart=always
+RestartSec=5
+LimitNPROC=infinity
+LimitCORE=infinity
+LimitNOFILE=infinity
+TasksMax=infinity
+OOMScoreAdjust=-999
+
+[Install]
+WantedBy=multi-user.target

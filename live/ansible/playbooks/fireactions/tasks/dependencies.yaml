@@ -1,0 +1,26 @@
+---
+# ============================================
+# System dependencies
+# ============================================
+
+- name: Install base packages
+  ansible.builtin.package:
+    name:
+      - curl
+      - gnupg
+      - lvm2
+      - tar
+    state: present
+  tags:
+    - dependencies
+
+- name: Ensure the LVM monitoring daemon is running
+  ansible.builtin.systemd_service:
+    name: lvm2-monitor
+    enabled: true
+    state: started
+  # Required for thin_pool_autoextend to actually fire. Not present on every
+  # distribution, so this is best-effort.
+  failed_when: false
+  tags:
+    - dependencies

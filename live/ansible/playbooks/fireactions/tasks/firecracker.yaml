@@ -1,0 +1,56 @@
+---
+# ============================================
+# Firecracker VMM
+# ============================================
+
+- name: Check the installed Firecracker version
+  ansible.builtin.command:
+    cmd: "{{ fireactions_bin_dir }}/firecracker --version"
+  register: fireactions_firecracker_installed
+  changed_when: false
+  failed_when: false
+  tags:
+    - firecracker
+
+- name: Install Firecracker
+  when: firecracker_version not in (fireactions_firecracker_installed.stdout | default(''))
+  tags:
+    - firecracker
+  block:
+    - name: Create a temporary directory for the Firecracker download
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: firecracker
+      register: fireactions_firecracker_tmp
+
+    - name: Download the Firecracker release archive
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/firecracker-microvm/firecracker/releases/download/v{{ firecracker_version }}/firecracker-v{{ firecracker_version }}-{{ fireactions_uname_arch }}.tgz
+        dest: "{{ fireactions_firecracker_tmp.path }}/firecracker.tgz"
+        mode: "0600"
+
+    - name: Unpack the Firecracker release archive
+      ansible.builtin.unarchive:
+        src: "{{ fireactions_firecracker_tmp.path }}/firecracker.tgz"
+        dest: "{{ fireactions_firecracker_tmp.path }}"
+        remote_src: true
+        extra_opts:
+          - --strip-components=1
+
+    - name: Install the Firecracker binary
+      ansible.builtin.copy:
+        src: "{{ fireactions_firecracker_tmp.path }}/firecracker-v{{ firecracker_version }}-{{ fireactions_uname_arch }}"
+        dest: "{{ fireactions_bin_dir }}/firecracker"
+        mode: "0755"
+        owner: root
+        group: root
+        remote_src: true
+      notify: Restart fireactions
+
+  always:
+    - name: Remove the temporary Firecracker directory
+      ansible.builtin.file:
+        path: "{{ fireactions_firecracker_tmp.path }}"
+        state: absent
+      when: fireactions_firecracker_tmp.path is defined

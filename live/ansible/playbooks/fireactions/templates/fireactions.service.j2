@@ -1,0 +1,21 @@
+# Managed by Ansible - live/ansible/playbooks/fireactions/
+[Unit]
+Description=Fireactions
+Documentation=https://github.com/hostinger/fireactions
+After=network.target containerd.service
+Requires=containerd.service
+
+[Service]
+User=root
+Type=simple
+KillMode=process
+ExecStartPre=/usr/bin/which firecracker
+ExecStartPre=/usr/bin/which containerd
+ExecStart={{ fireactions_bin_dir }}/fireactions server --config {{ fireactions_config_file }}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+# Managed by Ansible - live/ansible/playbooks/fireactions/
+version = 2
+
+root      = "/var/lib/containerd"
+imports   = []
+state     = "/run/containerd"
+oom_score = 0
+
+[grpc]
+  address = "{{ fireactions_containerd_address }}"
+  uid     = 0
+  gid     = 0
+
+[plugins]
+  [plugins."io.containerd.snapshotter.v1.devmapper"]
+    # Device-mapper name of the LVM thin pool: "<volume group>-<thin pool>".
+    pool_name       = "{{ fireactions_containerd_pool_name }}"
+    root_path       = "/var/lib/containerd/devmapper"
+    base_image_size = "{{ fireactions_containerd_base_image_size }}"
+    discard_blocks  = true

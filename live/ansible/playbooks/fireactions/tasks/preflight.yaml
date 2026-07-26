@@ -1,0 +1,147 @@
+---
+# ============================================
+# Pre-flight checks for Fireactions
+# ============================================
+# Everything here is read-only. The point is to fail with an actionable message
+# BEFORE we start wiping block devices or writing systemd units.
+# ============================================
+
+- name: Assert a supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+    fail_msg: >-
+      Fireactions only ships amd64/arm64 builds, this host reports
+      '{{ ansible_facts['architecture'] }}'.
+  tags:
+    - always
+
+- name: Set architecture facts
+  ansible.builtin.set_fact:
+    # Release asset naming: Fireactions/containerd/CNI use Go-style names
+    # (amd64/arm64), Firecracker uses uname -m (x86_64/aarch64).
+    fireactions_arch: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+    fireactions_uname_arch: "{{ ansible_facts['architecture'] }}"
+  tags:
+    - always
+
+- name: Check for the KVM device
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: fireactions_kvm_device
+  tags:
+    - always
+
+- name: Fail when hardware virtualization is unavailable
+  ansible.builtin.fail:
+    msg:
+      - "/dev/kvm is missing - Firecracker cannot run on this host."
+      - ""
+      - "This host is a Proxmox guest, so /dev/kvm requires BOTH:"
+      - "  1. Nested virtualization enabled on the Proxmox node. Run:"
+      - "     ansible-playbook live/ansible/playbooks/pve/enable-nested-virtualization.yaml"
+      - "  2. The VM configured with cpu type 'host' so vmx/svm is passed through."
+      - "     See the OpenTofu unit at"
+      - "     live/opentofu/proxmox/petruk-pve/petruk-pve0/vms/fireactions/terragrunt.hcl"
+      - ""
+      - "A cold stop/start of the VM (not a reboot) is required after changing either."
+  when: not fireactions_kvm_device.stat.exists
+  tags:
+    - always
+
+- name: Assert GitHub App credentials are configured
+  ansible.builtin.assert:
+    that:
+      - fireactions_github_app_id | int > 0
+      - fireactions_github_app_private_key is defined
+      - "'PRIVATE KEY' in fireactions_github_app_private_key"
+      - "'REPLACE_ME' not in fireactions_github_app_private_key"
+    fail_msg: >-
+      GitHub App credentials are still placeholders. Populate them with:
+      ansible-vault edit live/ansible/playbooks/fireactions/vars/vault.yaml
+      (see the README in this playbook directory for how to create the App).
+  no_log: true
+  tags:
+    - always
+
+# The Fireactions systemd unit does not exist during the first run. Handlers
+# consult this so an early flush (after Containerd) does not try to restart a
+# service that has never been installed.
+- name: Check whether the Fireactions systemd unit is already installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/fireactions.service
+  register: fireactions_unit_stat
+  tags:
+    - always
+
+- name: Record whether the Fireactions systemd unit exists
+  ansible.builtin.set_fact:
+    fireactions_service_unit_exists: "{{ fireactions_unit_stat.stat.exists }}"
+  tags:
+    - always
+
+- name: Check the dedicated Containerd block device
+  ansible.builtin.stat:
+    path: "{{ fireactions_containerd_device }}"
+    follow: true
+  register: fireactions_containerd_device_stat
+  tags:
+    - always
+
+# Resolved without following the symlink so lnk_source gives the real device
+# node (/dev/sdb), which is what ansible_facts.mounts reports.
+- name: Resolve the Containerd block device to its real device node
+  ansible.builtin.stat:
+    path: "{{ fireactions_containerd_device }}"
+    follow: false
+  register: fireactions_containerd_device_link
+  tags:
+    - always
+
+- name: Fail when the Containerd block device is missing
+  ansible.builtin.fail:
+    msg:
+      - "Containerd block device '{{ fireactions_containerd_device }}' not found."
+      - ""
+      - "This playbook expects a second, empty disk dedicated to the devmapper"
+      - "snapshotter. The OpenTofu unit attaches it as scsi1 with serial"
+      - "'containerd', which the guest exposes at the by-id path above."
+      - ""
+      - "Set fireactions_containerd_device in vars/main.yaml if your host uses"
+      - "a different device."
+  when: not fireactions_containerd_device_stat.stat.exists
+  tags:
+    - always
+
+- name: Determine the real Containerd device node
+  ansible.builtin.set_fact:
+    fireactions_containerd_real_device: >-
+      {{ fireactions_containerd_device_link.stat.lnk_source
+         | default(fireactions_containerd_device, true) }}
+  tags:
+    - always
+
+# Matches both the whole device (/dev/sdb) and any partition on it (/dev/sdb1).
+- name: Gather mounted filesystems on the Containerd block device
+  ansible.builtin.set_fact:
+    fireactions_containerd_device_mounts: >-
+      {{
+        ansible_facts['mounts']
+        | selectattr('device', 'match', fireactions_containerd_real_device ~ '[0-9]*$')
+        | map(attribute='mount')
+        | list
+      }}
+  tags:
+    - always
+
+- name: Fail when the Containerd block device is in use
+  ansible.builtin.fail:
+    msg:
+      - "'{{ fireactions_containerd_real_device }}' has mounted filesystems:"
+      - "{{ fireactions_containerd_device_mounts | join(', ') }}"
+      - ""
+      - "This device is wiped and converted into an LVM thin pool. Refusing to"
+      - "touch a device that is currently mounted."
+  when: fireactions_containerd_device_mounts | length > 0
+  tags:
+    - always

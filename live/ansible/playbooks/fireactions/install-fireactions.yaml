@@ -1,0 +1,99 @@
+---
+- name: Install Fireactions
+  hosts: fireactions_all
+  become: true
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted
+        daemon_reload: true
+
+    # Skipped on a first run: handlers are flushed once after Containerd, at
+    # which point the Fireactions unit does not exist yet. The service is
+    # started explicitly at the end of tasks/fireactions.yaml instead.
+    - name: Restart fireactions
+      ansible.builtin.systemd_service:
+        name: fireactions
+        state: restarted
+        daemon_reload: true
+      when: fireactions_service_unit_exists | default(false) | bool
+
+  tasks:
+    # ============================================
+    # Pre-flight checks
+    # ============================================
+    - name: Run pre-flight checks
+      ansible.builtin.include_tasks:
+        file: tasks/preflight.yaml
+      tags:
+        - always
+
+    # ============================================
+    # Components
+    # ============================================
+    - name: Install system dependencies
+      ansible.builtin.include_tasks:
+        file: tasks/dependencies.yaml
+      tags:
+        - dependencies
+
+    - name: Install Firecracker
+      ansible.builtin.include_tasks:
+        file: tasks/firecracker.yaml
+      tags:
+        - firecracker
+
+    - name: Install Containerd
+      ansible.builtin.include_tasks:
+        file: tasks/containerd.yaml
+      tags:
+        - containerd
+
+    - name: Install CNI plugins
+      ansible.builtin.include_tasks:
+        file: tasks/cni.yaml
+      tags:
+        - cni
+
+    - name: Install Firecracker guest kernel
+      ansible.builtin.include_tasks:
+        file: tasks/kernel.yaml
+      tags:
+        - kernel
+
+    - name: Install Fireactions
+      ansible.builtin.include_tasks:
+        file: tasks/fireactions.yaml
+      tags:
+        - fireactions
+
+    # ============================================
+    # Summary
+    # ============================================
+    - name: Display post-install instructions
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Fireactions {{ fireactions_version }} installed on {{ inventory_hostname }}"
+          - "========================================"
+          - ""
+          - "Organisation : {{ fireactions_github_organization }}"
+          - "Pools        : {{ fireactions_pools | map(attribute='name') | join(', ') }}"
+          - "Replicas     : {{ fireactions_pools | map(attribute='replicas') | sum }}"
+          - ""
+          - "Verify with:"
+          - "  systemctl status fireactions"
+          - "  journalctl -u fireactions -f"
+          - "  fireactions pools ls"
+          - ""
+          - "Then check https://github.com/organizations/{{ fireactions_github_organization }}/settings/actions/runners"
+          - "for runners in the Idle state."
+          - ""
+      tags:
+        - always

@@ -1,0 +1,244 @@
+---
+# ============================================
+# Fireactions - GitHub Actions runner orchestrator on Firecracker microVMs
+# https://fireactions.io/latest/
+# ============================================
+
+# --------------------------------------------
+# Component versions
+# --------------------------------------------
+# Fireactions itself. https://github.com/hostinger/fireactions/releases
+fireactions_version: "2.0.5"
+
+# Firecracker. Pinned to the version the Fireactions install docs are written
+# against. 1.16.1 was also tried and behaves identically, so this pin is
+# conservatism rather than a known incompatibility - bump deliberately and
+# re-run the first-build smoke test.
+# https://github.com/firecracker-microvm/firecracker/releases
+firecracker_version: "1.9.1"
+
+# Containerd must stay on the 1.7.x line: the devmapper snapshotter that
+# Fireactions depends on was removed from containerd 2.x.
+# https://github.com/containerd/containerd/releases
+containerd_version: "1.7.34"
+
+# Matches the version Fireactions itself vendors (see containernetworking/plugins
+# in its go.mod). The v1.6.1 the upstream install docs mention no longer has
+# release assets on GitHub.
+# https://github.com/containernetworking/plugins/releases
+cni_plugins_version: "1.9.1"
+
+# https://github.com/hostinger/tc-redirect-tap/releases
+tc_redirect_tap_version: "0.0.1"
+
+# Pre-built Firecracker guest kernel published by Hostinger. Either "5.10" or "6.1".
+#
+# 5.10 does NOT work here: every virtio device is rejected at probe time with
+#   virtio_blk: probe of virtio0 failed with error -22
+# (same for virtio_net and vsock), so the guest finds no root device and panics
+# with 'Cannot open root device "vda"'. Reproduced identically on Firecracker
+# 1.9.1 and 1.16.1, so it is a guest-kernel problem, not a VMM version problem.
+fireactions_kernel_version: "5.10"
+
+# --------------------------------------------
+# Paths
+# --------------------------------------------
+fireactions_bin_dir: /usr/local/bin
+fireactions_config_dir: /etc/fireactions
+fireactions_config_file: "{{ fireactions_config_dir }}/config.yaml"
+fireactions_data_dir: /var/lib/fireactions
+fireactions_kernel_dir: "{{ fireactions_data_dir }}/kernels/{{ fireactions_kernel_version }}"
+fireactions_kernel_image_path: "{{ fireactions_kernel_dir }}/vmlinux"
+
+# Filename fetched from Hostinger's kernel bucket. Two amd64/5.10 builds are
+# published: the default "vmlinux" (6.2 MB, stripped) and "vmlinux-2024-04-18"
+# (43 MB). Both are valid uncompressed ELF images but they are different
+# builds. BOTH fail virtio probe identically on this host, so this is back on
+# the upstream default; the knob exists so the build can be swapped without
+# touching tasks while the probe failure is investigated.
+fireactions_kernel_remote_file: vmlinux
+# Upstream default. Dropping "noapic" was tried as a fix for the virtio probe
+# failure documented above and made no difference, so it is left as upstream
+# ships it.
+fireactions_kernel_args: "console=ttyS0 noapic reboot=k panic=1 pci=off nomodules rw"
+fireactions_cni_bin_dir: /opt/cni/bin
+fireactions_cni_conf_dir: /etc/cni/net.d
+
+# --------------------------------------------
+# Containerd devmapper thin pool
+# --------------------------------------------
+# Dedicated block device consumed by the devmapper snapshotter. This device is
+# WIPED on first run. Addressed by disk serial (set in the OpenTofu unit at
+# live/opentofu/proxmox/petruk-pve/petruk-pve0/vms/fireactions/terragrunt.hcl)
+# rather than /dev/sdb, which is not stable across reboots.
+#
+# Note the "S" prefix: QEMU exposes a user-set serial as
+# scsi-SQEMU_QEMU_HARDDISK_<serial>. The "0" prefix form
+# (scsi-0QEMU_QEMU_HARDDISK_drive-scsi1) is the device-name id, which is NOT
+# stable if disks are reordered - that is the whole reason we set a serial.
+fireactions_containerd_device: /dev/disk/by-id/scsi-SQEMU_QEMU_HARDDISK_containerd
+fireactions_containerd_volume_group: containerd
+fireactions_containerd_thinpool_name: thinpool
+# dm device name = "<volume group>-<thin pool>", this is what containerd wants.
+fireactions_containerd_pool_name: "{{ fireactions_containerd_volume_group }}-{{ fireactions_containerd_thinpool_name }}"
+fireactions_containerd_thinpool_size: "95%VG"
+fireactions_containerd_thinpool_metadata_size: 1G
+# Maximum size of a single microVM root device. Runner images are large; 30GB
+# is the Fireactions default and leaves room for Docker layers built in-job.
+fireactions_containerd_base_image_size: "30GB"
+fireactions_containerd_address: /run/containerd/containerd.sock
+fireactions_containerd_namespace: fireactions
+
+# --------------------------------------------
+# CNI network for the microVMs
+# --------------------------------------------
+# Private, NAT'ed subnet used only inside the Fireactions host. Must not overlap
+# with the homelab LAN (10.10.0.0/16) or the Proxmox WAN side (192.168.3.0/24).
+fireactions_cni_network_name: fireactions
+fireactions_cni_bridge: fireactions-br0
+fireactions_cni_subnet: 192.168.128.0/23
+fireactions_cni_mtu: 1500
+
+# --------------------------------------------
+# Fireactions server
+# --------------------------------------------
+fireactions_bind_address: 127.0.0.1:8080
+fireactions_metrics_enabled: true
+# Bound to the LAN address so Prometheus can scrape /metrics from elsewhere.
+fireactions_metrics_address: 0.0.0.0:8081
+fireactions_log_level: info
+
+# --------------------------------------------
+# GitHub
+# --------------------------------------------
+# Fireactions v2 registers runners at ORGANISATION level only - there is no
+# repository-scoped option in the config schema (see server/config.go,
+# RunnerConfig.Organization is `validate:"required"`).
+fireactions_github_organization: oprek-sh
+# 1 is the "Default" self-hosted runner group.
+fireactions_github_runner_group_id: 1
+
+# Secrets come from vars/vault.yaml (ansible-vault).
+fireactions_github_app_id: "{{ vault_fireactions_github_app_id }}"
+fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key }}"
+
+# --------------------------------------------
+# Runner image
+# --------------------------------------------
+# Pinned rather than :latest so a pool restart cannot silently change the
+# toolchain mid-week. Tags: https://github.com/hostinger/fireactions-images/pkgs/container/fireactions-images%2Fubuntu24.04
+fireactions_runner_image: ghcr.io/hostinger/fireactions-images/ubuntu24.04:20260702062356
+
+# --------------------------------------------
+# Pools
+# --------------------------------------------
+# A pool is host-local: each Fireactions host keeps its own `replicas` count and
+# there is no cross-host scheduler. Several hosts form one logical pool purely
+# by sharing runner labels - GitHub load-balances across every runner carrying
+# them. Total concurrency = sum of replicas over all hosts in the inventory.
+#
+# IMPORTANT - replicas are STANDING microVMs, not on-demand capacity.
+# Fireactions has no webhook handler and no workflow_job awareness (the only
+# HTTP surface is /metrics). Each pool permanently holds `replicas` idle
+# microVMs, replaced as jobs consume them. So every replica costs its full
+# mem_size_mib 24/7 whether or not anything is building. Adding a tier is not
+# free; it is a permanent reservation.
+#
+# MEMORY BUDGET for one 32 GiB host (see the OpenTofu unit for the node-level
+# budget). Ballooning is disabled, so this is a hard reservation:
+#
+#   small   2 vCPU x  4 GiB x 2 replicas =  8 GiB   4 vCPU
+#   medium  4 vCPU x  8 GiB x 1 replica  =  8 GiB   4 vCPU
+#   large   8 vCPU x 12 GiB x 1 replica  = 12 GiB   8 vCPU
+#   ------------------------------------------------------
+#   total                                  28 GiB  16 vCPU
+#
+# That leaves ~4 GiB for the host side (containerd, image pulls, page cache).
+# vCPU is oversubscribed 2:1 against the VM's 8 - fine for CI, where jobs are
+# rarely all CPU-saturated at once. If you raise a tier, lower another.
+#
+# LABEL SELECTION:
+#   runs-on: fireactions-small        -> that tier only
+#   runs-on: [self-hosted, fireactions] -> ANY tier, whichever is idle. Handy,
+#                                        but it can hand a trivial job a large
+#                                        microVM. Prefer the explicit tier.
+fireactions_pools:
+  - name: fireactions-small
+    replicas: 2
+    shutdown_on_exit: true
+    runner:
+      name: fireactions-small
+      image: "{{ fireactions_runner_image }}"
+      image_pull_policy: IfNotPresent
+      # `| int` matters: Fireactions unmarshals group_id into an int64 and
+      # yaml.v3 will not coerce a quoted string.
+      group_id: "{{ fireactions_github_runner_group_id | int }}"
+      organization: "{{ fireactions_github_organization }}"
+      labels:
+        - self-hosted
+        - fireactions
+        - fireactions-small
+        - fireactions-2vcpu-4gb
+    firecracker:
+      binary_path: firecracker
+      kernel_image_path: "{{ fireactions_kernel_image_path }}"
+      kernel_args: "{{ fireactions_kernel_args }}"
+      machine_config:
+        mem_size_mib: 4096
+        vcpu_count: 2
+      metadata:
+        pool: fireactions-small
+        node: "{{ inventory_hostname }}"
+        environment: homelab
+
+  - name: fireactions-medium
+    replicas: 1
+    shutdown_on_exit: true
+    runner:
+      name: fireactions-medium
+      image: "{{ fireactions_runner_image }}"
+      image_pull_policy: IfNotPresent
+      group_id: "{{ fireactions_github_runner_group_id | int }}"
+      organization: "{{ fireactions_github_organization }}"
+      labels:
+        - self-hosted
+        - fireactions
+        - fireactions-medium
+        - fireactions-4vcpu-8gb
+    firecracker:
+      binary_path: firecracker
+      kernel_image_path: "{{ fireactions_kernel_image_path }}"
+      kernel_args: "{{ fireactions_kernel_args }}"
+      machine_config:
+        mem_size_mib: 8192
+        vcpu_count: 4
+      metadata:
+        pool: fireactions-medium
+        node: "{{ inventory_hostname }}"
+        environment: homelab
+
+  - name: fireactions-large
+    replicas: 1
+    shutdown_on_exit: true
+    runner:
+      name: fireactions-large
+      image: "{{ fireactions_runner_image }}"
+      image_pull_policy: IfNotPresent
+      group_id: "{{ fireactions_github_runner_group_id | int }}"
+      organization: "{{ fireactions_github_organization }}"
+      labels:
+        - self-hosted
+        - fireactions
+        - fireactions-large
+        - fireactions-8vcpu-12gb
+    firecracker:
+      binary_path: firecracker
+      kernel_image_path: "{{ fireactions_kernel_image_path }}"
+      kernel_args: "{{ fireactions_kernel_args }}"
+      machine_config:
+        mem_size_mib: 12288
+        vcpu_count: 8
+      metadata:
+        pool: fireactions-large
+        node: "{{ inventory_hostname }}"
+        environment: homelab

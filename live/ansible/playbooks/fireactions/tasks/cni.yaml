@@ -1,0 +1,130 @@
+---
+# ============================================
+# CNI plugins
+# ============================================
+# Each microVM gets its own network namespace. The chain is:
+#   bridge          - veth into fireactions-br0, NAT'ed out of the host
+#   firewall        - isolates the microVM from the host and its neighbours
+#   tc-redirect-tap - mirrors the veth onto the tap device Firecracker needs
+# ============================================
+
+- name: Create the CNI binary directory
+  ansible.builtin.file:
+    path: "{{ fireactions_cni_bin_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  tags:
+    - cni
+
+- name: Check the installed CNI plugins version
+  ansible.builtin.slurp:
+    src: "{{ fireactions_cni_bin_dir }}/.fireactions-cni-version"
+  register: fireactions_cni_installed
+  failed_when: false
+  tags:
+    - cni
+
+- name: Install the standard CNI plugins
+  when: (fireactions_cni_installed.content | default('') | b64decode | trim) != cni_plugins_version
+  tags:
+    - cni
+  block:
+    - name: Create a temporary directory for the CNI download
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: cni
+      register: fireactions_cni_tmp
+
+    - name: Download the CNI plugins archive
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/containernetworking/plugins/releases/download/v{{ cni_plugins_version }}/cni-plugins-linux-{{ fireactions_arch }}-v{{ cni_plugins_version }}.tgz
+        dest: "{{ fireactions_cni_tmp.path }}/cni-plugins.tgz"
+        mode: "0600"
+
+    - name: Unpack the CNI plugins
+      ansible.builtin.unarchive:
+        src: "{{ fireactions_cni_tmp.path }}/cni-plugins.tgz"
+        dest: "{{ fireactions_cni_bin_dir }}"
+        remote_src: true
+
+    - name: Record the installed CNI plugins version
+      ansible.builtin.copy:
+        content: "{{ cni_plugins_version }}\n"
+        dest: "{{ fireactions_cni_bin_dir }}/.fireactions-cni-version"
+        mode: "0644"
+        owner: root
+        group: root
+
+  always:
+    - name: Remove the temporary CNI directory
+      ansible.builtin.file:
+        path: "{{ fireactions_cni_tmp.path }}"
+        state: absent
+      when: fireactions_cni_tmp.path is defined
+
+- name: Assert the required CNI plugins are present
+  ansible.builtin.stat:
+    path: "{{ fireactions_cni_bin_dir }}/{{ item }}"
+  register: fireactions_cni_plugin_stat
+  failed_when: not fireactions_cni_plugin_stat.stat.exists
+  loop:
+    - bridge
+    - host-local
+    - firewall
+  tags:
+    - cni
+
+- name: Check the installed tc-redirect-tap version
+  ansible.builtin.slurp:
+    src: "{{ fireactions_cni_bin_dir }}/.fireactions-tc-redirect-tap-version"
+  register: fireactions_tc_redirect_tap_installed
+  failed_when: false
+  tags:
+    - cni
+
+- name: Install the tc-redirect-tap CNI plugin
+  when: >-
+    (fireactions_tc_redirect_tap_installed.content | default('') | b64decode | trim) != tc_redirect_tap_version
+  tags:
+    - cni
+  block:
+    - name: Download the tc-redirect-tap plugin
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/hostinger/tc-redirect-tap/releases/download/v{{ tc_redirect_tap_version }}/tc-redirect-tap-{{ fireactions_arch }}
+        dest: "{{ fireactions_cni_bin_dir }}/tc-redirect-tap"
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Record the installed tc-redirect-tap version
+      ansible.builtin.copy:
+        content: "{{ tc_redirect_tap_version }}\n"
+        dest: "{{ fireactions_cni_bin_dir }}/.fireactions-tc-redirect-tap-version"
+        mode: "0644"
+        owner: root
+        group: root
+
+- name: Create the CNI configuration directory
+  ansible.builtin.file:
+    path: "{{ fireactions_cni_conf_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  tags:
+    - cni
+
+- name: Install the Fireactions CNI network configuration
+  ansible.builtin.template:
+    src: 10-fireactions.conflist.j2
+    dest: "{{ fireactions_cni_conf_dir }}/10-{{ fireactions_cni_network_name }}.conflist"
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Restart fireactions
+  tags:
+    - cni

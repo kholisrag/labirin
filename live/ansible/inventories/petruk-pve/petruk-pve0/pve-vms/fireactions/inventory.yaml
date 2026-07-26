@@ -1,0 +1,14 @@
+fireactions_all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  hosts:
+    # One entry per Fireactions host. Every host runs the same pool definitions
+    # from vars/main.yaml, which is what makes them one logical pool as far as
+    # GitHub is concerned - so this file is the only place host count is
+    # expressed on the Ansible side.
+    fireactions_vm_01:
+      ansible_host: petruk-pve0-fireactions-01
+      ansible_user: ansible
+    fireactions_vm_02:
+      ansible_host: petruk-pve0-fireactions-02
+      ansible_user: ansible

@@ -1,0 +1,131 @@
+# ref: https://pve.proxmox.com/wiki/Nested_Virtualization
+---
+- name: Enable Nested Virtualization on Proxmox VE
+  hosts: petruk_pve0
+  # No `become`: the SSH config connects to petruk-pve0 as root, and Proxmox VE
+  # ships without sudo, so escalating root -> root fails with
+  # "/bin/sh: 1: sudo: not found".
+  become: false
+  gather_facts: true
+
+  vars:
+    # Intel hosts load kvm_intel, AMD hosts load kvm_amd. The parameter name
+    # differs too: kvm_intel takes Y/N, kvm_amd takes 1/0.
+    nested_kvm_module: "{{ 'kvm_intel' if 'GenuineIntel' in ansible_facts['processor'] else 'kvm_amd' }}"
+    nested_kvm_value: "{{ 'Y' if 'GenuineIntel' in ansible_facts['processor'] else '1' }}"
+
+  tasks:
+    # There is no ansible_processor_flags fact, so read /proc/cpuinfo directly.
+    - name: Read CPU flags
+      ansible.builtin.slurp:
+        src: /proc/cpuinfo
+      register: nested_cpuinfo
+      tags:
+        - nested_virtualization
+
+    # Extracted into a plain list rather than regex-searching the whole file:
+    # `\b` word boundaries silently evaluate to false inside assert/when
+    # conditionals, even though they work in a debug template.
+    - name: Extract the CPU flags
+      ansible.builtin.set_fact:
+        nested_cpu_flags: >-
+          {{ (nested_cpuinfo.content | b64decode).splitlines()
+             | select('match', 'flags')
+             | first | default('')
+             | regex_replace('^flags\s*:\s*', '')
+             | split(' ') }}
+      tags:
+        - nested_virtualization
+
+    - name: Assert the host CPU supports hardware virtualization
+      ansible.builtin.assert:
+        that:
+          - "'vmx' in nested_cpu_flags or 'svm' in nested_cpu_flags"
+        fail_msg: >-
+          Neither vmx (Intel VT-x) nor svm (AMD-V) is present in
+          /proc/cpuinfo. Enable virtualization in the BIOS/UEFI first -
+          nested virtualization is impossible without it.
+      tags:
+        - nested_virtualization
+
+    - name: Display detected CPU vendor
+      ansible.builtin.debug:
+        msg: >-
+          {{ ansible_facts['processor'] | select('search', 'Intel|AMD') | first | default('unknown CPU') }}
+          -> module {{ nested_kvm_module }}, nested={{ nested_kvm_value }}
+      tags:
+        - nested_virtualization
+
+    - name: Persist the nested virtualization module option
+      ansible.builtin.copy:
+        content: "options {{ nested_kvm_module }} nested={{ nested_kvm_value }}\n"
+        dest: /etc/modprobe.d/kvm-nested.conf
+        mode: "0644"
+        owner: root
+        group: root
+      register: nested_modprobe_conf
+      tags:
+        - nested_virtualization
+
+    - name: Read the current nested virtualization state
+      ansible.builtin.slurp:
+        src: /sys/module/{{ nested_kvm_module }}/parameters/nested
+      register: nested_current_state
+      failed_when: false
+      tags:
+        - nested_virtualization
+
+    - name: Set the nested virtualization flag
+      ansible.builtin.set_fact:
+        nested_enabled: >-
+          {{ (nested_current_state.content | default('') | b64decode | trim) in ['Y', '1'] }}
+      tags:
+        - nested_virtualization
+
+    - name: Reload the KVM module to pick up the new option
+      # Fails while any VM is running, which is the desired behaviour: silently
+      # skipping would leave the host reporting success with nesting still off.
+      ansible.builtin.command:
+        cmd: modprobe -r {{ nested_kvm_module }}
+      register: nested_module_unload
+      changed_when: nested_module_unload.rc == 0
+      failed_when: false
+      when:
+        - not nested_enabled
+        - nested_modprobe_conf.changed
+      tags:
+        - nested_virtualization
+
+    - name: Load the KVM module again
+      community.general.modprobe:
+        name: "{{ nested_kvm_module }}"
+        state: present
+      when:
+        - not nested_enabled
+        - nested_modprobe_conf.changed
+      tags:
+        - nested_virtualization
+
+    - name: Re-read the nested virtualization state
+      ansible.builtin.slurp:
+        src: /sys/module/{{ nested_kvm_module }}/parameters/nested
+      register: nested_final_state
+      failed_when: false
+      tags:
+        - nested_virtualization
+
+    - name: Report the outcome
+      ansible.builtin.debug:
+        msg: >-
+          {% if (nested_final_state.content | default('') | b64decode | trim) in ['Y', '1'] %}
+          Nested virtualization is ACTIVE ({{ nested_kvm_module }}.nested={{ nested_final_state.content | b64decode | trim }}).
+          Guests still need a cold stop/start (not a reboot) and cpu type 'host'
+          before /dev/kvm appears inside them.
+          {% else %}
+          Nested virtualization is NOT active yet. /etc/modprobe.d/kvm-nested.conf
+          is in place, but {{ nested_kvm_module }} could not be reloaded - most
+          likely because VMs are running. Shut them down and reload the module,
+          or reboot the Proxmox node.
+          {% endif %}
+      tags:
+        - nested_virtualization

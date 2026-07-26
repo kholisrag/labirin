@@ -151,6 +151,15 @@ cloud_images:
     vm_import_storage: local-lvm
     redownload: false
     recreate: false
+  - name: resolute-server-cloudimg-amd64.img
+    url: https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img
+    vm_id: 9002
+    vm_name: ubuntu26-cloudinit
+    download_storage: ssd
+    download_path: /mnt/pve/ssd/template/iso
+    vm_import_storage: local-lvm
+    redownload: false
+    recreate: false
 
 resources_pools:
   - name: "gateway-pool"

@@ -1,0 +1,204 @@
+---
+# ============================================
+# Containerd with the devmapper snapshotter
+# ============================================
+# Fireactions does not run containers. It uses Containerd purely to pull runner
+# images and to hand each microVM a thin-provisioned copy of the image as its
+# root block device - which is why the devmapper snapshotter (and therefore an
+# LVM thin pool on a dedicated device) is mandatory.
+# ============================================
+
+- name: Check the installed Containerd version
+  ansible.builtin.command:
+    cmd: "{{ fireactions_bin_dir }}/containerd --version"
+  register: fireactions_containerd_installed
+  changed_when: false
+  failed_when: false
+  tags:
+    - containerd
+
+- name: Install Containerd
+  when: "'v' ~ containerd_version not in (fireactions_containerd_installed.stdout | default(''))"
+  tags:
+    - containerd
+  block:
+    - name: Create a temporary directory for the Containerd download
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: containerd
+      register: fireactions_containerd_tmp
+
+    - name: Download the Containerd release archive
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/containerd/containerd/releases/download/v{{ containerd_version }}/containerd-{{ containerd_version }}-linux-{{ fireactions_arch }}.tar.gz
+        dest: "{{ fireactions_containerd_tmp.path }}/containerd.tar.gz"
+        mode: "0600"
+
+    - name: Unpack the Containerd release archive
+      ansible.builtin.unarchive:
+        src: "{{ fireactions_containerd_tmp.path }}/containerd.tar.gz"
+        dest: "{{ fireactions_containerd_tmp.path }}"
+        remote_src: true
+
+    - name: Install the Containerd binaries
+      ansible.builtin.copy:
+        src: "{{ fireactions_containerd_tmp.path }}/bin/{{ item }}"
+        dest: "{{ fireactions_bin_dir }}/{{ item }}"
+        mode: "0755"
+        owner: root
+        group: root
+        remote_src: true
+      loop:
+        - containerd
+        - ctr
+      notify: Restart containerd
+
+  always:
+    - name: Remove the temporary Containerd directory
+      ansible.builtin.file:
+        path: "{{ fireactions_containerd_tmp.path }}"
+        state: absent
+      when: fireactions_containerd_tmp.path is defined
+
+- name: Install the Containerd systemd unit
+  ansible.builtin.template:
+    src: containerd.service.j2
+    dest: /etc/systemd/system/containerd.service
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Restart containerd
+  tags:
+    - containerd
+
+# --------------------------------------------
+# LVM thin pool
+# --------------------------------------------
+- name: Ensure the LVM profile directory exists
+  ansible.builtin.file:
+    path: /etc/lvm/profile
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  tags:
+    - containerd
+
+- name: Install the Containerd LVM thin pool profile
+  ansible.builtin.template:
+    src: containerd-lvm.profile.j2
+    dest: /etc/lvm/profile/{{ fireactions_containerd_volume_group }}.profile
+    mode: "0644"
+    owner: root
+    group: root
+  tags:
+    - containerd
+
+- name: Create the Containerd volume group
+  community.general.lvg:
+    vg: "{{ fireactions_containerd_volume_group }}"
+    pvs: "{{ fireactions_containerd_device }}"
+    state: present
+  tags:
+    - containerd
+
+- name: Create the Containerd thin pool
+  community.general.lvol:
+    vg: "{{ fireactions_containerd_volume_group }}"
+    thinpool: "{{ fireactions_containerd_thinpool_name }}"
+    size: "{{ fireactions_containerd_thinpool_size }}"
+    opts: >-
+      --poolmetadatasize {{ fireactions_containerd_thinpool_metadata_size }}
+      --profile {{ fireactions_containerd_volume_group }}
+      --monitor y
+    state: present
+  tags:
+    - containerd
+
+# --------------------------------------------
+# Configuration
+# --------------------------------------------
+- name: Create the Containerd configuration directory
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  tags:
+    - containerd
+
+- name: Create the devmapper snapshotter root directory
+  ansible.builtin.file:
+    path: /var/lib/containerd/devmapper
+    state: directory
+    mode: "0711"
+    owner: root
+    group: root
+  tags:
+    - containerd
+
+- name: Install the Containerd configuration
+  ansible.builtin.template:
+    src: containerd-config.toml.j2
+    dest: /etc/containerd/config.toml
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Restart containerd
+  tags:
+    - containerd
+
+- name: Enable and start Containerd
+  ansible.builtin.systemd_service:
+    name: containerd
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - containerd
+
+# Fireactions refuses to start without a working devmapper snapshotter, so make
+# sure any pending Containerd restart happens now rather than at end of play.
+- name: Apply pending Containerd restarts before installing Fireactions
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - containerd
+
+- name: Verify the devmapper snapshotter is loaded
+  ansible.builtin.command:
+    cmd: "{{ fireactions_bin_dir }}/ctr --address {{ fireactions_containerd_address }} plugins ls"
+  register: fireactions_containerd_plugins
+  changed_when: false
+  retries: 5
+  delay: 3
+  until: fireactions_containerd_plugins.rc == 0
+  tags:
+    - containerd
+
+# The regex work happens here rather than in the assert below: backslash
+# escapes (\s, \b) silently evaluate to false inside assert/when conditionals,
+# even though they behave correctly in a template like this one.
+- name: Extract the devmapper plugin status line
+  ansible.builtin.set_fact:
+    fireactions_devmapper_line: >-
+      {{ fireactions_containerd_plugins.stdout_lines
+         | select('search', 'io.containerd.snapshotter.v1')
+         | select('search', 'devmapper')
+         | first | default('') }}
+  tags:
+    - containerd
+
+- name: Assert the devmapper snapshotter is healthy
+  ansible.builtin.assert:
+    that:
+      - fireactions_devmapper_line | length > 0
+      - fireactions_devmapper_line.split() | last == 'ok'
+    fail_msg: >-
+      The Containerd devmapper snapshotter did not load. Check
+      `ctr plugins ls` and `journalctl -u containerd`; the usual cause is a
+      pool_name mismatch - it must be '<volume group>-<thin pool>', currently
+      '{{ fireactions_containerd_pool_name }}'.
+  tags:
+    - containerd

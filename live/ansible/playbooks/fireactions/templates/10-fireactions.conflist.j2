@@ -1,0 +1,27 @@
+{
+  "cniVersion": "0.4.0",
+  "name": "{{ fireactions_cni_network_name }}",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "{{ fireactions_cni_bridge }}",
+      "forceAddress": false,
+      "hairpinMode": true,
+      "ipMasq": true,
+      "isDefaultGateway": true,
+      "mtu": {{ fireactions_cni_mtu }},
+      "ipam": {
+        "type": "host-local",
+        "dataDir": "/var/run/cni",
+        "resolvConf": "/etc/resolv.conf",
+        "subnet": "{{ fireactions_cni_subnet }}"
+      }
+    },
+    {
+      "type": "firewall"
+    },
+    {
+      "type": "tc-redirect-tap"
+    }
+  ]
+}

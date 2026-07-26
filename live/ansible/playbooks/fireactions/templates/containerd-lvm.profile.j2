@@ -1,0 +1,7 @@
+# Managed by Ansible - live/ansible/playbooks/fireactions/
+# Grows the Containerd thin pool before it runs out of space. Without this a
+# full pool stalls every microVM mid-job.
+activation {
+  thin_pool_autoextend_threshold=80
+  thin_pool_autoextend_percent=20
+}

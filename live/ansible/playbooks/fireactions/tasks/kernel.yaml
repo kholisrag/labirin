@@ -1,0 +1,44 @@
+---
+# ============================================
+# Firecracker guest kernel
+# ============================================
+# Pre-built, minimal uncompressed kernel image published by Hostinger. Every
+# microVM boots this same vmlinux; the runner image only supplies the rootfs.
+# ============================================
+
+- name: Create the Firecracker kernel directory
+  ansible.builtin.file:
+    path: "{{ fireactions_kernel_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  tags:
+    - kernel
+
+- name: Download the Firecracker guest kernel
+  ansible.builtin.get_url:
+    url: >-
+      https://storage.googleapis.com/fireactions/kernels/{{ fireactions_arch }}/{{ fireactions_kernel_version }}/{{ fireactions_kernel_remote_file }}
+    dest: "{{ fireactions_kernel_image_path }}"
+    mode: "0644"
+    owner: root
+    group: root
+    # Without this, get_url skips whenever the destination already exists, so
+    # changing fireactions_kernel_remote_file would silently keep the old
+    # kernel. force still compares checksums, so a matching file is reported
+    # unchanged and the handler does not fire.
+    force: true
+  notify: Restart fireactions
+  tags:
+    - kernel
+
+- name: Assert the guest kernel is a real image
+  ansible.builtin.stat:
+    path: "{{ fireactions_kernel_image_path }}"
+  register: fireactions_kernel_stat
+  failed_when: >-
+    not fireactions_kernel_stat.stat.exists
+    or fireactions_kernel_stat.stat.size < 1048576
+  tags:
+    - kernel

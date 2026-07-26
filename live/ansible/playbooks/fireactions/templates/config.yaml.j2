@@ -1,0 +1,25 @@
+---
+# Managed by Ansible - live/ansible/playbooks/fireactions/
+# Reference: https://fireactions.io/latest/reference/configuration/
+#
+# Contains the GitHub App private key. Mode 0600, root only.
+
+bind_address: {{ fireactions_bind_address }}
+
+log_level: {{ fireactions_log_level }}
+
+containerd:
+  address: {{ fireactions_containerd_address }}
+  namespace: {{ fireactions_containerd_namespace }}
+
+metrics:
+  enabled: {{ fireactions_metrics_enabled | bool | lower }}
+  address: {{ fireactions_metrics_address }}
+
+github:
+  app_id: {{ fireactions_github_app_id | int }}
+  app_private_key: |
+{{ fireactions_github_app_private_key | trim | indent(4, first=True) }}
+
+pools:
+{{ fireactions_pools | to_nice_yaml(indent=2) | trim | indent(2, first=True) }}

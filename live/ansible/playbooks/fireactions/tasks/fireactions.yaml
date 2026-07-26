@@ -1,0 +1,152 @@
+---
+# ============================================
+# Fireactions orchestrator
+# ============================================
+
+- name: Check the installed Fireactions version
+  ansible.builtin.command:
+    cmd: "{{ fireactions_bin_dir }}/fireactions version"
+  register: fireactions_installed
+  changed_when: false
+  failed_when: false
+  tags:
+    - fireactions
+
+- name: Install Fireactions
+  when: fireactions_version not in (fireactions_installed.stdout | default(''))
+  tags:
+    - fireactions
+  block:
+    - name: Create a temporary directory for the Fireactions download
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: fireactions
+      register: fireactions_tmp
+
+    - name: Download the Fireactions release archive
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/hostinger/fireactions/releases/download/v{{ fireactions_version }}/fireactions-v{{ fireactions_version }}-linux-{{ fireactions_arch }}.tar.gz
+        dest: "{{ fireactions_tmp.path }}/fireactions.tar.gz"
+        mode: "0600"
+
+    - name: Unpack the Fireactions release archive
+      ansible.builtin.unarchive:
+        src: "{{ fireactions_tmp.path }}/fireactions.tar.gz"
+        dest: "{{ fireactions_tmp.path }}"
+        remote_src: true
+
+    - name: Install the Fireactions binary
+      ansible.builtin.copy:
+        src: "{{ fireactions_tmp.path }}/fireactions"
+        dest: "{{ fireactions_bin_dir }}/fireactions"
+        mode: "0755"
+        owner: root
+        group: root
+        remote_src: true
+      notify: Restart fireactions
+
+  always:
+    - name: Remove the temporary Fireactions directory
+      ansible.builtin.file:
+        path: "{{ fireactions_tmp.path }}"
+        state: absent
+      when: fireactions_tmp.path is defined
+
+# --------------------------------------------
+# Host networking
+# --------------------------------------------
+# microVMs sit behind a NAT'ed CNI bridge and need the host to forward their
+# traffic out to GitHub and ghcr.io.
+- name: Enable IPv4 forwarding for the microVM network
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-fireactions.conf
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv4.conf.all.forwarding
+  tags:
+    - fireactions
+
+# --------------------------------------------
+# Configuration
+# --------------------------------------------
+- name: Create the Fireactions configuration directory
+  ansible.builtin.file:
+    path: "{{ fireactions_config_dir }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+  tags:
+    - fireactions
+
+- name: Install the Fireactions configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ fireactions_config_file }}"
+    # Contains the GitHub App private key in cleartext - root only.
+    mode: "0600"
+    owner: root
+    group: root
+    validate: "{{ fireactions_bin_dir }}/fireactions validate %s"
+  no_log: true
+  notify: Restart fireactions
+  tags:
+    - fireactions
+
+- name: Install the Fireactions systemd unit
+  ansible.builtin.template:
+    src: fireactions.service.j2
+    dest: /etc/systemd/system/fireactions.service
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Restart fireactions
+  tags:
+    - fireactions
+
+- name: Enable and start Fireactions
+  ansible.builtin.systemd_service:
+    name: fireactions
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - fireactions
+
+- name: Apply pending Fireactions restarts
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - fireactions
+
+# Fireactions crash-loops rather than exiting when GitHub rejects the App
+# credentials, so "systemd started it" is not proof that it works. Give it a few
+# seconds and re-check.
+- name: Wait for the Fireactions service to settle
+  ansible.builtin.service_facts:
+  register: fireactions_service_facts
+  retries: 10
+  delay: 3
+  failed_when: false
+  until: >-
+    fireactions_service_facts.ansible_facts.services['fireactions.service'].state | default('unknown') == 'running'
+  tags:
+    - fireactions
+
+- name: Assert Fireactions is running
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['services']['fireactions.service'].state | default('unknown') == 'running'
+    fail_msg: >-
+      Fireactions did not reach the running state. Inspect it with
+      `journalctl -u fireactions -n 100`. A crash loop right after install
+      usually means the GitHub App is not installed on the
+      '{{ fireactions_github_organization }}' organisation, or lacks the
+      self-hosted runner permission.
+  tags:
+    - fireactions

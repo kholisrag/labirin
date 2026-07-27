@@ -1,0 +1,63 @@
+---
+# Installs a plain GitHub Actions runner directly on cantrik-ci, so that
+# oprek.sh's Tier 1 jobs can open /dev/kvm and boot a real Machine.
+#
+#   ansible-playbook -i inventories/petruk-pve/petruk-pve0/pve-vms/cantrik-ci/inventory.yaml \
+#     playbooks/cantrik-ci/install-runner.yaml \
+#     -e github_runner_pat="$(gh auth token)"
+#
+# This is deliberately NOT fireactions. See playbooks/cantrik-ci/README.md.
+- name: Install the Tier 1 GitHub Actions runner
+  hosts: cantrik_ci_all
+  become: true
+
+  vars_files:
+    - vars/main.yaml
+
+  handlers:
+    - name: Restart github-runner
+      ansible.builtin.systemd_service:
+        name: github-runner
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Run pre-flight checks
+      ansible.builtin.include_tasks:
+        file: tasks/preflight.yaml
+      tags:
+        - always
+
+    - name: Install and register the runner
+      ansible.builtin.include_tasks:
+        file: tasks/runner.yaml
+      tags:
+        - runner
+
+    # --- prove it, rather than assume it ---------------------------------
+    #
+    # A registered runner that cannot open /dev/kvm is the failure this whole
+    # host exists to avoid, and it is invisible until a Tier 1 job fails hours
+    # later pointing at Firecracker. Check it as the runner account, after the
+    # service is up.
+    - name: Confirm the service is running
+      ansible.builtin.systemd_service:
+        name: github-runner
+      register: cantrik_ci_unit
+      changed_when: false
+
+    - name: Assert the runner is active
+      ansible.builtin.assert:
+        that: cantrik_ci_unit.status.ActiveState == "active"
+        fail_msg: >-
+          github-runner is {{ cantrik_ci_unit.status.ActiveState }}. Check
+          `journalctl -u github-runner`; a bad registration token shows up here.
+
+    - name: Report what this host can do
+      ansible.builtin.debug:
+        msg:
+          - "runner   : {{ github_runner_version }} on {{ inventory_hostname }}"
+          - "labels   : {{ github_runner_labels | join(', ') }}"
+          - "ephemeral: {{ github_runner_ephemeral }}"
+          - "/dev/kvm : readable and writable by {{ github_runner_user }}"
+          - "target a job here with: runs-on: [self-hosted, {{ github_runner_labels | join(', ') }}]"

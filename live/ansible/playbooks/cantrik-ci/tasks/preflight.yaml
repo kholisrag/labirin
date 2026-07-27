@@ -1,0 +1,100 @@
+---
+# ============================================
+# Pre-flight checks for cantrik-ci
+# ============================================
+# Read-only. This box exists for exactly one capability, and a host that lacks
+# it will register happily with GitHub and then fail every Tier 1 job with an
+# error that points at Firecracker rather than at the VM's CPU type. Fail here
+# instead, with a message that names the fix.
+# ============================================
+
+- name: Assert a supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+    fail_msg: >-
+      The GitHub Actions runner ships amd64/arm64 builds; this host reports
+      '{{ ansible_facts['architecture'] }}'.
+  tags:
+    - always
+
+- name: Set architecture facts
+  ansible.builtin.set_fact:
+    # Runner release assets use Go-style names (x64/arm64), which match neither
+    # uname nor the amd64/arm64 convention the rest of this repo uses.
+    github_runner_arch: "{{ 'x64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+  tags:
+    - always
+
+# Ansible exposes no CPU-flags fact — ansible_processor* is core counts and
+# model strings only — so read /proc/cpuinfo directly.
+- name: Look for hardware virtualisation flags
+  ansible.builtin.command: grep -Ecm1 '^flags.*(vmx|svm)' /proc/cpuinfo
+  changed_when: false
+  failed_when: false
+  register: cantrik_ci_virt_flag
+  tags:
+    - always
+
+- name: Assert nested virtualisation reaches this guest
+  ansible.builtin.assert:
+    that: cantrik_ci_virt_flag.stdout | int > 0
+    fail_msg: >-
+      No VMX/SVM in /proc/cpuinfo. This VM needs `cpu type = "host"` in its
+      Terragrunt unit and the Proxmox node needs kvm_intel nested=Y — see
+      playbooks/pve/enable-nested-virtualization.yaml. Without it there is no
+      /dev/kvm and Tier 1 cannot boot a Machine, which is the only reason this
+      host exists.
+  tags:
+    - always
+
+- name: Check for the KVM device
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: cantrik_ci_devkvm
+  tags:
+    - always
+
+- name: Assert /dev/kvm exists
+  ansible.builtin.assert:
+    that: cantrik_ci_devkvm.stat.exists
+    fail_msg: >-
+      /dev/kvm is missing even though the CPU advertises VMX/SVM. Check that the
+      kvm_intel (or kvm_amd) module is loaded in this guest.
+  tags:
+    - always
+
+# Firecracker's snapshot restore is markedly slower under cgroup v1 and the
+# jailer's cgroup handling differs between versions. Ubuntu 24.04 is unified-v2
+# by default; this catches a host that has been switched back.
+- name: Detect cgroup version
+  ansible.builtin.command: stat -fc %T /sys/fs/cgroup
+  changed_when: false
+  register: cantrik_ci_cgroup_fs
+  tags:
+    - always
+
+- name: Assert cgroup v2 (unified)
+  ansible.builtin.assert:
+    that: cantrik_ci_cgroup_fs.stdout == "cgroup2fs"
+    fail_msg: >-
+      /sys/fs/cgroup is {{ cantrik_ci_cgroup_fs.stdout }}, not cgroup2fs. The
+      jailer still defaults to --cgroup-version 1, so oprek.sh passes 2
+      explicitly and that requires a unified hierarchy.
+  tags:
+    - always
+
+- name: Assert a registration credential was supplied
+  ansible.builtin.assert:
+    that:
+      - github_runner_pat is defined
+      - github_runner_pat | length > 0
+    fail_msg: >-
+      github_runner_pat is not set. It is read at runtime and never written to
+      disk — pass it with `-e` or from vars/vault.yaml. It needs only
+      `repo` scope on {{ github_runner_owner }}/{{ github_runner_repo }}, and is
+      used once to mint a short-lived registration token.
+    quiet: true
+  no_log: true
+  tags:
+    - always

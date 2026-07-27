@@ -1,0 +1,190 @@
+---
+# ============================================
+# The GitHub Actions runner, installed directly on the host
+# ============================================
+# No orchestrator, no microVM wrapper. That is the whole point: the job must see
+# the host's /dev/kvm.
+# ============================================
+
+- name: Install runtime packages
+  ansible.builtin.apt:
+    name: "{{ cantrik_ci_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the runner account
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    home: "{{ github_runner_home }}"
+    shell: /bin/bash
+    system: true
+    create_home: true
+
+# The runner needs /dev/kvm, and /dev/kvm is root:kvm 0660 on Ubuntu. Group
+# membership is the whole grant — this account gets no sudo. That is a real
+# boundary: `kvm` group means "may start a VM", not "may become root".
+- name: Put the runner account in the kvm group
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    groups: kvm
+    append: true
+
+- name: Confirm the runner account can actually open /dev/kvm
+  ansible.builtin.command: >-
+    setpriv --reuid={{ github_runner_user }} --regid={{ github_runner_user }}
+    --init-groups --inh-caps=-all
+    test -r /dev/kvm -a -w /dev/kvm
+  changed_when: false
+  register: cantrik_ci_kvm_open
+  failed_when: cantrik_ci_kvm_open.rc != 0
+
+- name: Create the runner directory
+  ansible.builtin.file:
+    path: "{{ github_runner_home }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0755"
+
+- name: Read the installed runner version, if any
+  ansible.builtin.slurp:
+    src: "{{ github_runner_home }}/.runner-version"
+  register: cantrik_ci_installed_version
+  failed_when: false
+  changed_when: false
+
+- name: Note whether the pinned version is already installed
+  ansible.builtin.set_fact:
+    cantrik_ci_runner_current: >-
+      {{ (cantrik_ci_installed_version.content | default('') | b64decode | trim)
+         == github_runner_version }}
+
+- name: Download the runner tarball
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-{{ github_runner_arch }}-{{ github_runner_version }}.tar.gz
+    dest: /tmp/actions-runner.tar.gz
+    # ADR-0035: the release notes publish this digest and there is no sibling
+    # .sha256 file to fetch, so it is pinned in vars and checked here. A version
+    # bump that forgets the digest fails loudly rather than installing an
+    # unverified binary.
+    checksum: "sha256:{{ github_runner_sha256 }}"
+    mode: "0644"
+    timeout: 120
+  when: not cantrik_ci_runner_current
+
+- name: Unpack the runner
+  ansible.builtin.unarchive:
+    src: /tmp/actions-runner.tar.gz
+    dest: "{{ github_runner_home }}"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+  when: not cantrik_ci_runner_current
+
+- name: Install the runner's own dependencies
+  ansible.builtin.command: "{{ github_runner_home }}/bin/installdependencies.sh"
+  register: cantrik_ci_installdeps
+  changed_when: cantrik_ci_installdeps.rc == 0
+  when: not cantrik_ci_runner_current
+
+# --------------------------------------------
+# Registration
+# --------------------------------------------
+# A registration token lives about an hour, so it is minted here rather than
+# stored. The PAT it is minted with is never written to disk and never logged.
+
+- name: Check whether this host is already registered
+  ansible.builtin.stat:
+    path: "{{ github_runner_home }}/.runner"
+  register: cantrik_ci_registered
+
+- name: Mint a registration token
+  ansible.builtin.uri:
+    url: >-
+      https://api.github.com/repos/{{ github_runner_owner }}/{{ github_runner_repo }}/actions/runners/registration-token
+    method: POST
+    headers:
+      Authorization: "Bearer {{ github_runner_pat }}"
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    status_code: 201
+  register: cantrik_ci_reg_token
+  no_log: true
+  when: not cantrik_ci_registered.stat.exists
+
+- name: Configure the runner
+  ansible.builtin.command:
+    cmd: >-
+      {{ github_runner_home }}/config.sh
+      --unattended
+      --url https://github.com/{{ github_runner_owner }}/{{ github_runner_repo }}
+      --token {{ cantrik_ci_reg_token.json.token }}
+      --name {{ inventory_hostname }}
+      --labels {{ github_runner_labels | join(',') }}
+      --work {{ github_runner_workdir }}
+      --replace
+      {{ '--ephemeral' if github_runner_ephemeral | bool else '' }}
+    chdir: "{{ github_runner_home }}"
+  become_user: "{{ github_runner_user }}"
+  become: true
+  no_log: true
+  register: cantrik_ci_configure
+  changed_when: cantrik_ci_configure.rc == 0
+  when: not cantrik_ci_registered.stat.exists
+
+- name: Record the installed version
+  ansible.builtin.copy:
+    content: "{{ github_runner_version }}\n"
+    dest: "{{ github_runner_home }}/.runner-version"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0644"
+
+# --------------------------------------------
+# Service
+# --------------------------------------------
+# `--ephemeral` makes the runner exit after one job, so the unit must restart it
+# rather than treat the exit as failure. Restart=always plus a delay is what
+# turns "exits after every job" into "always one runner waiting".
+- name: Install the runner unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/github-runner.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by labirin: playbooks/cantrik-ci/install-runner.yaml
+      #
+      # This runner holds /dev/kvm and is the ONLY one that does. It exists
+      # because a fireactions job runs inside Firecracker, and Firecracker
+      # cannot expose VMX to its guest (oprek.sh ADR-0021).
+      [Unit]
+      Description=GitHub Actions runner (Tier 1, holds /dev/kvm)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User={{ github_runner_user }}
+      WorkingDirectory={{ github_runner_home }}
+      ExecStart={{ github_runner_home }}/run.sh
+      # --ephemeral exits 0 after one job. That is success, not failure, so
+      # always restart; the delay stops a config error becoming a hot loop.
+      Restart=always
+      RestartSec=5s
+      KillMode=process
+      KillSignal=SIGTERM
+      TimeoutStopSec=5min
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Restart github-runner
+
+- name: Enable and start the runner
+  ansible.builtin.systemd_service:
+    name: github-runner
+    enabled: true
+    state: started
+    daemon_reload: true

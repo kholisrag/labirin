@@ -148,10 +148,9 @@
     fail_msg: >-
       Fireactions did not reach the running state. Inspect it with
       `journalctl -u fireactions -n 100`. A crash loop right after install
-      usually means the GitHub App is not installed on a scope some pool
-      registers with - the '{{ fireactions_github_organization }}' organisation,
-      or the owner of '{{ fireactions_github_repository }}' - or that it lacks
-      the Administration / self-hosted runner permission there. Each scope needs
-      its own installation of the App.
+      usually means the GitHub App is not installed on the
+      '{{ fireactions_github_organization }}' organisation, or that it lacks the
+      organization_self_hosted_runners permission there. Every pool registers
+      with a scope, and each scope needs its own installation of the App.
   tags:
     - fireactions

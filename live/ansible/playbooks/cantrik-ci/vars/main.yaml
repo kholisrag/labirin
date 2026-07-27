@@ -1,0 +1,62 @@
+---
+# ============================================
+# cantrik-ci - the one GitHub Actions runner that holds /dev/kvm
+# ============================================
+# NOT fireactions. A fireactions job runs inside a Firecracker microVM, and
+# Firecracker cannot expose VMX/SVM to its guest (<repo> ADR-0021), so such a
+# job has no /dev/kvm and cannot boot a Machine. Tier 1 exists to boot one.
+#
+# Everything here is pinned and verified, per <repo> ADR-0035: "a pin that
+# nobody can move rots, and that is worse than an unpinned dependency because it
+# looks deliberate." Renovate proposes the successor; CI proves it.
+
+# --------------------------------------------
+# GitHub Actions runner
+# --------------------------------------------
+# https://github.com/actions/runner/releases
+#
+# There is no sibling .sha256 asset to fetch, so the digest is pinned here and
+# checked at download. A bump that changes the version and not the digest fails
+# the verify step, which is the behaviour we want.
+#
+# Computed from the asset itself, not read off a page:
+#   curl -sL .../actions-runner-linux-x64-2.336.0.tar.gz | shasum -a 256
+# 226,035,903 bytes.
+github_runner_version: "2.336.0"
+github_runner_sha256: "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+
+github_runner_user: github-runner
+github_runner_home: /opt/github-runner
+github_runner_workdir: /opt/github-runner/_work
+
+# Repository-scoped, not organisation-scoped. This runner is far more privileged
+# than a fireactions one and must not be reachable from any other repository in
+# the org by accident.
+github_runner_owner: <org>
+github_runner_repo: <repo>
+
+# The labels a workflow must name to land here. `kvm` is the meaningful one:
+# a job that does not say `kvm` must never run on this box, which is what keeps
+# ordinary CI on the ephemeral fireactions runners.
+github_runner_labels:
+  - cantrik-ci
+  - kvm
+
+# Runners are ephemeral per job (`--ephemeral`): the runner unregisters after one
+# job and the service restarts it fresh. It does NOT re-image the box — that is
+# what fireactions gives Tier 0 and what this tier structurally cannot have — but
+# it does stop a job leaving state that the next job inherits silently.
+github_runner_ephemeral: true
+
+# Packages a Tier 1 job needs present. Deliberately short: the job installs the
+# Firecracker, jailer, and kernel versions UNDER TEST itself, because installing
+# them here would test this file rather than the pin.
+cantrik_ci_packages:
+  - curl
+  - ca-certificates
+  - git
+  - jq
+  - iproute2
+  - iptables
+  - e2fsprogs
+  - acl

@@ -1,0 +1,12 @@
+cantrik_ci_all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  hosts:
+    # One host, and adding a second is not obviously right. Tier 1 jobs are rare
+    # (a Firecracker, jailer, guest-kernel or CNI bump) and each one wants the
+    # whole box's /dev/kvm to itself, so concurrency here buys queueing, not
+    # throughput. Two runners on one VM would interleave Machine boots and make
+    # a flaky test look like a flaky VMM.
+    cantrik_ci_vm_01:
+      ansible_host: petruk-pve0-cantrik-ci-01
+      ansible_user: ansible

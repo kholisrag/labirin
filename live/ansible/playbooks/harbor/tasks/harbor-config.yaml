@@ -1,0 +1,40 @@
+---
+# ============================================
+# harbor.yml
+# ============================================
+# This runs AFTER robertdebock.harbor and deliberately overwrites the
+# harbor.yml the role just wrote.
+#
+# WHY NOT JUST OVERRIDE THE ROLE'S TEMPLATE: Ansible resolves a `template:`
+# src from inside a role against the role's own templates/ directory first, so
+# a same-named file in this playbook is never reached. The only way to change
+# what lands in /home/harbor/harbor.yml is to write it again afterwards.
+#
+# WHY IT HAS TO BE CHANGED AT ALL: the role's template is frozen at Harbor's
+# 2.6.0 schema. Harbor 2.15's `prepare` indexes jobservice.job_loggers with no
+# fallback, so install.sh dies before it writes anything:
+#
+#   File "/usr/src/app/utils/configs.py", line 232, in parse_yaml_config
+#     config_dict['job_loggers'] = js_config["job_loggers"]
+#   KeyError: 'job_loggers'
+#
+# Both this task and the role's own templating notify the SAME handler, and
+# handlers run once, after every task that notified them - so install.sh is
+# invoked exactly once, against this file, never against the role's.
+# ============================================
+
+- name: Install the Harbor configuration
+  ansible.builtin.template:
+    src: harbor.yml.j2
+    dest: /home/harbor/harbor.yml
+    owner: root
+    group: root
+    mode: "0640"
+  # The rendered file contains harbor_admin_password and the Postgres
+  # password, and ansible.cfg sets `diff: always` - without this the whole file
+  # is printed on every change.
+  no_log: true
+  notify:
+    - Run installer
+  tags:
+    - harbor

@@ -20,3 +20,7 @@ all_vms:
       ansible_host: petruk-pve0-fireactions-02
       ansible_user: ansible
       ansible_python_interpreter: /usr/bin/python3
+    harbor_vm_01:
+      ansible_host: petruk-pve0-harbor-01
+      ansible_user: ansible
+      ansible_python_interpreter: /usr/bin/python3

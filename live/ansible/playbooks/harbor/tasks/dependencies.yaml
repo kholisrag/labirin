@@ -1,0 +1,16 @@
+---
+# ============================================
+# System dependencies
+# ============================================
+
+- name: Install base packages
+  ansible.builtin.package:
+    name:
+      - ca-certificates
+      - curl
+      - e2fsprogs
+      - gnupg
+      - tar
+    state: present
+  tags:
+    - dependencies

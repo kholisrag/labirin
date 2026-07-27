@@ -1,0 +1,202 @@
+---
+# ============================================
+# Harbor - container registry and pull-through proxy cache
+# https://goharbor.io/docs/2.15.0/
+# ============================================
+# This host exists to be a cache. Nothing here pushes images: every project
+# below is a proxy cache in front of an upstream registry, so the failure mode
+# of losing the whole VM is "CI pulls from the internet again", not "we lost
+# artifacts". That is what justifies backup=false on the data disk in the
+# OpenTofu unit.
+
+# --------------------------------------------
+# Component versions
+# --------------------------------------------
+# https://github.com/goharbor/harbor/releases
+#
+# Consumed by robertdebock.harbor, whose vars/main.yml builds the installer URL
+# as harbor-<installation_type>-installer-v<version>.tgz.
+harbor_version: "2.15.0"
+
+# "online" pulls the component images from Docker Hub at install time (~100 MiB
+# tarball); "offline" ships them inside the tarball (~700 MiB). Online is right
+# here - this host has good connectivity, and an offline installer would only
+# help if the thing we are installing were already the mirror it depends on.
+harbor_installation_type: online
+
+# Records which version the installer tree at /home/harbor was laid down from,
+# so a steady-state run can skip the role entirely instead of re-templating
+# harbor.yml and restarting Harbor. See tasks/preflight.yaml.
+harbor_version_marker: /etc/harbor-installed-version
+
+# --------------------------------------------
+# Identity
+# --------------------------------------------
+# The DNS name every client uses. It is an Unbound ALIAS onto
+# <panel-host>, not an A record for this guest: OpenResty on the
+# 1Panel VM terminates TLS with the Let's Encrypt wildcard and reverse-proxies
+# to port 80 here. The guest itself answers to <harbor-guest>.
+#
+# See live/ansible/playbooks/opnsense/vars/vault.yaml (unbound_host_aliases)
+# and live/ansible/playbooks/1panel/manage-websites.yaml.
+harbor_registry_host: <registry-host>
+
+# When harbor_external_url is non-empty the role's template emits it and
+# Harbor ignores harbor_hostname - but the role still asserts the hostname is
+# a non-empty string, so both are set.
+harbor_hostname: "{{ harbor_registry_host }}"
+harbor_external_url: "https://{{ harbor_registry_host }}"
+
+# Only applied on the FIRST install; changing it later does nothing (change it
+# in the UI, then mirror it back into the vault).
+harbor_admin_password: "{{ vault_harbor_admin_password }}"
+
+# Password for Harbor's bundled Postgres. Reachable only over the Compose
+# network - no port is published - but the upstream default is the literal
+# string "root123", so it is worth not being that.
+#
+# Also first-install-only: Postgres initialises its superuser once, and
+# changing this afterwards leaves harbor-core unable to connect.
+harbor_db_password: "{{ vault_harbor_db_password }}"
+
+# --------------------------------------------
+# Tuning
+# --------------------------------------------
+# Concurrent jobservice workers. These run replication, retention and GC - for
+# a pull-through cache the load is retention sweeps rather than replication, so
+# the upstream default is more than enough.
+harbor_max_job_workers: 10
+harbor_log_level: info
+
+# --------------------------------------------
+# Data volume
+# --------------------------------------------
+# Dedicated block device holding /data - registry blobs, Postgres, Redis and
+# the job logs. Addressed by disk serial (set in the OpenTofu unit at
+# live/opentofu/proxmox/petruk-pve/petruk-pve0/vms/harbor/terragrunt.hcl)
+# rather than /dev/sdb, which is not stable across reboots.
+#
+# Note the "S" prefix: QEMU exposes a user-set serial as
+# scsi-SQEMU_QEMU_HARDDISK_<serial>.
+harbor_data_device: /dev/disk/by-id/scsi-SQEMU_QEMU_HARDDISK_harbor-data
+harbor_data_filesystem: ext4
+# Feeds both the mount and `data_volume:` in templates/harbor.yml.j2, so the two
+# cannot drift. (The role's own template hardcodes /data, which is one of the
+# reasons that template is replaced - see tasks/harbor-config.yaml.)
+harbor_data_mount: /data
+
+# --------------------------------------------
+# Docker
+# --------------------------------------------
+# Harbor ships as a Compose stack, so the engine and the compose v2 plugin are
+# both required. Installed from Docker's own apt repository rather than
+# Ubuntu's docker.io package, which has no compose plugin.
+harbor_docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+harbor_docker_apt_key_url: https://download.docker.com/linux/ubuntu/gpg
+harbor_docker_apt_keyring: /etc/apt/keyrings/docker.asc
+harbor_docker_apt_repo: >-
+  deb [arch={{ harbor_arch | default('amd64') }} signed-by={{ harbor_docker_apt_keyring }}]
+  https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable
+
+# --------------------------------------------
+# API
+# --------------------------------------------
+# Talk to Harbor over the loopback, not through harbor_external_url. The
+# external name resolves to the 1Panel VM, so using it here would make every
+# post-install task depend on OpenResty being configured first - a circular
+# bootstrap, since the 1Panel site is created from a different playbook.
+harbor_api_base: http://127.0.0.1/api/v2.0
+harbor_api_user: admin
+# Harbor takes ~60-90s from `install.sh` returning to the core API answering.
+harbor_api_ready_retries: 30
+harbor_api_ready_delay: 10
+
+# --------------------------------------------
+# Upstream registry endpoints
+# --------------------------------------------
+# `type` must be one of Harbor's adapter names (src/pkg/reg/model/registry.go).
+# The adapter is not cosmetic: docker-hub knows about the token endpoint and
+# the rate-limit headers, github-ghcr knows ghcr's auth scheme. A plain
+# `docker-registry` against hub.docker.com would authenticate incorrectly.
+#
+# Credentials are optional and default to anonymous. Docker Hub anonymous pulls
+# are rate-limited per source IP, and this cache is a single source IP for the
+# whole homelab, so filling in vault_harbor_dockerhub_* is worth doing before
+# CI leans on it. Harbor uses HEAD to revalidate cached manifests, which does
+# not count against the limiter.
+harbor_registries:
+  - name: dockerhub
+    type: docker-hub
+    url: https://hub.docker.com
+    description: Docker Hub upstream
+    access_key: "{{ vault_harbor_dockerhub_username | default('') }}"
+    access_secret: "{{ vault_harbor_dockerhub_token | default('') }}"
+  - name: ghcr
+    type: github-ghcr
+    url: https://ghcr.io
+    description: GitHub Container Registry upstream
+    access_key: "{{ vault_harbor_ghcr_username | default('') }}"
+    access_secret: "{{ vault_harbor_ghcr_token | default('') }}"
+  # NOT type `quay`, even though that adapter exists and Harbor's docs list
+  # Quay as supported. Proxy cache projects are additionally gated on
+  # PERMITTED_REGISTRY_TYPES_FOR_PROXY_CACHE, which in 2.15 is:
+  #   docker-hub, harbor, azure-acr, ali-acr, aws-ecr, google-gcr,
+  #   docker-registry, github-ghcr, jfrog-artifactory
+  # A `quay` endpoint is accepted, and then the project creation fails with
+  # `bad request: unsupported registry type quay`. quay.io is a plain OCI
+  # registry for public pulls, so the generic adapter is all it needs.
+  - name: quay
+    type: docker-registry
+    url: https://quay.io
+    description: Quay.io upstream (generic adapter - see note above)
+    access_key: ""
+    access_secret: ""
+  - name: k8s
+    type: docker-registry
+    url: https://registry.k8s.io
+    description: Kubernetes registry upstream
+    access_key: ""
+    access_secret: ""
+
+# --------------------------------------------
+# Proxy cache projects
+# --------------------------------------------
+# One project per upstream. The project name becomes the first path segment,
+# and the rest of the path is passed through verbatim:
+#
+#   docker.io/library/alpine:3
+#     -> <registry-host>/dockerhub/library/alpine:3
+#   ghcr.io/hostinger/fireactions-images/ubuntu24.04:2026...
+#     -> <registry-host>/ghcr/hostinger/fireactions-images/ubuntu24.04:2026...
+#
+# The `library/` prefix is NOT optional for Docker Hub official images. Docker
+# only expands the bare name `alpine` into `library/alpine` for Docker Hub
+# itself; against any other registry host the short form is a 404.
+#
+# PUBLIC ON PURPOSE. Anonymous pull has to work: the Fireactions hosts pull the
+# runner image with containerd's default resolver, which carries no credentials
+# and has nowhere to put any. A private project would take CI down.
+# Access is bounded by the LAN and by the fact that a proxy cache can only ever
+# serve what its upstream would already serve anonymously.
+#
+# You cannot push to a proxy cache project. Harbor creates each one with a
+# 7-day retention policy; that window is the actual sizing input for the
+# 300 GiB data disk.
+harbor_proxy_projects:
+  - name: dockerhub
+    registry: dockerhub
+    public: true
+  - name: ghcr
+    registry: ghcr
+    public: true
+  - name: quay
+    registry: quay
+    public: true
+  - name: k8s
+    registry: k8s
+    public: true

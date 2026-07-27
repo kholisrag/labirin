@@ -1,0 +1,59 @@
+---
+# ============================================
+# Harbor data volume
+# ============================================
+# The whole device is formatted - no partition table. There is exactly one
+# consumer, growing it later is then just `resize2fs` after the disk is
+# enlarged in Proxmox, and there is no partition offset to get wrong.
+#
+# Unlike the Fireactions containerd disk, this filesystem is NEVER recreated on
+# a re-run: `force: false` on the filesystem task means an existing ext4 is
+# left alone. Deleting the cached blobs is a decision, not a side effect of
+# running the playbook.
+# ============================================
+
+- name: Create the filesystem on the data device
+  community.general.filesystem:
+    fstype: "{{ harbor_data_filesystem }}"
+    dev: "{{ harbor_data_device }}"
+    force: false
+  tags:
+    - data-volume
+
+- name: Mount the data volume
+  ansible.posix.mount:
+    path: "{{ harbor_data_mount }}"
+    src: "{{ harbor_data_device }}"
+    fstype: "{{ harbor_data_filesystem }}"
+    # nofail so a missing or renamed disk degrades to "Harbor will not start"
+    # rather than "the guest drops to an emergency shell on boot".
+    opts: defaults,nofail
+    state: mounted
+  tags:
+    - data-volume
+
+# Harbor's own containers chown what they need underneath this, but the
+# mountpoint itself is created by `mount` with whatever umask applied.
+- name: Ensure the data volume permissions
+  ansible.builtin.file:
+    path: "{{ harbor_data_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - data-volume
+
+- name: Read the data volume size
+  ansible.builtin.command:
+    cmd: "df -h --output=size,used,avail,pcent {{ harbor_data_mount }}"
+  changed_when: false
+  register: harbor_data_df
+  tags:
+    - data-volume
+
+- name: Show the data volume size
+  ansible.builtin.debug:
+    msg: "{{ harbor_data_df.stdout_lines }}"
+  tags:
+    - data-volume

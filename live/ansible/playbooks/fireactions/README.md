@@ -176,20 +176,22 @@ ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/fire
 
 Four tiers are defined in `vars/main.yaml`. Pick one with `runs-on`:
 
-| Tier | `runs-on` | Registers with | vCPU | RAM ceiling | Replicas/host | Idle cost | Ceiling |
+| Tier | `runs-on` | Registers with | vCPU | RAM ceiling | Replicas/host | Idle cost | All busy |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| small | `fireactions-small` | `<org>` org | 2 | 4 GiB | 5 | ~4.0 GiB | 20 GiB |
+| small | `fireactions-small` | `<org>` org | 2 | 4 GiB | 8 | ~4.8 GiB | 20 GiB |
 | medium | `fireactions-medium` | `<org>` org | 4 | 8 GiB | 1 | ~0.7 GiB | 8 GiB |
 | large | `fireactions-large` | `<org>` org | 8 | 12 GiB | 1 | ~0.8 GiB | 12 GiB |
-| | | | | | **7 per host** | **~5.5 GiB** | **40 GiB** |
+| | | | | | **10 per host** | **~6.3 GiB** | **40 GiB** |
 
-`replicas` is per-host, so with two hosts deployed the concurrency doubles: **10
+`replicas` is per-host, so with two hosts deployed the concurrency doubles: **16
 `small` runners org-wide**, plus 2 each of `medium` and `large`.
 
-`small` is sized for the fan-out of a single `<repo>` PR — `security.yml`
-spawns 7 jobs and `ci.yml` adds 2, all on `[self-hosted, fireactions-small]`. At
-1 replica per host they queued **1–6 minutes each**, serialised behind two
-runners.
+`small` carries the entire org: **12 `runs-on` declarations** across
+`security.yml` (7), `release.yml` (3), `ci.yml` and `pr-title-lint.yml` — and
+**zero** target `medium` or `large`. Concurrent PRs stack that fan-out, which is
+what kept jobs queueing at 5 replicas. `medium` and `large` are kept at 1 anyway:
+an idle microVM costs ~0.7 GiB and effectively no CPU, so keeping them registered
+lets a workflow adopt those labels without a config change.
 
 Every tier is **organisation-scoped**, so only workflows in `<org>`
 repositories can see these runners.
@@ -226,7 +228,7 @@ sudo fireactions pools scale fireactions-small --replicas 8
 sudo fireactions pools ls          # CURRENT catches up to DESIRED in ~30-60s
 ```
 
-### Why the budget overcommits
+### Why `mem_size_mib` is not the budget
 
 `mem_size_mib` is a **ceiling, not a reservation**. Firecracker backs guest RAM
 with a lazily-populated anonymous mmap, so a microVM only holds what the guest
@@ -236,25 +238,121 @@ has actually touched. Measured on these hosts:
 $ ps -eo rss,args | grep [f]irecracker      # RSS in MiB
    778  ... fireactions-large    # 12 GiB configured, idle
    684  ... fireactions-medium   #  8 GiB configured, idle
-  2898  ... fireactions-small    #  4 GiB configured, running a job
+  2458  ... fireactions-small    #  4 GiB configured, running a job
+  2137  ... fireactions-small    #  4 GiB configured, running a job
+   584  ... fireactions-small    #  4 GiB configured, idle
 ```
 
-So the ceiling column in the table above overcommits ~1.5× against 32 GiB, and
-that is fine here: the host has only 8 physical vCPU, so at most ~8 microVMs can
-make progress at once; the workload is scanners and Go builds rather than memory
-hogs; and the idle floor leaves ~25 GiB of real headroom. There is no swap and
-`vm.overcommit_memory` is `0` (heuristic), so if the assumption ever breaks the
-OOM killer takes a microVM, not the host. Check `free -m` after raising a tier.
+So budget against the idle floor (always paid) and the measured busy figure, not
+against `mem_size_mib`. With all 8 `small` working that is 20 GiB, plus ~1.5 GiB
+of idle `medium`/`large` and ~2 GiB of host — **~24 GiB of 32, with ~8 GiB
+spare**. This is the first sizing here that needs no overcommit at all. There is
+no swap and `vm.overcommit_memory` is `0` (heuristic), so a breach would take out
+a microVM via the OOM killer rather than the host. Check `free -m` after raising
+a tier.
 
 `small` keeps its 4 GiB ceiling rather than being trimmed to buy more replicas —
-a live job measured 2.9 GiB, so 3 GiB would start OOM-killing real work.
+busy jobs measure 2.0–2.5 GiB, so 3 GiB would start OOM-killing real work.
 
-vCPU is oversubscribed ~3:1 against the VM's 8. Firecracker vCPU threads only
-burn host CPU when the guest is actually running, so this costs latency under
-full fan-out, not correctness.
+### CPU, not memory, is now the ceiling
 
-Disk is not the constraint: the devmapper thin pool is 190 GiB and each microVM
-writes ~600 MiB into it (`lvs containerd` showed 1.36% used across 4 microVMs).
+vCPU is oversubscribed ~2.75:1 against the VM's 8. That is cheap while microVMs
+idle — Firecracker vCPU threads only burn host CPU when the guest is running —
+but with ~5 jobs live, `vmstat` showed the host already saturated:
+
+```console
+$ vmstat 1                       # us sy id wa st gu
+ ... 0 14  2  0  0 84            # 84% guest time, 1-2% idle
+```
+
+Replicas past that still help, because a CI job spends much of its life on
+checkout, image pulls and SARIF uploads rather than on CPU. But the return
+diminishes: **beyond ~8 per host you are mostly converting queue wait into slower
+wall-clock per job.** Real headroom past this point means adding a third
+Fireactions host, not a bigger number in `vars/main.yaml`.
+
+Disk is not the constraint: each microVM writes ~600 MiB into the devmapper
+thin pool (`lvs containerd` showed **1.36% used** across 4 microVMs on the
+190 GiB pool it had then). That measurement is why the backing disk was cut
+from 200 GiB to 100 GiB — see [Resizing the containerd disk](#resizing-the-containerd-disk).
+
+## The runner image comes from Harbor
+
+`fireactions_runner_image` points at
+`<registry-host>/ghcr/hostinger/fireactions-images/ubuntu24.04:TAG`,
+not at ghcr.io. Harbor runs a pull-through proxy cache on `harbor-01`
+(`live/ansible/playbooks/harbor/`), and the path after the project name is the
+upstream path verbatim.
+
+A pool refills a microVM after **every** job, so a busy PR pulls this image
+dozens of times. From the LAN that is seconds rather than a WAN round trip, and
+it takes the whole homelab off ghcr's anonymous quota.
+
+> [!IMPORTANT]
+> **Harbor is now a hard dependency for CI capacity.** Fireactions pulls with
+> containerd's default resolver — there is no mirror fallback and nowhere to
+> put credentials, which is also why the proxy cache projects are public. If
+> Harbor is unreachable the pools stop replacing consumed microVMs and jobs
+> queue behind whatever is still alive. `harbor-01` therefore has Proxmox
+> startup order 4 and these hosts have 5.
+>
+> The escape hatch is one variable: set `fireactions_runner_image` back to
+> `ghcr.io/hostinger/fireactions-images/...` and re-run with
+> `--tags fireactions`.
+
+Jobs that pull images *inside* the microVM should use the cache too — that is
+where Docker Hub's rate limit actually bites:
+
+```yaml
+- uses: docker/setup-buildx-action@v3
+  with:
+    install: true
+    driver: docker-container
+    config-inline: |
+      [registry."docker.io"]
+        mirrors = ["<registry-host>/dockerhub"]
+```
+
+Note there is no `http = true` / `insecure = true` here, unlike
+[the upstream tutorial](https://fireactions.io/latest/tutorials/docker-registry-mirror/)
+this is modelled on. That tutorial mirrors to a plain-HTTP registry bound to
+the CNI gateway (`192.168.128.1:5003`); ours is real HTTPS behind 1Panel with a
+publicly trusted Let's Encrypt certificate, so nothing has to be told to trust
+it. The microVMs reach it over the NAT'ed CNI bridge like any other LAN
+address, and resolve the name through the host's `/etc/resolv.conf`.
+
+## Resizing the containerd disk
+
+`vm_containerd_disk_size` in the OpenTofu unit is **100 GiB**, cut from 200 GiB
+to buy back allocation on `local-lvm` for Harbor's 300 GiB data disk. The pool
+measured 1.36% used across 4 microVMs, and the per-microVM ceiling is 30 GiB,
+so 100 GiB still covers every pool running at once.
+
+> [!CAUTION]
+> **LVM cannot shrink a thin volume in place.** Applying a reduction destroys
+> and recreates the disk empty, which wipes the devmapper pool and every cached
+> runner image on that host. Any microVM running at the time dies with it.
+
+Do it one host at a time so the other keeps serving CI:
+
+```bash
+# 1. Drain host 01 - scale its pools to zero and wait for jobs to finish
+ssh petruk-pve0-fireactions-01 'sudo fireactions pools ls'
+ssh petruk-pve0-fireactions-01 'sudo systemctl stop fireactions'
+
+# 2. Recreate the disk
+cd live/opentofu/proxmox/petruk-pve/petruk-pve0/vms/fireactions
+terragrunt plan     # confirm it touches ONLY fireactions-01's scsi1
+terragrunt apply
+
+# 3. Rebuild the thin pool and restart
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/fireactions \
+  live/ansible/playbooks/fireactions/install-fireactions.yaml \
+  --limit fireactions_vm_01 --tags containerd,fireactions
+```
+
+Then repeat for `fireactions-02`. Growing it later is the reverse and is
+non-destructive — enlarge in Proxmox, then `lvextend` the thin pool.
 
 ## Verifying
 
@@ -416,6 +514,11 @@ A healthy boot shows `virtio_blk virtio0: [vda] ... 30.0 GiB` and reaches
   **Administration** read+write.
 - `github: finding installation for <owner>: 404` — the App is not installed on
   that account, or the installation excludes that repository.
+- Pools stop refilling and the log shows a pull failure against
+  `<registry-host>` — Harbor is down, its 1Panel site is broken, or the
+  `ghcr` proxy project is not public. Check
+  `curl -fsS https://<registry-host>/api/v2.0/health` first; see
+  `live/ansible/playbooks/harbor/README.md`.
 - Jobs queue forever — the workflow's `runs-on` labels must match the pool's
   `labels` exactly, and the pool must be registered with *that* repository's
   scope. An org runner is never offered to a personal repo's workflow.

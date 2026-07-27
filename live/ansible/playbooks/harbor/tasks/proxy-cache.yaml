@@ -1,0 +1,185 @@
+---
+# ============================================
+# Registry endpoints and proxy cache projects
+# ============================================
+# Harbor has no declarative config file for any of this - projects and registry
+# endpoints live in Postgres and are only reachable over the API. These tasks
+# are the closest thing to `harbor.yml` for them, and they are the reason the
+# 300 GiB data disk can be excluded from backups: everything that is not a
+# cached layer is declared in vars/main.yaml and re-applied from here.
+#
+# Create-only by design. A registry endpoint or project that already exists is
+# left untouched rather than reconciled, so a bandwidth limit or retention
+# policy tuned in the UI survives the next playbook run. Renaming an entry in
+# vars/main.yaml therefore creates a new one and orphans the old.
+# ============================================
+
+- name: Wait for the Harbor API to become healthy
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/health"
+    method: GET
+    status_code: 200
+  register: harbor_health
+  until:
+    - harbor_health.json is defined
+    - harbor_health.json.status == 'healthy'
+  retries: "{{ harbor_api_ready_retries }}"
+  delay: "{{ harbor_api_ready_delay }}"
+  changed_when: false
+  tags:
+    - proxy-cache
+
+# ---------------------------------------------------------------
+# Registry endpoints
+# ---------------------------------------------------------------
+- name: List the configured registry endpoints
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/registries?page_size=100"
+    method: GET
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: harbor_existing_registries
+  changed_when: false
+  tags:
+    - proxy-cache
+
+- name: Create the missing registry endpoints
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/registries"
+    method: POST
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ item.name }}"
+      type: "{{ item.type }}"
+      url: "{{ item.url }}"
+      description: "{{ item.description | default('') }}"
+      insecure: false
+      credential:
+        type: basic
+        access_key: "{{ item.access_key | default('') }}"
+        access_secret: "{{ item.access_secret | default('') }}"
+    status_code: 201
+  loop: "{{ harbor_registries }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.url }}"
+  when: item.name not in (harbor_existing_registries.json | default([]) | map(attribute='name') | list)
+  tags:
+    - proxy-cache
+
+# Re-read rather than reusing the create responses: the IDs are needed for
+# every project below, and only some of the endpoints were just created.
+- name: Re-read the registry endpoints to resolve their IDs
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/registries?page_size=100"
+    method: GET
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: harbor_registries_after
+  changed_when: false
+  tags:
+    - proxy-cache
+
+- name: Map registry names to IDs
+  ansible.builtin.set_fact:
+    harbor_registry_ids: >-
+      {{ dict(harbor_registries_after.json | map(attribute='name') | zip(harbor_registries_after.json | map(attribute='id'))) }}
+  tags:
+    - proxy-cache
+
+- name: Assert every proxy project has a registry endpoint
+  ansible.builtin.assert:
+    that:
+      - item.registry in harbor_registry_ids
+    fail_msg: >-
+      Proxy project '{{ item.name }}' references registry endpoint
+      '{{ item.registry }}', which does not exist. Add it to
+      harbor_registries in vars/main.yaml.
+  loop: "{{ harbor_proxy_projects }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.registry }}"
+  tags:
+    - proxy-cache
+
+# ---------------------------------------------------------------
+# Proxy cache projects
+# ---------------------------------------------------------------
+- name: List the existing projects
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/projects?page_size=100"
+    method: GET
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: harbor_existing_projects
+  changed_when: false
+  tags:
+    - proxy-cache
+
+- name: Create the missing proxy cache projects
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/projects"
+    method: POST
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      project_name: "{{ item.name }}"
+      # registry_id is what turns an ordinary project into a proxy cache.
+      # It cannot be added afterwards - a project created without it stays a
+      # normal project forever.
+      registry_id: "{{ harbor_registry_ids[item.registry] }}"
+      storage_limit: "{{ item.storage_limit | default(-1) }}"
+      metadata:
+        # A string, not a boolean - Harbor's project metadata is a string map.
+        public: "{{ 'true' if item.public | default(true) else 'false' }}"
+    status_code: 201
+  loop: "{{ harbor_proxy_projects }}"
+  loop_control:
+    label: "{{ item.name }} (proxy of {{ item.registry }})"
+  when: item.name not in (harbor_existing_projects.json | default([]) | map(attribute='name') | list)
+  tags:
+    - proxy-cache
+
+- name: Re-read the projects
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/projects?page_size=100"
+    method: GET
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: harbor_projects_after
+  changed_when: false
+  tags:
+    - proxy-cache
+
+# A project whose registry_id is 0 is NOT a proxy cache, whatever it is called.
+# That happens when a project of the same name was created by hand first, and
+# it fails silently at pull time with a 404 rather than proxying - so surface
+# it here.
+- name: Assert every declared proxy project really is a proxy cache
+  ansible.builtin.assert:
+    that:
+      - >-
+        (harbor_projects_after.json
+         | selectattr('name', 'equalto', item.name)
+         | map(attribute='registry_id')
+         | first | default(0)) == harbor_registry_ids[item.registry]
+    fail_msg: >-
+      Project '{{ item.name }}' exists but is not a proxy cache for
+      '{{ item.registry }}'. A project's registry_id cannot be changed after
+      creation - delete the project in the UI and re-run.
+  loop: "{{ harbor_proxy_projects }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags:
+    - proxy-cache

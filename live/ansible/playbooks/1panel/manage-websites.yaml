@@ -1,0 +1,236 @@
+---
+- name: Manage 1Panel reverse-proxy websites
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  module_defaults:
+    ansible.builtin.uri:
+      # 1Panel serves its own UI with the same Let's Encrypt wildcard OPNsense
+      # pushes into it, so this verifies for real. (acme-cert-updater.yaml's
+      # shell script uses `curl -k` only because it runs before the first
+      # certificate has been uploaded.)
+      validate_certs: true
+      body_format: json
+      status_code: 200
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - panel_api_base is defined
+          - panel_api_key is defined
+          - panel_api_key | length > 0
+        fail_msg: >-
+          panel_api_base / panel_api_key are missing. Populate them with:
+          ansible-vault edit live/ansible/playbooks/1panel/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # 1Panel's API key auth is md5("1panel" + <api key> + <unix timestamp>),
+    # sent alongside the timestamp it was computed from. The panel rejects a
+    # timestamp too far from its own clock, so this is derived per run rather
+    # than stored. Same scheme as templates/1panel-ssl-uploader.sh.j2.
+    #
+    # The key is also bound to a source-IP allowlist in 1Panel's API settings -
+    # an auth failure from a workstation that used to work usually means the
+    # allowlist, not the key.
+    #
+    # THE TIMESTAMP IS ITS OWN FACT ON PURPOSE. Inlining
+    # `lookup('pipe', 'date +%s')` as a task-level var and referencing it from
+    # both header values evaluates the lookup TWICE - lookups are not cached -
+    # so roughly whenever the two evaluations straddle a second boundary the
+    # token gets signed with N while the header carries N+1. The panel then
+    # rejects it (see the response check below) in a way that looks random.
+    - name: Read the 1Panel API timestamp
+      ansible.builtin.set_fact:
+        onepanel_api_timestamp: "{{ lookup('pipe', 'date +%s') }}"
+      tags:
+        - always
+
+    - name: Build the 1Panel API authentication headers
+      ansible.builtin.set_fact:
+        onepanel_api_headers:
+          1Panel-Token: "{{ ('1panel' ~ panel_api_key ~ onepanel_api_timestamp) | hash('md5') }}"
+          1Panel-Timestamp: "{{ onepanel_api_timestamp }}"
+      no_log: true
+      tags:
+        - always
+
+    # ===== DISCOVERY =====
+    - name: List the existing websites
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/websites/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+          name: ""
+          orderBy: created_at
+          order: "null"
+          websiteGroupId: 0
+      register: onepanel_existing_sites
+      changed_when: false
+      tags:
+        - manage_websites
+
+    # 1Panel answers an auth failure with HTTP 200 and a body of
+    # {"code": <non-200>, "message": "...", "data": null} - the status line
+    # says nothing. Without this check the run gets three tasks further on and
+    # dies inside a Jinja expression with
+    # "object of type 'NoneType' has no attribute 'items'", which points
+    # nowhere near the actual problem.
+    - name: Assert the 1Panel API accepted the request
+      ansible.builtin.assert:
+        that:
+          - onepanel_existing_sites.json.code | default(0) == 200
+          - onepanel_existing_sites.json.data is not none
+        fail_msg: >-
+          1Panel rejected the request
+          (code={{ onepanel_existing_sites.json.code | default('?') }},
+          message={{ onepanel_existing_sites.json.message | default('') | trim or 'none' }}).
+          Causes, in the order they are worth checking:
+          the API key is disabled in Panel Settings; this workstation's IP is
+          not in the API key's allowlist; the key in vars/vault.yaml is stale;
+          or the signing timestamp fell outside the key's validity window.
+      tags:
+        - manage_websites
+
+    - name: Map the existing primary domains to website IDs
+      ansible.builtin.set_fact:
+        onepanel_site_ids: >-
+          {{ dict(onepanel_existing_sites.json.data['items'] | map(attribute='primaryDomain')
+                  | zip(onepanel_existing_sites.json.data['items'] | map(attribute='id'))) }}
+      tags:
+        - manage_websites
+
+    # ===== CREATE =====
+    # Create-only. An existing site keeps whatever domains, group and
+    # certificate it currently has - this playbook is not the source of truth
+    # for sites that predate it, and silently rewriting them from a four-field
+    # description would lose configuration.
+    - name: Create the missing reverse-proxy websites
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/websites"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          type: proxy
+          alias: "{{ item.primary_domain }}"
+          remark: "{{ item.remark | default('') }}"
+          proxy: "{{ item.upstream }}"
+          webSiteGroupID: "{{ item.group_id | default(onepanel_website_group_id) }}"
+          IPV6: false
+          domains: "{{ item.domains }}"
+          # `appType` carries an `oneof=new installed` validator with no
+          # omitempty, so an empty string is rejected even though a proxy site
+          # has no app. Any valid value works; it is never read for this type.
+          appType: installed
+          enableSSL: true
+          # The wildcard certificate OPNsense renews and uploads. `ssl_id` is
+          # the same value acme-cert-updater.yaml pushes into.
+          websiteSSLID: "{{ item.ssl_id | default(ssl_id) }}"
+      loop: "{{ onepanel_websites }}"
+      loop_control:
+        label: "{{ item.primary_domain }} -> {{ item.upstream }}"
+      when: item.primary_domain not in onepanel_site_ids
+      tags:
+        - manage_websites
+
+    - name: Re-read the websites to resolve the new IDs
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/websites/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+          name: ""
+          orderBy: created_at
+          order: "null"
+          websiteGroupId: 0
+      register: onepanel_sites_after
+      changed_when: false
+      tags:
+        - manage_websites
+
+    - name: Re-map the primary domains to website IDs
+      ansible.builtin.set_fact:
+        onepanel_site_ids: >-
+          {{ dict(onepanel_sites_after.json.data['items'] | map(attribute='primaryDomain')
+                  | zip(onepanel_sites_after.json.data['items'] | map(attribute='id'))) }}
+      tags:
+        - manage_websites
+
+    # ===== HTTPS =====
+    # Applied on every run, unlike the site itself: these are the settings that
+    # decide whether a plain-http client gets redirected or refused, and they
+    # are cheap to converge.
+    - name: Enforce the HTTPS configuration
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/websites/{{ onepanel_site_ids[item.primary_domain] }}/https"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          websiteId: "{{ onepanel_site_ids[item.primary_domain] }}"
+          enable: true
+          websiteSSLId: "{{ item.ssl_id | default(ssl_id) }}"
+          type: existed
+          # Redirect rather than serve both. A registry client that follows an
+          # http:// URL would otherwise push credentials in the clear.
+          httpConfig: HTTPToHTTPS
+          SSLProtocol:
+            - TLSv1.3
+            - TLSv1.2
+          algorithm: "{{ onepanel_ssl_algorithm }}"
+          hsts: true
+          hstsIncludeSubDomains: true
+          http3: false
+      loop: "{{ onepanel_websites }}"
+      loop_control:
+        label: "{{ item.primary_domain }}"
+      tags:
+        - manage_websites
+        - manage_https
+
+    # ===== PROXY LOCATION BLOCK =====
+    # This IS reconciled every run. /websites/proxies/file writes the content
+    # verbatim to <site>/proxy/<name>.conf and reloads nginx, which is the only
+    # way to get directives 1Panel's proxy form does not expose
+    # (client_max_body_size, proxy_request_buffering, the timeouts).
+    - name: Install the proxy location block
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/websites/proxies/file"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          websiteID: "{{ onepanel_site_ids[item.primary_domain] }}"
+          # 1Panel names the location file created with the site "root".
+          name: "{{ item.proxy_name | default('root') }}"
+          content: "{{ lookup('template', 'templates/' ~ item.proxy_template) }}"
+      loop: "{{ onepanel_websites }}"
+      loop_control:
+        label: "{{ item.primary_domain }} ({{ item.proxy_template }})"
+      when: item.proxy_template is defined
+      tags:
+        - manage_websites
+        - manage_proxy
+
+    - name: Display the managed websites
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.primary_domain }} (id {{ onepanel_site_ids[item.primary_domain] }})
+          -> {{ item.upstream }}
+      loop: "{{ onepanel_websites }}"
+      loop_control:
+        label: "{{ item.primary_domain }}"
+      tags:
+        - manage_websites

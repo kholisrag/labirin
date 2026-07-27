@@ -1,0 +1,7 @@
+harbor_all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  hosts:
+    harbor_vm_01:
+      ansible_host: petruk-pve0-harbor-01
+      ansible_user: ansible

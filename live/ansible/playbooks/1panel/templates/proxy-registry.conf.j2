@@ -1,0 +1,43 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# 1Panel's stock reverse-proxy block is written for web apps and breaks a
+# container registry in three ways. Each directive below is one of them.
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    # Harbor builds absolute URLs (token endpoint, blob redirects) from these.
+    # Without X-Forwarded-Proto it hands clients http:// URLs for a site the
+    # client reached over https, and `docker login` fails on the redirect.
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_http_version 1.1;
+
+    # 1. Image layers are hundreds of megabytes and nginx's default cap is 1m.
+    #    0 disables the check entirely, which is what the registry needs -
+    #    anything finite is just a size of image that mysteriously fails with
+    #    413 Request Entity Too Large.
+    client_max_body_size 0;
+
+    # 2. Buffering a layer means spooling the whole thing to disk before a byte
+    #    moves in either direction. Off in both directions, so pulls and pushes
+    #    stream.
+    proxy_request_buffering off;
+    proxy_buffering off;
+
+    # 3. A cache MISS makes Harbor fetch from the upstream registry before it
+    #    can answer, so the first pull of a large image legitimately takes
+    #    minutes. nginx's 60s default would cut it off and the client would see
+    #    a 504 on exactly the pulls the cache exists for.
+    proxy_connect_timeout 75s;
+    proxy_read_timeout 900s;
+    proxy_send_timeout 900s;
+
+    chunked_transfer_encoding on;
+}

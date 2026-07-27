@@ -143,21 +143,20 @@ fireactions_log_level: info
 # GitHub
 # --------------------------------------------
 # A pool's runners register EITHER with an organisation or with a single
-# repository - exactly one of `organization` / `repository` per pool.
+# repository - exactly one of `organization` / `repository` per pool. Every pool
+# below is organisation-scoped; the repository-scoped tier that used to serve
+# personal repos under `kholisrag` was retired once that work moved into the
+# oprek-sh org.
 #
-# Repository scope is the fork's addition and is the only option for personal
-# (user) accounts: a user account cannot own organisation runners or runner
-# groups, so `group_id` must be omitted there (the fork defaults it to 1).
-# The App installation is discovered automatically per scope, so no
-# installation_id needs to be pinned.
+# Repository scope is still available (it is the fork's addition, and the only
+# option for personal accounts, which have no runner groups). To use it, set
+# `repository: <owner>/<repo>` on a pool INSTEAD of `organization` + `group_id`,
+# and install the App on that repo's owner with Administration: read+write. The
+# installation is discovered automatically per scope, so no installation_id
+# needs pinning.
 fireactions_github_organization: oprek-sh
 # 1 is the "Default" self-hosted runner group. Organisation pools only.
 fireactions_github_runner_group_id: 1
-
-# Personal-account repository the repo-scoped tier registers with. The App must
-# be installed on the OWNER of this repo with Administration: read+write -
-# installation 149196290 covers all repositories under `kholisrag`.
-fireactions_github_repository: kholisrag/labirin
 
 # Secrets come from vars/vault.yaml (ansible-vault).
 fireactions_github_app_id: "{{ vault_fireactions_github_app_id }}"
@@ -178,43 +177,68 @@ fireactions_runner_image: ghcr.io/hostinger/fireactions-images/ubuntu24.04:20260
 # by sharing runner labels - GitHub load-balances across every runner carrying
 # them. Total concurrency = sum of replicas over all hosts in the inventory.
 #
-# IMPORTANT - replicas are STANDING microVMs, not on-demand capacity.
-# Fireactions has no webhook handler and no workflow_job awareness (the only
-# HTTP surface is /metrics). Each pool permanently holds `replicas` idle
-# microVMs, replaced as jobs consume them. So every replica costs its full
-# mem_size_mib 24/7 whether or not anything is building. Adding a tier is not
-# free; it is a permanent reservation.
+# NO AUTOSCALING. Fireactions has no webhook handler and no workflow_job
+# awareness (the only HTTP surface is /metrics); Pool.Run() just holds the pool
+# at `replicas` forever, replacing each microVM as a job consumes it. So the
+# replica count IS the concurrency limit - size it for the widest simultaneous
+# fan-out you expect, not for the average.
+#
+# For a one-off burst there is a live, no-restart lever that does not need this
+# file (it is lost on service restart, so mirror any keeper back to here):
+#   sudo fireactions pools scale fireactions-small --replicas 8
 #
 # MEMORY BUDGET for one 32 GiB host (see the OpenTofu unit for the node-level
-# budget). Ballooning is disabled, so this is a hard reservation:
+# budget). mem_size_mib is a CEILING, not a reservation: Firecracker backs guest
+# RAM with a lazily-populated anonymous mmap, so a microVM only holds what the
+# guest has actually touched. Measured on these hosts:
 #
-#   small       2 vCPU x  4 GiB x 1 replica  =  4 GiB   2 vCPU  oprek-sh
-#   medium      4 vCPU x  8 GiB x 1 replica  =  8 GiB   4 vCPU  oprek-sh
-#   large       8 vCPU x 12 GiB x 1 replica  = 12 GiB   8 vCPU  oprek-sh
-#   repo-small  2 vCPU x  4 GiB x 1 replica  =  4 GiB   2 vCPU  kholisrag/labirin
-#   ----------------------------------------------------------
-#   total                                      28 GiB  16 vCPU
+#   idle microVM   ~0.6-0.9 GiB RSS, whatever its mem_size_mib (a 12 GiB "large"
+#                  sitting idle measured 778 MiB)
+#   microVM running a scan/build job   ~2.9 GiB for a 4 GiB small
 #
-# That leaves ~4 GiB for the host side (containerd, image pulls, page cache).
-# vCPU is oversubscribed 2:1 against the VM's 8 - fine for CI, where jobs are
-# rarely all CPU-saturated at once. If you raise a tier, lower another.
+# So the budget has two numbers, and only the first one is always true:
 #
-# NOTE: the small tier was cut from 2 replicas to 1 to pay for repo-small. The
-# 32 GiB was already fully committed, so a new tier is not additive - it is a
-# trade. Raising vm_memory_mib in the OpenTofu unit is the alternative, but the
-# node has no allocation headroom left either (see the README).
+#                                          idle floor    ceiling if ALL busy
+#   small       2 vCPU x  4 GiB x 5    =     ~4.0 GiB          20 GiB
+#   medium      4 vCPU x  8 GiB x 1    =     ~0.7 GiB           8 GiB
+#   large       8 vCPU x 12 GiB x 1    =     ~0.8 GiB          12 GiB
+#   ---------------------------------------------------------------------
+#   total                        7 VMs      ~5.5 GiB          40 GiB
+#
+# The ceiling column is deliberately overcommitted ~1.25x against 32 GiB. That is
+# safe here because the host has only 8 physical vCPU: at most ~8 microVMs can
+# make progress at once, the CI jobs are scanners and Go builds rather than
+# memory hogs, and the idle floor leaves ~25 GiB of real headroom. There is no
+# swap and vm.overcommit_memory is 0 (heuristic), so if that assumption ever
+# breaks the OOM killer takes a microVM, not the host. Watch `free -m` after
+# raising a tier.
+#
+# The small tier is sized 5 per host = 10 org-wide because that is what a single
+# oprek.sh PR asks for: security.yml fans out to 7 jobs and ci.yml adds 2, all on
+# `[self-hosted, fireactions-small]`. At 1 per host they queued 1-6 minutes each,
+# serialised behind two runners. Retiring the repository-scoped tier freed a
+# further 8 GiB of ceiling per host, so raising `small` again is cheap - nothing
+# else is competing for it, since no workflow currently targets medium or large.
+#
+# mem_size_mib for small stays at 4 GiB rather than being trimmed to buy more
+# replicas: a live job was measured at 2.9 GiB, so 3 GiB would start OOM-killing
+# real work. vCPU is oversubscribed ~3:1 against the VM's 8, which is fine for CI
+# - Firecracker vCPU threads only burn host CPU when the guest is running.
 #
 # LABEL SELECTION:
 #   runs-on: fireactions-small        -> that tier only
 #   runs-on: [self-hosted, fireactions] -> ANY tier, whichever is idle. Handy,
 #                                        but it can hand a trivial job a large
 #                                        microVM. Prefer the explicit tier.
-# Org and repo runners are never interchangeable: a workflow in an oprek-sh repo
-# can only see the org pools, and one in kholisrag/labirin can only see
-# repo-small, even though they share the generic labels.
+# Every pool is org-scoped, so only workflows in oprek-sh repositories can see
+# these runners. Should a repository-scoped pool ever be added back, note that
+# the two scopes are never interchangeable - GitHub does not offer an org runner
+# to a repo-scoped workflow, or vice versa, even with identical labels.
 fireactions_pools:
   - name: fireactions-small
-    replicas: 1
+    # 5 per host = 10 org-wide. Every oprek.sh workflow job targets this tier;
+    # see the fan-out note in the memory budget above before lowering it.
+    replicas: 5
     shutdown_on_exit: true
     runner:
       name: fireactions-small
@@ -290,34 +314,5 @@ fireactions_pools:
         vcpu_count: 8
       metadata:
         pool: fireactions-large
-        node: "{{ inventory_hostname }}"
-        environment: homelab
-
-  # Repository-scoped tier for a personal (user) account. Requires the fork -
-  # upstream has no `repository` option. Note there is deliberately NO
-  # `group_id` and NO `organization`: user accounts have no runner groups, and
-  # the two scopes are mutually exclusive (`excluded_with=Repository`).
-  - name: fireactions-repo-small
-    replicas: 1
-    shutdown_on_exit: true
-    runner:
-      name: fireactions-repo-small
-      image: "{{ fireactions_runner_image }}"
-      image_pull_policy: IfNotPresent
-      repository: "{{ fireactions_github_repository }}"
-      labels:
-        - self-hosted
-        - fireactions
-        - fireactions-repo-small
-        - fireactions-2vcpu-4gb
-    firecracker:
-      binary_path: firecracker
-      kernel_image_path: "{{ fireactions_kernel_image_path }}"
-      kernel_args: "{{ fireactions_kernel_args }}"
-      machine_config:
-        mem_size_mib: 4096
-        vcpu_count: 2
-      metadata:
-        pool: fireactions-repo-small
         node: "{{ inventory_hostname }}"
         environment: homelab

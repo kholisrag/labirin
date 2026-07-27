@@ -91,9 +91,8 @@
           - "  journalctl -u fireactions -f"
           - "  fireactions pools ls"
           - ""
-          - "Runners register per scope - check each one for the Idle state:"
+          - "Runners should show as Idle at:"
           - "  https://github.com/organizations/{{ fireactions_github_organization }}/settings/actions/runners"
-          - "  https://github.com/{{ fireactions_github_repository }}/settings/actions/runners"
           - ""
       tags:
         - always

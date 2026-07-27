@@ -74,14 +74,16 @@ existing is not enough, and a missing installation shows up as a `404` on
    - **Organization permissions → Self-hosted runners**: Read and write
    - **Repository permissions → Administration**: Read and write
      (this is what repository-scoped runners register through)
-5. Under **Where can this GitHub App be installed?** choose *Any account* — the
-   personal installation is on `kholisrag`, which is a different account from
-   the organisation that owns the App.
+5. Under **Where can this GitHub App be installed?** choose *Any account*. Not
+   strictly needed while every pool is org-scoped, but it is what lets you add a
+   repository-scoped pool under a different account later without recreating the
+   App.
 6. Create the App, note the **App ID**, then **Generate a private key** and keep
    the downloaded `.pem`.
-7. **Install App** on both:
-   - the `oprek-sh` organisation → serves the `small` / `medium` / `large` tiers
-   - your personal `kholisrag` account → serves the `repo-small` tier
+7. **Install App** on the `oprek-sh` organisation — that is the only scope the
+   pools register with today. A repository-scoped pool would additionally need
+   the App installed on *that repository's owner*; installing on the org does
+   nothing for another account.
 
 Fireactions resolves the installation per pool at runtime
 (`FindOrganizationInstallation` / `FindRepositoryInstallation`), so nothing has
@@ -174,48 +176,85 @@ ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/fire
 
 Four tiers are defined in `vars/main.yaml`. Pick one with `runs-on`:
 
-| Tier | `runs-on` | Registers with | vCPU | RAM | Replicas | Standing cost |
-| --- | --- | --- | --- | --- | --- | --- |
-| small | `fireactions-small` | `oprek-sh` org | 2 | 4 GiB | 1 | 4 GiB |
-| medium | `fireactions-medium` | `oprek-sh` org | 4 | 8 GiB | 1 | 8 GiB |
-| large | `fireactions-large` | `oprek-sh` org | 8 | 12 GiB | 1 | 12 GiB |
-| repo-small | `fireactions-repo-small` | `kholisrag/labirin` | 2 | 4 GiB | 1 | 4 GiB |
-| | | | | | **per host** | **28 GiB** |
+| Tier | `runs-on` | Registers with | vCPU | RAM ceiling | Replicas/host | Idle cost | Ceiling |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| small | `fireactions-small` | `oprek-sh` org | 2 | 4 GiB | 5 | ~4.0 GiB | 20 GiB |
+| medium | `fireactions-medium` | `oprek-sh` org | 4 | 8 GiB | 1 | ~0.7 GiB | 8 GiB |
+| large | `fireactions-large` | `oprek-sh` org | 8 | 12 GiB | 1 | ~0.8 GiB | 12 GiB |
+| | | | | | **7 per host** | **~5.5 GiB** | **40 GiB** |
 
-With two hosts deployed those replicas double: 2 of each tier concurrent, 56 GiB
-of standing microVM RAM across the pair. The table is per-host because
-`replicas` is per-host.
+`replicas` is per-host, so with two hosts deployed the concurrency doubles: **10
+`small` runners org-wide**, plus 2 each of `medium` and `large`.
 
-The org tiers and the repo tier are **not interchangeable**. A workflow in an
-`oprek-sh` repository can only see the org runners; one in `kholisrag/labirin`
-can only see `repo-small`. They share the generic `self-hosted` / `fireactions`
-labels, but GitHub never offers a runner across that boundary.
+`small` is sized for the fan-out of a single `oprek.sh` PR — `security.yml`
+spawns 7 jobs and `ci.yml` adds 2, all on `[self-hosted, fireactions-small]`. At
+1 replica per host they queued **1–6 minutes each**, serialised behind two
+runners.
+
+Every tier is **organisation-scoped**, so only workflows in `oprek-sh`
+repositories can see these runners.
 
 Each tier also carries an explicit spec label (`fireactions-2vcpu-4gb` etc.) if
 you prefer to pin by shape rather than by name.
 
 > [!NOTE]
-> `small` runs 1 replica, not 2, because the 32 GiB was already fully committed
-> and `repo-small` had to be paid for from somewhere. A new tier is a trade, not
-> an addition — and raising `vm_memory_mib` is not free either, see the node
-> budget below.
+> A repository-scoped tier (`fireactions-repo-small`, registered with
+> `kholisrag/labirin`) was removed once that work moved into the `oprek-sh` org.
+> The fork still supports the scope — set `repository: <owner>/<repo>` on a pool
+> *instead of* `organization` + `group_id`, and install the App on that repo's
+> owner. `group_id` must be omitted there: user accounts have no runner groups,
+> and the two scopes are mutually exclusive per pool. The scopes are never
+> interchangeable — GitHub does not offer an org runner to a repo-scoped
+> workflow, or the reverse, even with identical labels.
 
-To point the repository tier somewhere else, change
-`fireactions_github_repository` in `vars/main.yaml` and re-run with `--tags
-fireactions`. The App must be installed on that repository's owner. Note that
-`group_id` is deliberately absent from that pool: user accounts have no runner
-groups, and `organization` / `repository` are mutually exclusive per pool.
+### There is no autoscaler
 
 > [!IMPORTANT]
 > `replicas` are **standing** microVMs, not on-demand capacity. Fireactions has
 > no webhook handler and no `workflow_job` awareness — its only HTTP surface is
-> `/metrics`. Each pool permanently holds `replicas` idle microVMs and replaces
-> them as jobs consume them, so every replica reserves its full `mem_size_mib`
-> 24/7 whether or not anything is building.
+> `/metrics`. `Pool.Run()` simply holds the pool at `replicas` forever, replacing
+> each microVM as a job consumes it. **The replica count *is* the concurrency
+> limit**, so size it for the widest simultaneous fan-out you expect, not the
+> average. Anything beyond it queues.
 
-The VM is 8 vCPU / 32 GiB, leaving ~4 GiB for the host side (containerd, image
-pulls, page cache). vCPU is oversubscribed 2:1 — fine for CI, where jobs are
-rarely all CPU-saturated at once. **If you raise one tier, lower another.**
+For a one-off burst there is a live lever that needs no restart and no playbook
+run — but it is lost when the service restarts, so mirror any keeper back into
+`vars/main.yaml`:
+
+```bash
+sudo fireactions pools scale fireactions-small --replicas 8
+sudo fireactions pools ls          # CURRENT catches up to DESIRED in ~30-60s
+```
+
+### Why the budget overcommits
+
+`mem_size_mib` is a **ceiling, not a reservation**. Firecracker backs guest RAM
+with a lazily-populated anonymous mmap, so a microVM only holds what the guest
+has actually touched. Measured on these hosts:
+
+```console
+$ ps -eo rss,args | grep [f]irecracker      # RSS in MiB
+   778  ... fireactions-large    # 12 GiB configured, idle
+   684  ... fireactions-medium   #  8 GiB configured, idle
+  2898  ... fireactions-small    #  4 GiB configured, running a job
+```
+
+So the ceiling column in the table above overcommits ~1.5× against 32 GiB, and
+that is fine here: the host has only 8 physical vCPU, so at most ~8 microVMs can
+make progress at once; the workload is scanners and Go builds rather than memory
+hogs; and the idle floor leaves ~25 GiB of real headroom. There is no swap and
+`vm.overcommit_memory` is `0` (heuristic), so if the assumption ever breaks the
+OOM killer takes a microVM, not the host. Check `free -m` after raising a tier.
+
+`small` keeps its 4 GiB ceiling rather than being trimmed to buy more replicas —
+a live job measured 2.9 GiB, so 3 GiB would start OOM-killing real work.
+
+vCPU is oversubscribed ~3:1 against the VM's 8. Firecracker vCPU threads only
+burn host CPU when the guest is actually running, so this costs latency under
+full fan-out, not correctness.
+
+Disk is not the constraint: the devmapper thin pool is 190 GiB and each microVM
+writes ~600 MiB into it (`lvs containerd` showed 1.36% used across 4 microVMs).
 
 ## Verifying
 
@@ -225,17 +264,15 @@ journalctl -u fireactions -f
 fireactions pools ls
 ```
 
-Runners should appear as **Idle** in two places, one per scope:
-
-- org tiers → <https://github.com/organizations/oprek-sh/settings/actions/runners>
-- `repo-small` → <https://github.com/kholisrag/labirin/settings/actions/runners>
+All runners should appear as **Idle** at
+<https://github.com/organizations/oprek-sh/settings/actions/runners>.
 
 Then run a job against the pool labels:
 
 ```yaml
 jobs:
   test:
-    runs-on: fireactions-small        # or fireactions-repo-small
+    runs-on: fireactions-small
     steps:
       - run: uname -a && docker --version
 ```
@@ -374,12 +411,11 @@ A healthy boot shows `virtio_blk virtio0: [vda] ... 30.0 GiB` and reaches
   `containerd-thinpool`. The playbook asserts `ctr plugins ls` shows devmapper
   `ok`, so this should surface at install time.
 - Runners never appear in GitHub — check the App is *installed* on that pool's
-  scope, not just created. Installing it on `oprek-sh` does nothing for
-  `kholisrag/labirin`; each account needs its own installation. Org pools need
-  **Self-hosted runners** read+write, repository pools need **Administration**
-  read+write.
-- `github: finding installation for kholisrag/labirin: 404` — the App is not
-  installed on that account, or the installation excludes that repository.
+  scope, not just created. Each account needs its own installation. Org pools
+  need **Self-hosted runners** read+write, repository pools need
+  **Administration** read+write.
+- `github: finding installation for <owner>: 404` — the App is not installed on
+  that account, or the installation excludes that repository.
 - Jobs queue forever — the workflow's `runs-on` labels must match the pool's
   `labels` exactly, and the pool must be registered with *that* repository's
   scope. An org runner is never offered to a personal repo's workflow.

@@ -1,0 +1,109 @@
+---
+{{ ansible_managed | comment }}
+# Managed by Ansible - live/ansible/playbooks/harbor/
+# Reference: https://github.com/goharbor/harbor/blob/v{{ harbor_version }}/make/harbor.yml.tmpl
+#
+# This REPLACES the harbor.yml that robertdebock.harbor writes. That role's
+# template is frozen at the 2.6.0 schema, and 2.15.0's `prepare` is not
+# tolerant of it - it indexes `jobservice.job_loggers` unconditionally and dies
+# with `KeyError: 'job_loggers'` before it writes a single container config.
+# See the README for how the two templates coexist.
+#
+# Contains no secret beyond harbor_admin_password, which only matters on the
+# first install, but is written 0640 root:root regardless.
+
+# Not used while external_url is set - Harbor prefers external_url and ignores
+# hostname - but `prepare` still requires the key to be present and non-empty.
+hostname: {{ harbor_hostname }}
+
+# Plain HTTP, on purpose. TLS is terminated by OpenResty on the 1Panel VM,
+# which is the only thing that talks to this port; see
+# live/ansible/playbooks/1panel/manage-websites.yaml. Giving Harbor its own
+# certificate would mean a second copy of the wildcard to renew.
+http:
+  port: 80
+
+# The URL clients actually use. Harbor builds absolute URLs from this - the
+# token endpoint `docker login` is redirected to, and the blob locations a pull
+# follows - so getting it wrong produces a registry that authenticates fine
+# through a browser and fails from Docker.
+external_url: {{ harbor_external_url }}
+
+# Only read on the FIRST install, when Postgres is seeded. Ignored afterwards.
+harbor_admin_password: {{ harbor_admin_password }}
+
+database:
+  password: {{ harbor_db_password }}
+  max_idle_conns: 100
+  max_open_conns: 900
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 0
+
+# The dedicated 300 GiB disk, mounted by tasks/data-volume.yaml. Everything
+# stateful lives under here: registry blobs, Postgres, Redis, job logs.
+data_volume: {{ harbor_data_mount }}
+
+# Present but inert: Trivy is only deployed when install.sh is invoked as
+# `install.sh --with-trivy`, and it is not. `prepare` reads these keys either
+# way, so the block cannot simply be dropped.
+trivy:
+  ignore_unfixed: false
+  skip_update: false
+  skip_java_db_update: false
+  db_repository: ghcr.io/aquasecurity/trivy-db
+  java_db_repository: ghcr.io/aquasecurity/trivy-java-db
+  offline_scan: false
+  security_check: vuln
+  insecure: false
+  timeout: 5m0s
+
+jobservice:
+  max_job_workers: {{ harbor_max_job_workers }}
+  max_job_duration_hours: 24
+  # The key whose absence breaks the role's own template against 2.15.
+  job_loggers:
+    - STD_OUTPUT
+    - FILE
+  logger_sweeper_duration: 1 # days
+
+notification:
+  webhook_job_max_retry: 3
+  webhook_job_http_client_timeout: 3 # seconds
+
+log:
+  level: {{ harbor_log_level }}
+  local:
+    rotate_count: 50
+    rotate_size: 200M
+    location: /var/log/harbor
+
+# Read by harbor-migrator when upgrading an existing harbor.yml in place.
+# Nothing validates it on a fresh install, but it has to match the release or a
+# future in-place upgrade migrates from the wrong schema.
+_version: {{ harbor_version }}
+
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy:
+  components:
+    - core
+    - jobservice
+    - trivy
+
+# Sweeps abandoned multipart uploads out of the blob store. Left on: a proxy
+# cache pulls constantly, and an interrupted fetch leaves a partial upload that
+# nothing else will ever clean up.
+upload_purging:
+  enabled: true
+  age: 168h
+  interval: 24h
+  dryrun: false
+
+# Caches project/repository/artifact/manifest metadata in Redis. Enabled here
+# because this registry's whole job is high-concurrency manifest pulling: every
+# microVM refill and every CI job hits the same handful of manifests, and the
+# consistency caveat in the upstream comment only applies to HA deployments.
+cache:
+  enabled: true
+  expire_hours: 24

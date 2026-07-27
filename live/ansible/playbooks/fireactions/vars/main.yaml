@@ -165,9 +165,29 @@ fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key
 # --------------------------------------------
 # Runner image
 # --------------------------------------------
+# Pulled through Harbor's ghcr.io proxy cache rather than from ghcr.io direct.
+# A pool refills a microVM after every job, so a busy PR pulls this image
+# dozens of times; served from the LAN that is seconds instead of a WAN round
+# trip, and it takes the whole homelab off ghcr's anonymous quota.
+#
+# THIS MAKES HARBOR A HARD DEPENDENCY FOR CI CAPACITY. Fireactions pulls with
+# containerd's default resolver, so there is no fallback to the upstream if the
+# cache is unreachable: the pools simply stop replacing consumed microVMs and
+# jobs queue. That is why harbor-01 starts before these hosts (startup order 4
+# vs 5 in the OpenTofu units) and why the proxy cache projects are public -
+# containerd here carries no registry credentials and has nowhere to put any.
+#
+# To cut the dependency in an emergency, set this back to
+# ghcr.io/hostinger/fireactions-images/... and re-run with --tags fireactions.
+#
+# The path after the project name is the upstream path verbatim:
+#   ghcr.io/hostinger/fireactions-images/ubuntu24.04:TAG
+#     -> harbor.internal.khol.is/ghcr/hostinger/fireactions-images/ubuntu24.04:TAG
+#
 # Pinned rather than :latest so a pool restart cannot silently change the
 # toolchain mid-week. Tags: https://github.com/hostinger/fireactions-images/pkgs/container/fireactions-images%2Fubuntu24.04
-fireactions_runner_image: ghcr.io/hostinger/fireactions-images/ubuntu24.04:20260702062356
+fireactions_registry_mirror: harbor.internal.khol.is
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/hostinger/fireactions-images/ubuntu24.04:20260702062356"
 
 # --------------------------------------------
 # Pools
@@ -194,36 +214,47 @@ fireactions_runner_image: ghcr.io/hostinger/fireactions-images/ubuntu24.04:20260
 #
 #   idle microVM   ~0.6-0.9 GiB RSS, whatever its mem_size_mib (a 12 GiB "large"
 #                  sitting idle measured 778 MiB)
-#   microVM running a scan/build job   ~2.9 GiB for a 4 GiB small
+#   busy microVM   2.0-2.5 GiB for a 4 GiB small running a scan or Go build
 #
-# So the budget has two numbers, and only the first one is always true:
+# So mem_size_mib is not the number to budget against. What matters is the idle
+# floor (always paid) and the measured busy figure (paid only by the subset of
+# microVMs that actually hold a job):
 #
-#                                          idle floor    ceiling if ALL busy
-#   small       2 vCPU x  4 GiB x 5    =     ~4.0 GiB          20 GiB
+#                                         idle floor    all busy (measured)
+#   small       2 vCPU x  4 GiB x 8    =     ~4.8 GiB          20 GiB
 #   medium      4 vCPU x  8 GiB x 1    =     ~0.7 GiB           8 GiB
 #   large       8 vCPU x 12 GiB x 1    =     ~0.8 GiB          12 GiB
 #   ---------------------------------------------------------------------
-#   total                        7 VMs      ~5.5 GiB          40 GiB
+#   total                       10 VMs      ~6.3 GiB          40 GiB
 #
-# The ceiling column is deliberately overcommitted ~1.25x against 32 GiB. That is
-# safe here because the host has only 8 physical vCPU: at most ~8 microVMs can
-# make progress at once, the CI jobs are scanners and Go builds rather than
-# memory hogs, and the idle floor leaves ~25 GiB of real headroom. There is no
-# swap and vm.overcommit_memory is 0 (heuristic), so if that assumption ever
-# breaks the OOM killer takes a microVM, not the host. Watch `free -m` after
-# raising a tier.
+# In practice only the small tier is ever busy (see below), so the number to
+# check against 32 GiB is 20 GiB of small + ~1.5 GiB of idle medium/large + ~2
+# GiB of host = ~24 GiB, leaving ~8 GiB spare with every small runner working.
+# That is the first time this budget has NOT needed overcommit. There is no swap
+# and vm.overcommit_memory is 0 (heuristic), so a breach takes out a microVM via
+# the OOM killer rather than the host. Watch `free -m` after raising a tier.
 #
-# The small tier is sized 5 per host = 10 org-wide because that is what a single
-# oprek.sh PR asks for: security.yml fans out to 7 jobs and ci.yml adds 2, all on
-# `[self-hosted, fireactions-small]`. At 1 per host they queued 1-6 minutes each,
-# serialised behind two runners. Retiring the repository-scoped tier freed a
-# further 8 GiB of ceiling per host, so raising `small` again is cheap - nothing
-# else is competing for it, since no workflow currently targets medium or large.
+# CPU, NOT MEMORY, IS NOW THE BINDING CONSTRAINT. With ~5 jobs running at once,
+# `vmstat` on a host showed 84% guest time and 1-2% idle - already saturated
+# against 8 physical vCPU. Replicas beyond that still help, because a CI job
+# spends a good share of its life on checkout, image pulls and SARIF uploads
+# rather than on CPU, but the return diminishes: past ~8 per host you are mostly
+# converting queue wait into slower wall-clock per job. Real headroom past this
+# point means another Fireactions host, not a bigger number here.
+#
+# The small tier is sized 8 per host = 16 org-wide because every workflow job in
+# the org targets it - 12 `runs-on` declarations across security.yml (7),
+# release.yml (3), ci.yml and pr-title-lint.yml, and zero targeting medium or
+# large. Concurrent PRs stack that fan-out, which is what still queued at 5.
+#
+# medium and large stay at 1 each despite having no users: an idle microVM costs
+# ~0.7 GiB and approximately no CPU, and keeping them registered means a workflow
+# can adopt those labels without a config change. Their vCPU allocation is not a
+# real cost - Firecracker vCPU threads only burn host CPU when the guest runs.
 #
 # mem_size_mib for small stays at 4 GiB rather than being trimmed to buy more
-# replicas: a live job was measured at 2.9 GiB, so 3 GiB would start OOM-killing
-# real work. vCPU is oversubscribed ~3:1 against the VM's 8, which is fine for CI
-# - Firecracker vCPU threads only burn host CPU when the guest is running.
+# replicas: busy jobs measure 2.0-2.5 GiB, so 3 GiB would start OOM-killing real
+# work for the sake of replicas the CPU cannot feed anyway.
 #
 # LABEL SELECTION:
 #   runs-on: fireactions-small        -> that tier only
@@ -236,9 +267,10 @@ fireactions_runner_image: ghcr.io/hostinger/fireactions-images/ubuntu24.04:20260
 # to a repo-scoped workflow, or vice versa, even with identical labels.
 fireactions_pools:
   - name: fireactions-small
-    # 5 per host = 10 org-wide. Every oprek.sh workflow job targets this tier;
-    # see the fan-out note in the memory budget above before lowering it.
-    replicas: 5
+    # 8 per host = 16 org-wide. Every oprek.sh workflow job targets this tier;
+    # see the fan-out note in the memory budget above before lowering it, and the
+    # CPU note before raising it - 8 is roughly where this host stops paying off.
+    replicas: 8
     shutdown_on_exit: true
     runner:
       name: fireactions-small

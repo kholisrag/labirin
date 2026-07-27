@@ -95,11 +95,20 @@
   tags:
     - containerd
 
+# Both of these notify the restart even though the config file has not
+# changed. Containerd opens the devmapper pool once, at startup, and keeps the
+# handle - so a pool that is recreated underneath a running daemon leaves the
+# snapshotter permanently in error and `ctr plugins ls` reports devmapper as
+# failed. That is not hypothetical: it is exactly what happens when the backing
+# disk is resized, since the disk comes back empty and the pool is rebuilt from
+# scratch while containerd is up.
 - name: Create the Containerd volume group
   community.general.lvg:
     vg: "{{ fireactions_containerd_volume_group }}"
     pvs: "{{ fireactions_containerd_device }}"
     state: present
+  notify:
+    - Restart containerd
   tags:
     - containerd
 
@@ -113,6 +122,44 @@
       --profile {{ fireactions_containerd_volume_group }}
       --monitor y
     state: present
+  register: fireactions_containerd_thinpool
+  notify:
+    - Restart containerd
+  tags:
+    - containerd
+
+# A restart alone is not enough after the pool is rebuilt. Containerd's
+# snapshotter metadata lives on the ROOT disk, in /var/lib/containerd, and it
+# survives the pool being wiped - so the daemon comes back believing in
+# snapshots whose thin devices no longer exist, and every microVM creation
+# fails with:
+#
+#   prepare: failed to create snapshot "containerd-thinpool-snap-960" (dev: 897)
+#     from "containerd-thinpool-snap-13" (dev: 13): no data available: unknown
+#
+# The two stores have to be discarded together. This costs only the cached
+# image layers, which re-pull from Harbor on the next pool refill.
+#
+# Guarded on the pool having actually been created, so a normal run never
+# touches it - `state: present` reports changed only when the LV did not exist.
+#
+# These are deliberately NOT handlers (hence the noqa). Handlers are flushed
+# after the remaining tasks, and this has to happen BEFORE "Enable and start
+# Containerd" further down - the daemon must be down while its state directory
+# is removed, and back up before the devmapper assertion runs.
+- name: Stop Containerd before discarding its stale state # noqa: no-handler
+  ansible.builtin.systemd_service:
+    name: containerd
+    state: stopped
+  when: fireactions_containerd_thinpool.changed
+  tags:
+    - containerd
+
+- name: Discard Containerd state left over from the previous thin pool # noqa: no-handler
+  ansible.builtin.file:
+    path: /var/lib/containerd
+    state: absent
+  when: fireactions_containerd_thinpool.changed
   tags:
     - containerd
 

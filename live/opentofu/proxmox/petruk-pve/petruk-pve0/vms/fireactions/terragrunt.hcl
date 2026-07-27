@@ -56,7 +56,18 @@ locals {
   # guest as /dev/disk/by-id/scsi-SQEMU_QEMU_HARDDISK_<serial> (note the "S"
   # prefix for a user-set serial), which is stable across reboots unlike
   # /dev/sdb.
-  vm_containerd_disk_size   = 200
+  #
+  # Cut from 200 GiB to 100 GiB to buy back allocation on local-lvm for the
+  # Harbor data disk. This is not tight: measured usage was 1.36% of a 190 GiB
+  # pool across 4 microVMs (~600 MiB each), and the base image size ceiling per
+  # microVM is 30 GiB, so 100 GiB still covers every pool running at once.
+  #
+  # LVM CANNOT SHRINK A THIN VOLUME IN PLACE. Applying a reduction here means
+  # the disk is destroyed and recreated empty, which wipes the devmapper pool
+  # and every cached runner image on that host. Do it one host at a time so the
+  # other keeps serving CI, and re-run the playbook's `containerd` tag
+  # afterwards to rebuild the pool. See the Fireactions README.
+  vm_containerd_disk_size   = 100
   vm_containerd_disk_serial = "containerd"
 
   vm_defaults = {
@@ -71,9 +82,12 @@ locals {
     pool_id             = "virtualmachines-pool"
     tags                = ["ci", "fireactions"]
 
+    # Starts AFTER harbor-01 (order 4). The runner image is pulled through
+    # Harbor's ghcr.io proxy cache, so on a cold boot of the node the registry
+    # has to be up before the pools start trying to refill.
     startup = [
       {
-        order      = 4
+        order      = 5
         up_delay   = 10
         down_delay = 10
       }

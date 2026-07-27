@@ -1,0 +1,48 @@
+---
+# ============================================
+# 1Panel websites
+# ============================================
+# 1Panel keeps its websites in its own database, not in a config file, so the
+# API is the only declarative surface there is. Everything already running on
+# the 1Panel VM was created by hand in the dashboard; this file is where new
+# ones go instead.
+#
+# Only reverse-proxy sites belong here. "Deployment" sites (ntfy, Home
+# Assistant, Obsidian, ...) are bound to a 1Panel app install and are not
+# expressible as a few fields.
+#
+# CREATE-ONLY, EXCEPT THE PROXY BLOCK. A site that already exists is not
+# reconciled - its domains, group and certificate are left as you last set them
+# in the UI - but its proxy `location` file IS rewritten from the template on
+# every run, because that block is the part with behaviour we care about.
+#
+# A new entry here also needs a matching Unbound alias onto
+# 1panel.internal.khol.is in live/ansible/playbooks/opnsense/vars/vault.yaml,
+# or the name will not resolve to OpenResty at all.
+
+# 1Panel's "Default" website group.
+onepanel_website_group_id: 2
+
+# 1Panel's own default cipher suite, reproduced verbatim so that pushing the
+# HTTPS settings does not quietly narrow the ciphers on a site that was set up
+# through the dashboard. Taken from an existing site's GET /websites/:id/https.
+onepanel_ssl_algorithm: >-
+  ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:!aNULL:!eNULL:!EXPORT:!DSS:!DES:!RC4:!3DES:!MD5:!PSK:!KRB5:!SRP:!CAMELLIA:!SEED
+
+onepanel_websites:
+  - primary_domain: harbor.internal.khol.is
+    remark: Harbor Container Registry
+    # The Harbor guest (harbor-01, 10.10.99.13). Harbor listens on plain
+    # HTTP:80 because TLS is terminated here.
+    #
+    # An IP, not harbor-01.internal.khol.is, on purpose: nginx resolves a
+    # proxy_pass hostname once at config load and caches it forever, so a name
+    # here would make OpenResty's startup depend on Unbound being up and would
+    # not pick up a changed address anyway. The address is a static DHCP
+    # reservation keyed on the VM's MAC, so it is as stable as the name.
+    upstream: http://10.10.99.13
+    # Registry traffic is not ordinary web traffic - see the template.
+    proxy_template: proxy-registry.conf.j2
+    domains:
+      - domain: harbor.internal.khol.is
+        port: 80

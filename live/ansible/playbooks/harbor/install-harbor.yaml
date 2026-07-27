@@ -1,0 +1,116 @@
+---
+- name: Install Harbor
+  hosts: harbor_all
+  become: true
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  tasks:
+    # ============================================
+    # Pre-flight checks
+    # ============================================
+    - name: Run pre-flight checks
+      ansible.builtin.include_tasks:
+        file: tasks/preflight.yaml
+      tags:
+        - always
+
+    # ============================================
+    # Components
+    # ============================================
+    - name: Install system dependencies
+      ansible.builtin.include_tasks:
+        file: tasks/dependencies.yaml
+      tags:
+        - dependencies
+
+    - name: Prepare the Harbor data volume
+      ansible.builtin.include_tasks:
+        file: tasks/data-volume.yaml
+      tags:
+        - data-volume
+
+    - name: Install Docker
+      ansible.builtin.include_tasks:
+        file: tasks/docker.yaml
+      tags:
+        - docker
+
+    # robertdebock.harbor unarchives the official installer into /home/harbor,
+    # templates harbor.yml and runs ./install.sh from a handler. We use it for
+    # the first and the third; its harbor.yml is replaced immediately below
+    # because it is frozen at Harbor's 2.6.0 schema. See the README.
+    #
+    # `apply.when` gates the role's TASKS on there being something to install,
+    # while still registering its handlers - which the config task below needs
+    # to notify. Without the gate the two templating tasks overwrite each other
+    # every run and install.sh restarts Harbor every time; see
+    # tasks/preflight.yaml.
+    - name: Install Harbor
+      ansible.builtin.include_role:
+        name: robertdebock.harbor
+        apply:
+          when: harbor_needs_install | bool
+      tags:
+        - harbor
+
+    - name: Install the Harbor configuration
+      ansible.builtin.include_tasks:
+        file: tasks/harbor-config.yaml
+      tags:
+        - harbor
+
+    # Handlers inside an included role are flushed at the end of the play, but
+    # the proxy-cache tasks below talk to the API and therefore need Harbor to
+    # be running NOW - not after this play finishes.
+    - name: Flush handlers so Harbor is running before the API is used
+      ansible.builtin.meta: flush_handlers
+      tags:
+        - harbor
+
+    # After the flush, so a failed install.sh never leaves a marker claiming
+    # the version is in place.
+    - name: Record the installed Harbor version
+      ansible.builtin.copy:
+        content: "{{ harbor_version }}\n"
+        dest: "{{ harbor_version_marker }}"
+        owner: root
+        group: root
+        mode: "0644"
+      tags:
+        - harbor
+
+    # ============================================
+    # Registry endpoints and proxy cache projects
+    # ============================================
+    - name: Configure the proxy cache
+      ansible.builtin.include_tasks:
+        file: tasks/proxy-cache.yaml
+      tags:
+        - proxy-cache
+
+    # ============================================
+    # Summary
+    # ============================================
+    - name: Display post-install instructions
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Harbor {{ harbor_version }} installed on {{ inventory_hostname }}"
+          - "========================================"
+          - ""
+          - "UI       : {{ harbor_external_url }}"
+          - "Data     : {{ harbor_data_mount }} ({{ harbor_data_device }})"
+          - "Caches   : {{ harbor_proxy_projects | map(attribute='name') | join(', ') }}"
+          - ""
+          - "Verify with:"
+          - "  docker ps --format '{% raw %}{{.Names}}\t{{.Status}}{% endraw %}'"
+          - "  curl -fsS {{ harbor_api_base }}/health | jq .status"
+          - ""
+          - "Pull something through the cache:"
+          - "  docker pull {{ harbor_registry_host }}/{{ harbor_proxy_projects[0].name }}/library/alpine:3"
+          - ""
+      tags:
+        - always

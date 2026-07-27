@@ -1,0 +1,66 @@
+---
+# ============================================
+# Docker engine + compose v2
+# ============================================
+# Harbor ships as a Compose stack and its install.sh shells out to
+# `docker compose`. Ubuntu's own docker.io package has no compose plugin, so
+# this comes from Docker's apt repository instead.
+#
+# robertdebock.harbor does NOT do this for us - its meta/main.yml declares no
+# dependencies; the docker roles in its requirements.yml exist only for its
+# Molecule scenario.
+# ============================================
+
+- name: Ensure the apt keyring directory exists
+  ansible.builtin.file:
+    path: "{{ harbor_docker_apt_keyring | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - docker
+
+- name: Install the Docker apt signing key
+  ansible.builtin.get_url:
+    url: "{{ harbor_docker_apt_key_url }}"
+    dest: "{{ harbor_docker_apt_keyring }}"
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - docker
+
+- name: Add the Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: "{{ harbor_docker_apt_repo }}"
+    filename: docker
+    state: present
+    update_cache: true
+  tags:
+    - docker
+
+- name: Install Docker packages
+  ansible.builtin.apt:
+    name: "{{ harbor_docker_packages }}"
+    state: present
+  tags:
+    - docker
+
+- name: Ensure Docker is running and enabled
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+  tags:
+    - docker
+
+# install.sh calls `docker compose`, not `docker-compose`. If the plugin is
+# missing the failure surfaces deep inside the role's handler with no useful
+# message, so check it here instead.
+- name: Assert the compose v2 plugin is available
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  tags:
+    - docker

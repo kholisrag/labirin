@@ -7,8 +7,20 @@
 # --------------------------------------------
 # Component versions
 # --------------------------------------------
-# Fireactions itself. https://github.com/hostinger/fireactions/releases
-fireactions_version: "2.0.5"
+# Fireactions itself.
+#
+# This is a FORK, not upstream. Upstream v2.0.5 can only register runners at
+# organisation level - RunnerConfig has no `repository` field - so personal
+# repositories under github.com/kholisrag cannot use it at all. The fork adds
+# repository-scoped pools (and fixes a validation bug where the `pools` list was
+# never descended into, so nothing inside a pool was ever validated upstream).
+#
+# It tracks upstream tags with a `-personal.N` suffix, and release assets follow
+# upstream's naming exactly, so switching back is just these two variables.
+#   fork:     https://github.com/kholisrag/fireactions/releases
+#   upstream: https://github.com/hostinger/fireactions/releases
+fireactions_release_repo: kholisrag/fireactions
+fireactions_version: "2.0.5-personal.1"
 
 # Firecracker. Pinned to the version the Fireactions install docs are written
 # against. 1.16.1 was also tried and behaves identically, so this pin is
@@ -31,14 +43,20 @@ cni_plugins_version: "1.9.1"
 # https://github.com/hostinger/tc-redirect-tap/releases
 tc_redirect_tap_version: "0.0.1"
 
-# Pre-built Firecracker guest kernel published by Hostinger. Either "5.10" or "6.1".
+# Guest kernel for the microVMs.
 #
-# 5.10 does NOT work here: every virtio device is rejected at probe time with
+# NOT Hostinger's prebuilt kernel. Theirs is built without ACPI, and on this
+# host every virtio device is rejected at probe time:
 #   virtio_blk: probe of virtio0 failed with error -22
-# (same for virtio_net and vsock), so the guest finds no root device and panics
-# with 'Cannot open root device "vda"'. Reproduced identically on Firecracker
-# 1.9.1 and 1.16.1, so it is a guest-kernel problem, not a VMM version problem.
-fireactions_kernel_version: "5.10"
+# leaving the guest with no root device -> 'Cannot open root device "vda"'.
+# Reproduced on Firecracker 1.9.1 and 1.16.1 and on both published Hostinger
+# builds, so it is the kernel, not the VMM.
+#
+# The official Firecracker CI kernel is ACPI-capable and enumerates the
+# virtio-mmio devices through ACPI, which works - but ONLY with "noapic"
+# removed from fireactions_kernel_args (see below).
+fireactions_kernel_version: "5.10.223"
+fireactions_kernel_ci_channel: "v1.10"
 
 # --------------------------------------------
 # Paths
@@ -50,17 +68,30 @@ fireactions_data_dir: /var/lib/fireactions
 fireactions_kernel_dir: "{{ fireactions_data_dir }}/kernels/{{ fireactions_kernel_version }}"
 fireactions_kernel_image_path: "{{ fireactions_kernel_dir }}/vmlinux"
 
-# Filename fetched from Hostinger's kernel bucket. Two amd64/5.10 builds are
-# published: the default "vmlinux" (6.2 MB, stripped) and "vmlinux-2024-04-18"
-# (43 MB). Both are valid uncompressed ELF images but they are different
-# builds. BOTH fail virtio probe identically on this host, so this is back on
-# the upstream default; the knob exists so the build can be swapped without
-# touching tasks while the probe failure is investigated.
-fireactions_kernel_remote_file: vmlinux
-# Upstream default. Dropping "noapic" was tried as a fix for the virtio probe
-# failure documented above and made no difference, so it is left as upstream
-# ships it.
-fireactions_kernel_args: "console=ttyS0 noapic reboot=k panic=1 pci=off nomodules rw"
+# --------------------------------------------
+# Release URLs
+# --------------------------------------------
+fireactions_release_base_url: >-
+  https://github.com/{{ fireactions_release_repo }}/releases/download/v{{ fireactions_version }}
+fireactions_release_url: >-
+  {{ fireactions_release_base_url }}/fireactions-v{{ fireactions_version }}-linux-{{ fireactions_arch }}.tar.gz
+fireactions_release_checksums_url: >-
+  {{ fireactions_release_base_url }}/fireactions-v{{ fireactions_version }}-checksums.txt
+
+# Uses uname -m naming (x86_64 / aarch64), unlike the Go-style arch used for
+# the other downloads.
+fireactions_kernel_url: >-
+  https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/{{ fireactions_kernel_ci_channel }}/{{ fireactions_uname_arch }}/vmlinux-{{ fireactions_kernel_version }}
+# "noapic" is deliberately REMOVED from upstream's default string. With an
+# ACPI-capable kernel the virtio-mmio devices are enumerated via ACPI, and
+# noapic disables the IOAPIC so those devices never get an IRQ:
+#   virtio-mmio LNRO0005:01: IRQ index 0 not found
+# Firecracker also appends its own virtio_mmio.device= entries, which then
+# collide with the ACPI-claimed regions:
+#   virtio-mmio virtio-mmio.0: can't request region ... failed with error -16
+# That -16 is harmless noise - the ACPI-discovered devices are the ones that
+# actually work. Removing noapic is what makes the guest find /dev/vda.
+fireactions_kernel_args: "console=ttyS0 reboot=k panic=1 pci=off nomodules rw"
 fireactions_cni_bin_dir: /opt/cni/bin
 fireactions_cni_conf_dir: /etc/cni/net.d
 
@@ -111,12 +142,22 @@ fireactions_log_level: info
 # --------------------------------------------
 # GitHub
 # --------------------------------------------
-# Fireactions v2 registers runners at ORGANISATION level only - there is no
-# repository-scoped option in the config schema (see server/config.go,
-# RunnerConfig.Organization is `validate:"required"`).
+# A pool's runners register EITHER with an organisation or with a single
+# repository - exactly one of `organization` / `repository` per pool.
+#
+# Repository scope is the fork's addition and is the only option for personal
+# (user) accounts: a user account cannot own organisation runners or runner
+# groups, so `group_id` must be omitted there (the fork defaults it to 1).
+# The App installation is discovered automatically per scope, so no
+# installation_id needs to be pinned.
 fireactions_github_organization: <org>
-# 1 is the "Default" self-hosted runner group.
+# 1 is the "Default" self-hosted runner group. Organisation pools only.
 fireactions_github_runner_group_id: 1
+
+# Personal-account repository the repo-scoped tier registers with. The App must
+# be installed on the OWNER of this repo with Administration: read+write -
+# installation 149196290 covers all repositories under `kholisrag`.
+fireactions_github_repository: kholisrag/labirin
 
 # Secrets come from vars/vault.yaml (ansible-vault).
 fireactions_github_app_id: "{{ vault_fireactions_github_app_id }}"
@@ -147,24 +188,33 @@ fireactions_runner_image: ghcr.io/hostinger/fireactions-images/ubuntu24.04:20260
 # MEMORY BUDGET for one 32 GiB host (see the OpenTofu unit for the node-level
 # budget). Ballooning is disabled, so this is a hard reservation:
 #
-#   small   2 vCPU x  4 GiB x 2 replicas =  8 GiB   4 vCPU
-#   medium  4 vCPU x  8 GiB x 1 replica  =  8 GiB   4 vCPU
-#   large   8 vCPU x 12 GiB x 1 replica  = 12 GiB   8 vCPU
-#   ------------------------------------------------------
-#   total                                  28 GiB  16 vCPU
+#   small       2 vCPU x  4 GiB x 1 replica  =  4 GiB   2 vCPU  <org>
+#   medium      4 vCPU x  8 GiB x 1 replica  =  8 GiB   4 vCPU  <org>
+#   large       8 vCPU x 12 GiB x 1 replica  = 12 GiB   8 vCPU  <org>
+#   repo-small  2 vCPU x  4 GiB x 1 replica  =  4 GiB   2 vCPU  kholisrag/labirin
+#   ----------------------------------------------------------
+#   total                                      28 GiB  16 vCPU
 #
 # That leaves ~4 GiB for the host side (containerd, image pulls, page cache).
 # vCPU is oversubscribed 2:1 against the VM's 8 - fine for CI, where jobs are
 # rarely all CPU-saturated at once. If you raise a tier, lower another.
+#
+# NOTE: the small tier was cut from 2 replicas to 1 to pay for repo-small. The
+# 32 GiB was already fully committed, so a new tier is not additive - it is a
+# trade. Raising vm_memory_mib in the OpenTofu unit is the alternative, but the
+# node has no allocation headroom left either (see the README).
 #
 # LABEL SELECTION:
 #   runs-on: fireactions-small        -> that tier only
 #   runs-on: [self-hosted, fireactions] -> ANY tier, whichever is idle. Handy,
 #                                        but it can hand a trivial job a large
 #                                        microVM. Prefer the explicit tier.
+# Org and repo runners are never interchangeable: a workflow in an <org> repo
+# can only see the org pools, and one in kholisrag/labirin can only see
+# repo-small, even though they share the generic labels.
 fireactions_pools:
   - name: fireactions-small
-    replicas: 2
+    replicas: 1
     shutdown_on_exit: true
     runner:
       name: fireactions-small
@@ -240,5 +290,34 @@ fireactions_pools:
         vcpu_count: 8
       metadata:
         pool: fireactions-large
+        node: "{{ inventory_hostname }}"
+        environment: homelab
+
+  # Repository-scoped tier for a personal (user) account. Requires the fork -
+  # upstream has no `repository` option. Note there is deliberately NO
+  # `group_id` and NO `organization`: user accounts have no runner groups, and
+  # the two scopes are mutually exclusive (`excluded_with=Repository`).
+  - name: fireactions-repo-small
+    replicas: 1
+    shutdown_on_exit: true
+    runner:
+      name: fireactions-repo-small
+      image: "{{ fireactions_runner_image }}"
+      image_pull_policy: IfNotPresent
+      repository: "{{ fireactions_github_repository }}"
+      labels:
+        - self-hosted
+        - fireactions
+        - fireactions-repo-small
+        - fireactions-2vcpu-4gb
+    firecracker:
+      binary_path: firecracker
+      kernel_image_path: "{{ fireactions_kernel_image_path }}"
+      kernel_args: "{{ fireactions_kernel_args }}"
+      machine_config:
+        mem_size_mib: 4096
+        vcpu_count: 2
+      metadata:
+        pool: fireactions-repo-small
         node: "{{ inventory_hostname }}"
         environment: homelab

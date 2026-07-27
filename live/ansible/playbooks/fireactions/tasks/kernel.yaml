@@ -2,8 +2,11 @@
 # ============================================
 # Firecracker guest kernel
 # ============================================
-# Pre-built, minimal uncompressed kernel image published by Hostinger. Every
-# microVM boots this same vmlinux; the runner image only supplies the rootfs.
+# Minimal uncompressed kernel image from the official Firecracker CI bucket -
+# NOT Hostinger's prebuilt kernel, which is built without ACPI and cannot find
+# its root device here. See vars/main.yaml and the README for the diagnosis.
+# Every microVM boots this same vmlinux; the runner image only supplies the
+# rootfs.
 # ============================================
 
 - name: Create the Firecracker kernel directory
@@ -18,14 +21,13 @@
 
 - name: Download the Firecracker guest kernel
   ansible.builtin.get_url:
-    url: >-
-      https://storage.googleapis.com/fireactions/kernels/{{ fireactions_arch }}/{{ fireactions_kernel_version }}/{{ fireactions_kernel_remote_file }}
+    url: "{{ fireactions_kernel_url }}"
     dest: "{{ fireactions_kernel_image_path }}"
     mode: "0644"
     owner: root
     group: root
     # Without this, get_url skips whenever the destination already exists, so
-    # changing fireactions_kernel_remote_file would silently keep the old
+    # changing fireactions_kernel_url would silently keep the old
     # kernel. force still compares checksums, so a matching file is reported
     # unchanged and the handler does not fire.
     force: true

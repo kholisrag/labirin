@@ -25,10 +25,13 @@
 
     - name: Download the Fireactions release archive
       ansible.builtin.get_url:
-        url: >-
-          https://github.com/hostinger/fireactions/releases/download/v{{ fireactions_version }}/fireactions-v{{ fireactions_version }}-linux-{{ fireactions_arch }}.tar.gz
+        url: "{{ fireactions_release_url }}"
         dest: "{{ fireactions_tmp.path }}/fireactions.tar.gz"
         mode: "0600"
+        # Ansible fetches the checksum file and matches our archive by its
+        # basename, so this pins the exact artefact rather than "whatever is
+        # behind that tag today". Release assets are mutable on GitHub.
+        checksum: "sha256:{{ fireactions_release_checksums_url }}"
 
     - name: Unpack the Fireactions release archive
       ansible.builtin.unarchive:
@@ -145,8 +148,10 @@
     fail_msg: >-
       Fireactions did not reach the running state. Inspect it with
       `journalctl -u fireactions -n 100`. A crash loop right after install
-      usually means the GitHub App is not installed on the
-      '{{ fireactions_github_organization }}' organisation, or lacks the
-      self-hosted runner permission.
+      usually means the GitHub App is not installed on a scope some pool
+      registers with - the '{{ fireactions_github_organization }}' organisation,
+      or the owner of '{{ fireactions_github_repository }}' - or that it lacks
+      the Administration / self-hosted runner permission there. Each scope needs
+      its own installation of the App.
   tags:
     - fireactions

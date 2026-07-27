@@ -15,6 +15,10 @@ This playbook installs the whole stack on a Proxmox guest:
 | Guest kernel | Minimal `vmlinux` every microVM boots |
 | Fireactions | Orchestrator: registers runners with GitHub, scales pools |
 
+> [!NOTE]
+> This installs the [`kholisrag/fireactions`](https://github.com/kholisrag/fireactions)
+> **fork**, not upstream — see [Why the fork](#why-the-fork).
+
 ## Layout
 
 ```text
@@ -54,24 +58,34 @@ ls -la /dev/kvm
 grep -cE '(vmx|svm)' /proc/cpuinfo   # must be > 0
 ```
 
-### 2. GitHub App on the `oprek-sh` organisation
+### 2. GitHub App
 
-Fireactions v2 registers runners at **organisation** level only — `organization`
-is a required field in the pool config and there is no repository-scoped
-alternative (see `RunnerConfig` in `server/config.go` upstream).
+One App (`oprek-sh-fireactions`, owned by `oprek-sh`) serves both scopes. It has
+to be **installed separately on every account** whose runners you want — the App
+existing is not enough, and a missing installation shows up as a `404` on
+`GET /orgs/.../installation` rather than anything more helpful.
 
 1. Go to <https://github.com/organizations/oprek-sh/settings/apps> →
    **New GitHub App**.
 2. Name it e.g. `oprek-sh-fireactions`. Homepage URL can be anything.
 3. Uncheck **Webhook → Active**. Fireactions has no webhook handler at all — it
    maintains a standing pool of idle runners rather than reacting to queued jobs.
-4. Under **Organization permissions**, grant:
-   - **Self-hosted runners**: Read and write
-   - **Administration**: Read and write
-5. Under **Where can this GitHub App be installed?** choose *Only on this account*.
+4. Grant:
+   - **Organization permissions → Self-hosted runners**: Read and write
+   - **Repository permissions → Administration**: Read and write
+     (this is what repository-scoped runners register through)
+5. Under **Where can this GitHub App be installed?** choose *Any account* — the
+   personal installation is on `kholisrag`, which is a different account from
+   the organisation that owns the App.
 6. Create the App, note the **App ID**, then **Generate a private key** and keep
    the downloaded `.pem`.
-7. **Install App** → install it on the `oprek-sh` organisation.
+7. **Install App** on both:
+   - the `oprek-sh` organisation → serves the `small` / `medium` / `large` tiers
+   - your personal `kholisrag` account → serves the `repo-small` tier
+
+Fireactions resolves the installation per pool at runtime
+(`FindOrganizationInstallation` / `FindRepositoryInstallation`), so nothing has
+to be pinned in the config.
 
 ### 3. Secrets
 
@@ -92,19 +106,50 @@ is written `0600 root:root` with `no_log: true` on the templating task.
 
 ### 4. Host resolution
 
-Add the VM to `~/.ssh/config` alongside the other guests:
+Both hosts have static DHCP reservations and internal DNS records, applied from
+`live/ansible/playbooks/opnsense/vars/vault.yaml`:
+
+| Host | MAC | IP | DNS |
+| --- | --- | --- | --- |
+| fireactions-01 | `BC:24:11:88:AB:20` | `10.10.99.11` | `fireactions-01.internal.khol.is` |
+| fireactions-02 | `BC:24:11:88:AB:21` | `10.10.99.12` | `fireactions-02.internal.khol.is` |
+
+The reservations live in `dnsmasq_hosts` (applied with
+`manage-dnsmasq-host-overrides.yaml`) and the A records in `unbound_hosts`
+(applied with `manage-local-dns.yaml`). A new host needs an entry in both.
+
+> [!NOTE]
+> `opnsense_host` in that vault is `opnsense.khol.is`, which does not resolve
+> from a workstation whose `/etc/resolver/` only covers `internal.khol.is` —
+> every OPNsense playbook then fails with `nodename nor servname provided`. Run
+> them with `-e opnsense_host=opnsense.internal.khol.is`; it is the same box and
+> the Let's Encrypt wildcard covers it, so TLS still verifies.
+
+Then add both to `~/.ssh/config`, which is what the inventory's `ansible_host`
+values resolve through:
 
 ```sshconfig
 Host petruk-pve0-fireactions-01
     hostname 10.10.99.11
     port 22
     user ansible
+Host petruk-pve0-fireactions-02
+    hostname 10.10.99.12
+    port 22
+    user ansible
 ```
 
-The DHCP reservation for MAC `BC:24:11:88:AB:20` still has to be added to
-`dnsmasq_hosts` in `live/ansible/playbooks/opnsense/vars/vault.yaml` and applied
-with `manage-dnsmasq-host-overrides.yaml`. (`BC:24:11:88:AB:21` → `10.10.99.12`
-is reserved for `fireactions-02`.)
+A reservation only takes effect at the guest's next DHCP negotiation. To move a
+guest that is still holding a pool lease, without rebooting it:
+
+```bash
+# Detached so the SSH connection dropping does not kill the restart
+sudo systemd-run --on-active=3 --unit=dhcp-refresh --collect /bin/sh -c \
+  'rm -f /run/systemd/netif/leases/*; systemctl restart systemd-networkd'
+```
+
+The microVMs are recreated when networkd restarts, so the runners re-register
+under new names — harmless, but expect ~1 minute of churn.
 
 ## Usage
 
@@ -127,21 +172,39 @@ ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/fire
 
 ## Pools and sizing
 
-Three tiers are defined in `vars/main.yaml`. Pick one with `runs-on`:
+Four tiers are defined in `vars/main.yaml`. Pick one with `runs-on`:
 
-| Tier | `runs-on` | vCPU | RAM | Replicas | Standing cost |
-| --- | --- | --- | --- | --- | --- |
-| small | `fireactions-small` | 2 | 4 GiB | 2 | 8 GiB |
-| medium | `fireactions-medium` | 4 | 8 GiB | 1 | 8 GiB |
-| large | `fireactions-large` | 8 | 12 GiB | 1 | 12 GiB |
-| | | | | **per host** | **28 GiB** |
+| Tier | `runs-on` | Registers with | vCPU | RAM | Replicas | Standing cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| small | `fireactions-small` | `oprek-sh` org | 2 | 4 GiB | 1 | 4 GiB |
+| medium | `fireactions-medium` | `oprek-sh` org | 4 | 8 GiB | 1 | 8 GiB |
+| large | `fireactions-large` | `oprek-sh` org | 8 | 12 GiB | 1 | 12 GiB |
+| repo-small | `fireactions-repo-small` | `kholisrag/labirin` | 2 | 4 GiB | 1 | 4 GiB |
+| | | | | | **per host** | **28 GiB** |
 
-With two hosts deployed those replicas double: 4 small / 2 medium / 2 large
-concurrent, 56 GiB of standing microVM RAM across the pair. The table is
-per-host because `replicas` is per-host.
+With two hosts deployed those replicas double: 2 of each tier concurrent, 56 GiB
+of standing microVM RAM across the pair. The table is per-host because
+`replicas` is per-host.
+
+The org tiers and the repo tier are **not interchangeable**. A workflow in an
+`oprek-sh` repository can only see the org runners; one in `kholisrag/labirin`
+can only see `repo-small`. They share the generic `self-hosted` / `fireactions`
+labels, but GitHub never offers a runner across that boundary.
 
 Each tier also carries an explicit spec label (`fireactions-2vcpu-4gb` etc.) if
 you prefer to pin by shape rather than by name.
+
+> [!NOTE]
+> `small` runs 1 replica, not 2, because the 32 GiB was already fully committed
+> and `repo-small` had to be paid for from somewhere. A new tier is a trade, not
+> an addition — and raising `vm_memory_mib` is not free either, see the node
+> budget below.
+
+To point the repository tier somewhere else, change
+`fireactions_github_repository` in `vars/main.yaml` and re-run with `--tags
+fireactions`. The App must be installed on that repository's owner. Note that
+`group_id` is deliberately absent from that pool: user accounts have no runner
+groups, and `organization` / `repository` are mutually exclusive per pool.
 
 > [!IMPORTANT]
 > `replicas` are **standing** microVMs, not on-demand capacity. Fireactions has
@@ -162,14 +225,17 @@ journalctl -u fireactions -f
 fireactions pools ls
 ```
 
-Runners should appear as **Idle** at
-<https://github.com/organizations/oprek-sh/settings/actions/runners>. Then run a
-job against the pool labels:
+Runners should appear as **Idle** in two places, one per scope:
+
+- org tiers → <https://github.com/organizations/oprek-sh/settings/actions/runners>
+- `repo-small` → <https://github.com/kholisrag/labirin/settings/actions/runners>
+
+Then run a job against the pool labels:
 
 ```yaml
 jobs:
   test:
-    runs-on: fireactions-2vcpu-4gb
+    runs-on: fireactions-small        # or fireactions-repo-small
     steps:
       - run: uname -a && docker --version
 ```
@@ -227,6 +293,33 @@ partition the same 80 threads. They buy blast-radius isolation (a wedged
 devmapper pool takes out half your capacity, not all) and rolling upgrades.
 Real scale-out needs a second node.
 
+## Why the fork
+
+`fireactions_release_repo` points at
+[`kholisrag/fireactions`](https://github.com/kholisrag/fireactions), not
+`hostinger/fireactions`. Two reasons:
+
+1. **Repository-scoped runners.** Upstream's `RunnerConfig` has an
+   `organization` field marked `validate:"required"` and no repository
+   equivalent, so personal (user) accounts cannot use Fireactions at all — they
+   can't own organisation runners or runner groups. The fork adds `repository`,
+   makes the two scopes mutually exclusive, resolves the App installation per
+   scope, and defaults `group_id` to `1` where groups don't exist.
+2. **A validation bug.** Upstream tags `Pools` as `validate:"required,min=1"`
+   with no `dive`, so go-playground applies those rules to the *slice* and never
+   descends into the elements — meaning **no field inside any pool was ever
+   validated**, upstream's own `required` fields included. `fireactions
+   validate` would happily accept a pool with no image and no labels. The fork
+   adds `dive`.
+
+Release assets follow upstream's naming exactly, so reverting is just
+`fireactions_release_repo` and `fireactions_version`. Downloads are pinned by
+SHA-256 against the release's `checksums.txt` — GitHub release assets are
+mutable, and this is a fork we control, so the pin is worth having.
+
+Fork tags track upstream with a `-personal.N` suffix
+(`v2.0.5` → `v2.0.5-personal.1`).
+
 ## Upgrading
 
 Bump `fireactions_version` in `vars/main.yaml` and re-run with `--tags
@@ -235,16 +328,61 @@ written, so a schema change in a new release fails the run instead of leaving a
 broken service. See the
 [upgrade guide](https://fireactions.io/latest/user-guide/upgrade-guide/).
 
+When upstream releases a new version, rebase the fork onto that tag, tag it
+`vX.Y.Z-personal.1`, and let the fork's release workflow publish the assets —
+then bump `fireactions_version` here.
+
+## Guest kernel: why not Hostinger's
+
+The upstream install docs tell you to download a prebuilt kernel from
+`storage.googleapis.com/fireactions/kernels/...`. **That kernel does not work
+here.** It is built without ACPI, and every virtio device is rejected at probe
+time:
+
+```text
+virtio_blk: probe of virtio0 failed with error -22
+```
+
+leaving the guest with no root device, so it panics with `Cannot open root
+device "vda"` and the runner never comes online. Reproduced identically on
+Firecracker 1.9.1 and 1.16.1 and on both published Hostinger builds — it is the
+kernel, not the VMM. There is also no `6.1` prebuilt despite the docs implying
+one; the bucket only has `amd64/5.10`, `arm64/5.10` and a dated `amd64/5.10`.
+
+This playbook uses the **official Firecracker CI kernel** instead
+(`fireactions_kernel_url`), which is ACPI-capable — plus one required change:
+`noapic` is removed from `fireactions_kernel_args`. With an ACPI kernel the
+virtio-mmio devices are enumerated through ACPI, and `noapic` disables the
+IOAPIC so they never get an IRQ (`virtio-mmio LNRO0005:01: IRQ index 0 not
+found`). Both changes are needed; either alone still fails.
+
+You will still see this in a healthy microVM — it is harmless. Firecracker
+appends its own `virtio_mmio.device=` entries which collide with the regions
+ACPI already claimed; the ACPI-discovered devices are the ones that work:
+
+```text
+virtio-mmio virtio-mmio.0: can't request region ... failed with error -16
+```
+
+A healthy boot shows `virtio_blk virtio0: [vda] ... 30.0 GiB` and reaches
+`multi-user.target`.
+
 ## Troubleshooting
 
 - `snapshotter not loaded: devmapper: invalid argument` — the thin pool name in
   `/etc/containerd/config.toml` must be `<volume group>-<thin pool>`, i.e.
   `containerd-thinpool`. The playbook asserts `ctr plugins ls` shows devmapper
   `ok`, so this should surface at install time.
-- Runners never appear in GitHub — check the App is *installed* on the org, not
-  just created, and that **Self-hosted runners** permission is read+write.
+- Runners never appear in GitHub — check the App is *installed* on that pool's
+  scope, not just created. Installing it on `oprek-sh` does nothing for
+  `kholisrag/labirin`; each account needs its own installation. Org pools need
+  **Self-hosted runners** read+write, repository pools need **Administration**
+  read+write.
+- `github: finding installation for kholisrag/labirin: 404` — the App is not
+  installed on that account, or the installation excludes that repository.
 - Jobs queue forever — the workflow's `runs-on` labels must match the pool's
-  `labels` exactly.
+  `labels` exactly, and the pool must be registered with *that* repository's
+  scope. An org runner is never offered to a personal repo's workflow.
 - The "Install the Fireactions configuration" task fails with no detail — that
   task is `no_log: true` because the repo sets `diff: always` in `ansible.cfg`
   and a diff would print the private key. Reproduce the error on the host

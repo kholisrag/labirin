@@ -269,7 +269,7 @@ fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/oprek-sh/firea
 # converting queue wait into slower wall-clock per job. Real headroom past this
 # point means another Fireactions host, not a bigger number here.
 #
-# The small tier is sized 8 per host = 16 org-wide because every workflow job in
+# The small tier is sized 8 per host = 32 org-wide across four hosts because
 # the org targets it - 12 `runs-on` declarations across security.yml (7),
 # release.yml (3), ci.yml and pr-title-lint.yml, and zero targeting medium or
 # large. Concurrent PRs stack that fan-out, which is what still queued at 5.
@@ -294,7 +294,7 @@ fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/oprek-sh/firea
 # to a repo-scoped workflow, or vice versa, even with identical labels.
 fireactions_pools:
   - name: fireactions-small
-    # 8 per host = 16 org-wide. Every oprek.sh workflow job targets this tier;
+    # 8 per host = 32 org-wide across four hosts. Every oprek.sh job targets this;
     # see the fan-out note in the memory budget above before lowering it, and the
     # CPU note before raising it - 8 is roughly where this host stops paying off.
     replicas: 8

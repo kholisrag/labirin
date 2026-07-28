@@ -1,0 +1,283 @@
+---
+# Databases inside 1Panel's own PostgreSQL app install.
+#
+# Same argument as manage-websites.yaml: 1Panel keeps these in its own database,
+# not in a config file, so the API is the only declarative surface there is.
+# Everything that existed before this playbook was created by hand in the
+# dashboard; this file is where new ones go instead.
+#
+# CREATE-ONLY. A database that already exists is left completely alone - not
+# reconciled, not re-permissioned, and above all not re-passworded. There is no
+# safe idempotent "update" here: the panel is the only holder of the live
+# credential, and pushing a password from this repo would desynchronise every
+# consumer already using the old one. Rotation is a deliberate two-step
+# (dashboard first, then the consumer's vault), and it is not this playbook's
+# job.
+- name: Manage 1Panel PostgreSQL databases
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+    # The consumer's vault, not a copy of its password here. Same rule as
+    # install-gha-cache.yaml reading the RustFS credential out of
+    # ../rustfs/vars/vault.yaml: a secret in two files is a secret that can
+    # disagree, and the failure - authentication failing against a database that
+    # is running perfectly - names neither file.
+    - ../gha-cache/vars/vault.yaml
+
+  module_defaults:
+    ansible.builtin.uri:
+      validate_certs: true
+      body_format: json
+      status_code: 200
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - panel_api_base is defined
+          - panel_api_key is defined
+          - panel_api_key | length > 0
+        fail_msg: >-
+          panel_api_base / panel_api_key are missing. Populate them with:
+          ansible-vault edit live/ansible/playbooks/1panel/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # The consuming playbook refuses to run on a placeholder, and so does this
+    # one - otherwise the database gets created literally named CHANGEME and the
+    # mistake is only visible once something tries to connect.
+    - name: Assert no database is still carrying a placeholder
+      ansible.builtin.assert:
+        that:
+          - item.name != 'CHANGEME'
+          - item.username != 'CHANGEME'
+          - item.password != 'CHANGEME'
+          - item.password | length > 0
+        fail_msg: >-
+          Database entry '{{ item.name }}' still holds a placeholder. The name,
+          user and password live in the consuming service's vault - for
+          gha-cache that is
+          live/ansible/playbooks/gha-cache/vars/vault.yaml.
+      loop: "{{ onepanel_databases }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+      tags:
+        - always
+        - preflight
+
+    # Same auth scheme as manage-websites.yaml: md5("1panel" + <api key> +
+    # <unix timestamp>) alongside the timestamp.
+    #
+    # THE TIMESTAMP IS ITS OWN FACT ON PURPOSE - see the long comment in
+    # manage-websites.yaml. Inlining the lookup evaluates it twice and the two
+    # evaluations occasionally straddle a second boundary, producing a token
+    # signed with N sent with a header saying N+1.
+    - name: Read the 1Panel API timestamp
+      ansible.builtin.set_fact:
+        onepanel_api_timestamp: "{{ lookup('pipe', 'date +%s') }}"
+      tags:
+        - always
+
+    - name: Build the 1Panel API authentication headers
+      ansible.builtin.set_fact:
+        onepanel_api_headers:
+          1Panel-Token: "{{ ('1panel' ~ panel_api_key ~ onepanel_api_timestamp) | hash('md5') }}"
+          1Panel-Timestamp: "{{ onepanel_api_timestamp }}"
+      no_log: true
+      tags:
+        - always
+
+    # ===== DISCOVERY =====
+    # `orderBy` is validated `oneof=name createdAt` and `order` is
+    # `oneof=null ascending descending` (agent/app/dto/database_postgresql.go,
+    # PostgresqlDBSearch). Send the snake_case `created_at` that the websites
+    # endpoint takes and this one answers a bare 400 with no field named.
+    - name: List the existing PostgreSQL databases
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/databases/pg/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+          info: ""
+          database: "{{ onepanel_postgresql_app }}"
+          orderBy: createdAt
+          order: "null"
+      register: onepanel_pg_databases
+      changed_when: false
+      # The response carries every database's password.
+      no_log: true
+      tags:
+        - databases
+
+    # 1Panel answers an auth failure with HTTP 200 and a body of
+    # {"code": <non-200>, ...} - the status line says nothing.
+    - name: Assert the 1Panel API accepted the request
+      ansible.builtin.assert:
+        that:
+          - onepanel_pg_databases.json.code | default(0) == 200
+          - onepanel_pg_databases.json.data is not none
+        fail_msg: >-
+          1Panel rejected the request
+          (code={{ onepanel_pg_databases.json.code | default('?') }}).
+          Causes, in the order they are worth checking:
+          onepanel_postgresql_app does not name a running PostgreSQL app
+          install; the API key is disabled in Panel Settings; this
+          workstation's IP is not in the key's allowlist; or the key in
+          vars/vault.yaml is stale.
+      tags:
+        - databases
+
+    - name: Record the databases that already exist
+      ansible.builtin.set_fact:
+        onepanel_existing_databases: >-
+          {{ onepanel_pg_databases.json.data['items'] | default([]) | map(attribute='name') | list }}
+      tags:
+        - databases
+
+    # ===== CREATE =====
+    # `from: local` means the app install on this box rather than a registered
+    # remote server. `superUser: false` - the cache server owns exactly one
+    # database and has no reason to reach any other.
+    #
+    # THE PASSWORD IS BASE64, AND NOTHING ELSE ON THIS ENDPOINT IS. The handler
+    # does `base64.StdEncoding.DecodeString(req.Password)` before validating
+    # anything (agent/app/api/v2/database_postgresql.go, CreatePostgresql), so a
+    # plaintext password is decoded rather than used.
+    #
+    # This fails in the worst possible way for a password made of `[A-Za-z0-9]`
+    # with a length divisible by four: such a string IS valid base64, so the
+    # decode SUCCEEDS and yields binary garbage, which then trips CheckIllegal
+    # and comes back as HTTP 500 "Command has invalid characters". The message
+    # points at the characters you sent - and they were fine. A password that is
+    # not valid base64 gets a 400 instead, which is at least honest.
+    - name: Create the missing databases
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/databases/pg"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          name: "{{ item.name }}"
+          from: local
+          database: "{{ onepanel_postgresql_app }}"
+          format: ""
+          username: "{{ item.username }}"
+          password: "{{ item.password | b64encode }}"
+          superUser: false
+          description: "{{ item.description | default('') }}"
+      loop: "{{ onepanel_databases }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.name not in onepanel_existing_databases
+      register: onepanel_db_created
+      # Same trap as everywhere else against this API: a rejected body still
+      # answers HTTP 200, so the outcome is the body's `code`.
+      failed_when:
+        - not onepanel_db_created.skipped | default(false)
+        - onepanel_db_created.json.code | default(0) != 200
+      # The body carries the password.
+      no_log: true
+      tags:
+        - databases
+
+    - name: Display the managed databases
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.name }} (user {{ item.username }}) on app install
+          '{{ onepanel_postgresql_app }}' -
+          {{ 'already existed' if item.name in onepanel_existing_databases else 'created' }}
+      loop: "{{ onepanel_databases }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - databases
+
+# ============================================================================
+# WHAT 1PANEL LEAVES UNDONE, AND WHY IT CANNOT BE DONE THROUGH THE API
+# ============================================================================
+# A database created above is NOT yet usable by the user created alongside it.
+# 1Panel issues exactly two grants (agent/utils/postgresql/client/local.go,
+# CreateUser):
+#
+#     CREATE USER "<user>" WITH PASSWORD '<pw>'
+#     GRANT ALL PRIVILEGES ON DATABASE "<db>" TO "<user>"
+#
+# and says nothing about the schema. On PostgreSQL 15 and later that is not
+# enough: PG15 revoked the historical CREATE grant that role PUBLIC held on
+# schema `public`, so a non-superuser with every privilege on the DATABASE still
+# cannot create a table in it. This install is 18.4.
+#
+# The symptom is not a permissions error at connect time - the connection, the
+# password and the network all work. It is the FIRST MIGRATION that fails:
+#
+#     ERROR  Database migration failed permission denied for schema public
+#     SQLSTATE 42501, create table if not exists "kysely_migration" (...)
+#
+# which reads like a broken application and is not.
+#
+# 1Panel's only lever for this is `superUser: true` at create time, and that is
+# the wrong instrument on a SHARED instance: a superuser can read and modify
+# every other database on it - gitea, litellm, freshrss. The narrow fix is to
+# make the service's own user own `public` in ITS OWN database and nothing else,
+# which is one statement and needs SQL. The panel exposes no arbitrary-SQL
+# endpoint, so this play uses the guest and `docker exec`.
+#
+# Runs over SSH, so this file needs an inventory that the API-only play above
+# does not:
+#
+#   ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \
+#     live/ansible/playbooks/1panel/manage-databases.yaml
+- name: Grant schema ownership inside the PostgreSQL databases
+  hosts: onepanel_vm
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+    - ../gha-cache/vars/vault.yaml
+
+  tasks:
+    # ALTER SCHEMA OWNER rather than GRANT ALL ON SCHEMA: ownership also covers
+    # the objects the migration will go on to create, so a later migration
+    # adding a table needs no second visit here. Both work today; only one keeps
+    # working.
+    #
+    # `-u postgres` is the OS user inside the container, which gets peer auth on
+    # the unix socket and therefore needs no password anywhere in this repo.
+    # `$POSTGRES_USER` is read INSIDE the container because 1Panel generates it
+    # at install time - it is not `postgres`, and hardcoding that name fails with
+    # `role "postgres" does not exist`.
+    #
+    # Idempotent: re-running ALTER SCHEMA to the same owner is a no-op, so this
+    # reports changed on every run rather than lying about it. Cheap enough that
+    # a changed_when heuristic would cost more than it saves.
+    - name: Make each database user own its own public schema
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - -u
+          - postgres
+          - "{{ onepanel_postgresql_app }}"
+          - sh
+          - -c
+          - >-
+            psql -U "$POSTGRES_USER" -d "{{ item.name }}" -v ON_ERROR_STOP=1
+            -c 'ALTER SCHEMA public OWNER TO "{{ item.username }}"'
+      loop: "{{ onepanel_databases }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+      tags:
+        - databases
+        - grants

@@ -1,0 +1,129 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/gha-cache/install-gha-cache.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# 1Panel stores this at /opt/1panel/docker/compose/gha-cache/docker-compose.yml
+# with the .env beside it. Both are written by the panel, not by Ansible over
+# SSH, so the panel's own Compose page stays authoritative for start/stop/logs.
+#
+# Every secret is referenced as ${...} and lives in that .env, so the compose
+# detail page the dashboard renders carries no credentials.
+services:
+  {{ gha_cache_container_name }}:
+    image: ghcr.io/falcondev-oss/github-actions-cache-server:{{ gha_cache_version }}
+    container_name: {{ gha_cache_container_name }}
+    restart: always
+
+    # Nothing starts until the database answers pg_isready. The server runs its
+    # Kysely migrations during startup and calls process.exit(1) if they fail
+    # (lib/db.ts), so racing Postgres turns a cold `compose up` into a restart
+    # loop that clears itself - eventually - and looks like a broken image.
+    depends_on:
+      {{ gha_cache_db_container_name }}:
+        condition: service_healthy
+
+    # Loopback only - see gha_cache_bind_address in vars/main.yaml.
+    ports:
+      - "{{ gha_cache_bind_address }}:{{ gha_cache_port }}:3000"
+
+    environment:
+      # The URL the RUNNER will be told to connect to, not the one this
+      # container listens on. It goes back in the Twirp CreateCacheEntry
+      # response as `signed_upload_url` and in GetCacheEntryDownloadURL as the
+      # download URL. See the long note in vars/main.yaml.
+      API_BASE_URL: "{{ gha_cache_api_base_url }}"
+
+      # The issuer whose JWKS every runner token is verified against, and
+      # therefore what keeps one repository's cache out of another's. Not
+      # decoration - see vars/main.yaml.
+      #
+      # SKIP_TOKEN_VALIDATION IS NOT SET HERE AND MUST NOT BE ADDED, not even
+      # briefly while debugging a 401. It turns signature verification into a
+      # bare decode and logs one warning; anything that can reach this server
+      # could then claim any repository_id.
+      ACTIONS_TOKEN_ISSUER: "{{ gha_cache_actions_token_issuer }}"
+
+      # ===== Storage: S3 on RustFS =====
+      STORAGE_DRIVER: s3
+      STORAGE_S3_BUCKET: "{{ gha_cache_s3_bucket }}"
+      STORAGE_S3_SOCKET_TIMEOUT_MS: "{{ gha_cache_s3_socket_timeout_ms }}"
+
+      # There is no STORAGE_S3_ENDPOINT. lib/storage.ts builds its S3Client with
+      # no `endpoint` key, so the AWS SDK's own resolution decides where the
+      # requests go, and AWS_ENDPOINT_URL is the override this project declares
+      # and tests. Omit it and the SDK resolves the real Amazon endpoint for
+      # AWS_REGION - quietly, with no error until a request fails to sign.
+      AWS_REGION: "{{ gha_cache_s3_region }}"
+      AWS_ENDPOINT_URL: "{{ gha_cache_s3_endpoint }}"
+
+      # From the stack's .env, which install-gha-cache.yaml writes from the
+      # RustFS vault. These are RustFS's root credentials.
+      AWS_ACCESS_KEY_ID: ${GHA_CACHE_S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${GHA_CACHE_S3_SECRET_ACCESS_KEY}
+
+      # ===== Retention =====
+      # Object storage reports no capacity, so this explicit byte budget is the
+      # ONLY thing bounding the cache - without it enforceStorageBudget() has
+      # nothing to compare against and returns immediately.
+      CACHE_MAX_SIZE_BYTES: "{{ gha_cache_max_size_bytes }}"
+      CACHE_CLEANUP_OLDER_THAN_DAYS: "{{ gha_cache_cleanup_older_than_days }}"
+      ENABLE_DIRECT_DOWNLOADS: "{{ gha_cache_enable_direct_downloads | lower }}"
+
+      # ===== Database =====
+      # Discrete fields, not DB_POSTGRES_URL - the env schema accepts one form
+      # or the other and rejects a mixture, and this one needs no
+      # percent-encoding of the password.
+      DB_DRIVER: postgres
+      DB_POSTGRES_HOST: "{{ gha_cache_db_host }}"
+      DB_POSTGRES_PORT: "{{ gha_cache_db_port }}"
+      DB_POSTGRES_DATABASE: "{{ gha_cache_db_name }}"
+      DB_POSTGRES_USER: "{{ gha_cache_db_user }}"
+      DB_POSTGRES_PASSWORD: ${GHA_CACHE_DB_PASSWORD}
+
+    healthcheck:
+      # /health is a flat 200 from the HTTP layer - it says the process is
+      # serving, not that S3 or Postgres are reachable. That is still the right
+      # probe for `depends_on`, because a server that cannot reach its database
+      # exits rather than serving unhealthily. Alpine base, so wget is present.
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  {{ gha_cache_db_container_name }}:
+    image: postgres:{{ gha_cache_postgres_version }}
+    container_name: {{ gha_cache_db_container_name }}
+    restart: always
+
+    # No `ports:` on purpose. The only client is the service above, over this
+    # stack's own Compose network. Publishing it - even on loopback - would put
+    # it within reach of everything else on a box that already runs pgadmin4.
+
+    environment:
+      POSTGRES_DB: "{{ gha_cache_db_name }}"
+      POSTGRES_USER: "{{ gha_cache_db_user }}"
+      POSTGRES_PASSWORD: ${GHA_CACHE_DB_PASSWORD}
+
+    volumes:
+      # NOT ./data/postgres:/var/lib/postgresql/data, which is what every
+      # pre-18 example shows. Postgres 18 moved PGDATA to
+      # /var/lib/postgresql/18/docker and the volume up to /var/lib/postgresql.
+      # Mounting the old path against an 18 image initialises a fresh empty
+      # cluster and reports success.
+      #
+      # No `user:` and no chown task, unlike Athens: this image's entrypoint
+      # starts as root, runs docker_create_db_directories() to chown PGDATA to
+      # the postgres user on every start, and only then re-execs itself under
+      # gosu. Setting `user:` here would skip that and break the bind mount.
+      - ./data/postgres:{{ gha_cache_db_mount_path }}
+
+    healthcheck:
+      # pg_isready, not a TCP check: Postgres accepts connections during
+      # recovery and while initdb is still running, and `depends_on` would let
+      # the cache server's migrations start against it and fail.
+      test: ["CMD-SHELL", "pg_isready -U {{ gha_cache_db_user }} -d {{ gha_cache_db_name }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

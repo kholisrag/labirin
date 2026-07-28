@@ -46,3 +46,31 @@ onepanel_websites:
     domains:
       - domain: harbor.internal.khol.is
         port: 80
+
+# ============================================
+# 1Panel connection
+# ============================================
+# Split out of vars/vault.yaml so the vault holds only what is actually
+# secret - the API key, the obscured entrance path, and the host. Those four
+# arrive as `vault_*` and are re-exported here under the names the playbooks
+# already use, so nothing downstream changed.
+#
+# `panel_endpoint` is new, from the loose .creds.yaml this replaced. It is
+# the API base plus a path, which is why it is its own variable rather than
+# an edit to `panel_api_base` - that one is still composed from host + port
+# and is what the three playbooks talk to.
+
+panel_api_key: "{{ vault_panel_api_key }}"
+panel_entrance: "{{ vault_panel_entrance }}"
+panel_host: "{{ vault_panel_host }}"
+panel_endpoint: "{{ vault_panel_endpoint }}"
+
+cert_description: "OPNSense Auto-renewed *.khol.is and *.internal.khol.is"
+cert_directory: "/home/ansible/.acme/certs/-.khol.is"
+cert_domain: "-.khol.is"
+panel_api_base: "https://{{ panel_host }}:{{ panel_port }}"
+panel_port: 11150
+panel_upload_url: "{{ panel_api_base }}/api/v2/websites/ssl/upload"
+scripts_dir: "{{ ansible_facts['user_dir'] }}/.acme/scripts"
+ssl_id: 2
+uploader_script: "{{ scripts_dir }}/1panel-ssl-uploader.sh"

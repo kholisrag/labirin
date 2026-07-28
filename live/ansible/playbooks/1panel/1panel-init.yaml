@@ -3,6 +3,10 @@
   hosts: onepanel_all
   become: true
   vars_files:
+    # main.yaml carries the non-secret half of the 1Panel connection vars;
+    # vault.yaml is now secrets only. Both are needed, and this playbook
+    # used to load only the vault.
+    - vars/main.yaml
     - vars/vault.yaml
   vars:
     install_dir: /opt

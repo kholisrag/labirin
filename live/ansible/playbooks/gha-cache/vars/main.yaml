@@ -16,9 +16,10 @@
 # .env - see loadPath()/newComposeEnv() in agent/app/service/container_compose.go.
 # The paths below mirror that decision; they are not free choices.
 #
-# Two services in one stack, not two stacks: the database exists only to serve
-# this cache and has no other consumer, so splitting them would buy nothing and
-# lose the single start/stop the panel gives a stack.
+# ONE service, and nothing on local disk. Cache payloads go to RustFS and the
+# index goes to the PostgreSQL that 1Panel already runs as an app install, so
+# this stack owns no volume at all - which is also why there is no chown task in
+# the playbook, unlike Athens.
 
 # https://github.com/falcondev-oss/github-actions-cache-server/releases
 # GHCR publishes `<major>.<minor>.<patch>` with no `v` prefix, plus a `-caged`
@@ -29,16 +30,10 @@ gha_cache_version: "9.6.2"
 
 gha_cache_compose_name: gha-cache
 gha_cache_container_name: gha-cache
-gha_cache_db_container_name: gha-cache-db
 
 # {DataDir} is /opt/1panel on this install.
 gha_cache_compose_dir: /opt/1panel/docker/compose/{{ gha_cache_compose_name }}
 gha_cache_compose_file: "{{ gha_cache_compose_dir }}/docker-compose.yml"
-
-# Only the database is on disk here. Cache payloads go to RustFS, so this
-# directory holds tens of megabytes of Postgres, not the cache itself.
-gha_cache_data_dir: "{{ gha_cache_compose_dir }}/data"
-gha_cache_db_data_dir: "{{ gha_cache_data_dir }}/postgres"
 
 # ============================================
 # Identity
@@ -74,6 +69,32 @@ gha_cache_bind_address: 127.0.0.1
 # moved. The preflight task in install-gha-cache.yaml fails the run if this ever
 # collides.
 gha_cache_port: 3400
+
+# ============================================
+# Container network
+# ============================================
+# 1Panel's own user-defined bridge, joined as an EXTERNAL network. This is how
+# the container reaches the PostgreSQL app install by name, and it is the
+# convention the panel's own app installs already follow - an app-install that
+# links a database is handed PANEL_DB_HOST set to the database container's name,
+# resolved over this network by Docker's embedded DNS.
+#
+# Athens does NOT join it, and that is not an inconsistency: Athens talks to
+# nothing on this box, so it stays on its own compose network.
+#
+# The alternative was reaching Postgres over the host. It does publish on
+# 127.0.0.1:5432, but a container's 127.0.0.1 is its OWN loopback, so that route
+# needs an extra_hosts host-gateway mapping or the bridge gateway address -
+# either of which is a more fragile thing to depend on than a network name the
+# panel maintains itself.
+#
+# What it costs, stated rather than buried: everything else on this network
+# becomes reachable from this container. That is the same exposure every 1Panel
+# app install on the box already has, and this container initiates connections
+# only to its database and outward, so it is an accepted cost rather than a new
+# class of one. Re-confirm the name against the panel's network list if a future
+# 1Panel release renames it.
+gha_cache_network: 1panel-network
 
 # ============================================
 # Authentication
@@ -121,10 +142,27 @@ gha_cache_s3_bucket: gha-cache
 # resolves the real AWS S3 endpoint for AWS_REGION and the server tries to talk
 # to Amazon.
 #
-# `forcePathStyle: true` is hardcoded upstream, which happens to be exactly what
-# RustFS needs - RUSTFS_SERVER_DOMAINS is unset there, so virtual-host style
-# addressing is not available. Nothing to configure, but it is the reason this
-# combination works at all.
+# THE HTTPS NAME, NOT THE GUEST'S ADDRESS. rustfs_s3_endpoint is
+# https://rustfs.internal.khol.is, which is an Unbound alias onto
+# 1panel.internal.khol.is - so this container resolves it to its own host, hits
+# OpenResty, and is proxied on to rustfs-01. That hop back out through the
+# reverse proxy is deliberate rather than accidental: TLS terminates at
+# OpenResty with the wildcard, so object traffic is encrypted on the wire and
+# the S3 endpoint is the same string here as it is for every other client. Do
+# not "optimise" it to http://10.10.99.14:9000.
+#
+# TLS trust needs nothing configured. The wildcard is a public Let's Encrypt
+# certificate, and Node verifies against its own compiled-in Mozilla root set
+# rather than the OS store, so the alpine image's package list does not come
+# into it. If it ever does fail to verify, the fix is NODE_EXTRA_CA_CERTS -
+# never NODE_TLS_REJECT_UNAUTHORIZED.
+#
+# Path-style addressing needs nothing configured either: `forcePathStyle: true`
+# is hardcoded in lib/storage.ts and is not exposed as an environment variable.
+# That is exactly what RustFS requires - RUSTFS_SERVER_DOMAINS is unset there,
+# so virtual-host style would address gha-cache.rustfs.internal.khol.is, which
+# has neither a DNS alias nor certificate coverage. Nothing to set, but it is
+# the reason this pairing works at all.
 gha_cache_s3_endpoint: "{{ rustfs_s3_endpoint }}"
 gha_cache_s3_region: "{{ rustfs_region }}"
 
@@ -211,44 +249,38 @@ gha_cache_enable_direct_downloads: false
 # ============================================
 # Database
 # ============================================
-# Postgres rather than the default sqlite. Not a scale argument - it is that the
-# cache server's own cleanup tasks run on a schedule inside the process while
-# request handlers write concurrently, and sqlite's single-writer lock turns
-# that into avoidable contention. Postgres is also the only driver that survives
-# NITRO_CLUSTER_WORKERS > 1 if that is ever raised.
+# THE PANEL'S EXISTING POSTGRESQL, not a Postgres service inside this stack. It
+# is a 1Panel app install that already carries the databases for several other
+# apps on the box; a second Postgres beside it would be another thing to patch
+# and back up for one small index.
 #
-# 18.x, pinned to a patch. A MAJOR bump is a migration, not a tag change: the
-# on-disk cluster is version-specific and Postgres does not read the previous
-# major's data directory.
-gha_cache_postgres_version: "18.4-alpine"
-
-gha_cache_db_name: gha_cache
-gha_cache_db_user: gha_cache
-
-# Postgres 18 MOVED THE DATA DIRECTORY, and this is the part that silently eats
-# a database if it is copied from an older example. In 17 and earlier PGDATA was
-# /var/lib/postgresql/data and that was the documented volume. From 18 it is
-# /var/lib/postgresql/18/docker, with the volume one level up at
-# /var/lib/postgresql - see the NOTE in the official image's Dockerfile. Mount
-# the old path against an 18 image and Postgres initialises a brand new empty
-# cluster inside it while the real one sits untouched next door.
-gha_cache_db_mount_path: /var/lib/postgresql
-
-# The cache server talks to the database over the stack's own Compose network,
-# by service name. Nothing is published on the host: there is no reason for
-# anything outside this stack to reach it, and pgadmin4 on this box would
-# happily be pointed at it if there were.
-gha_cache_db_host: "{{ gha_cache_db_container_name }}"
-gha_cache_db_port: 5432
-
-# The discrete DB_POSTGRES_* form rather than DB_POSTGRES_URL. lib/schemas.ts
-# accepts either but not both - supplying the URL alongside any discrete field
-# fails env validation at startup. Discrete wins here because a password with a
-# `@`, `:` or `/` in it has to be percent-encoded inside a URL and is not
-# encoded at all in its own variable; that encoding step is a rotation footgun
-# for no gain.
+# NONE OF ITS COORDINATES ARE DERIVABLE FROM THIS REPOSITORY. That install was
+# made by hand in the dashboard - ../1panel/vars/main.yaml says so in its own
+# header - so every field below comes from vars/vault.yaml rather than being
+# written here. The vault ships with obvious placeholders for the three that
+# cannot be guessed at all; install-gha-cache.yaml refuses to run while they are
+# still in place, and the README says where to read the real values.
 #
-# Sourced from vars/vault.yaml. Written to the stack's .env, not into
-# docker-compose.yml, so it is not sitting in the file the dashboard renders on
-# the compose detail page.
+# THE DATABASE AND ITS USER MUST EXIST BEFORE THE STACK STARTS. Creating them is
+# a dashboard action (Databases > PostgreSQL > Create), not something this
+# playbook should attempt: the panel generates the database name, the user and
+# the password itself and records them in its own store, so a database created
+# behind its back would not appear there - and the generated name carries a
+# random suffix, which is why the vault holds the name rather than this file
+# dictating one.
+#
+# Discrete DB_POSTGRES_* rather than DB_POSTGRES_URL. lib/schemas.ts accepts
+# either but not both - supplying the URL alongside any discrete field fails env
+# validation at startup - and the discrete form keeps the password in a variable
+# of its own instead of inside a single string that is easy to paste whole into
+# a log, a comment or an error message. It also avoids percent-encoding it.
+gha_cache_db_host: "{{ vault_gha_cache_db_host }}"
+gha_cache_db_port: "{{ vault_gha_cache_db_port }}"
+gha_cache_db_name: "{{ vault_gha_cache_db_name }}"
+gha_cache_db_user: "{{ vault_gha_cache_db_user }}"
 gha_cache_db_password: "{{ vault_gha_cache_db_password }}"
+
+# What the preflight compares the vault against, so a half-configured vault
+# fails in the first seconds of a run rather than in a container log nobody is
+# tailing.
+gha_cache_db_placeholder: CHANGEME

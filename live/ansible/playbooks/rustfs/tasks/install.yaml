@@ -1,0 +1,190 @@
+---
+# ============================================
+# RustFS binary, configuration and service
+# ============================================
+# This reproduces what upstream's install_rustfs.sh lays down - the binary at
+# /usr/local/bin/rustfs, /etc/default/rustfs, /etc/systemd/system/rustfs.service
+# - from a pinned, checksummed artifact and without a TTY. See the note in
+# vars/main.yaml for why the script itself is not used.
+# ============================================
+
+- name: Create the log directory
+  ansible.builtin.file:
+    path: "{{ rustfs_log_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - install
+
+# ---------------------------------------------------------------
+# Binary
+# ---------------------------------------------------------------
+# Guarded on rustfs_needs_install (tasks/preflight.yaml) so a steady-state run
+# does not re-download, re-unarchive and re-copy - each of which would report
+# `changed` and bounce the service.
+- name: Create a staging directory for the release archive
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: rustfs
+  register: rustfs_stage
+  when: rustfs_needs_install | bool
+  changed_when: false
+  tags:
+    - install
+
+- name: Download the RustFS release archive
+  ansible.builtin.get_url:
+    url: "{{ rustfs_package_url }}"
+    dest: "{{ rustfs_stage.path }}/{{ rustfs_package_name }}"
+    # A mismatch fails the task. This is the only integrity check between
+    # GitHub's CDN and a binary that runs as root.
+    checksum: "sha256:{{ rustfs_package_sha256 }}"
+    mode: "0600"
+  when: rustfs_needs_install | bool
+  tags:
+    - install
+
+- name: Unpack the RustFS release archive
+  ansible.builtin.unarchive:
+    src: "{{ rustfs_stage.path }}/{{ rustfs_package_name }}"
+    dest: "{{ rustfs_stage.path }}"
+    remote_src: true
+  when: rustfs_needs_install | bool
+  tags:
+    - install
+
+# The archive layout is not promised - the upstream installer itself does a
+# `find ... -name rustfs` rather than assuming a path - so this does the same
+# instead of hard-coding one.
+- name: Locate the unpacked binary
+  ansible.builtin.find:
+    paths: "{{ rustfs_stage.path }}"
+    patterns: rustfs
+    file_type: file
+    recurse: true
+  register: rustfs_unpacked
+  when: rustfs_needs_install | bool
+  tags:
+    - install
+
+- name: Assert the binary was found in the archive
+  ansible.builtin.assert:
+    that:
+      - rustfs_unpacked.files | length > 0
+    fail_msg: >-
+      No file named 'rustfs' inside {{ rustfs_package_name }}. Upstream changed
+      the archive layout - check the release assets before adjusting this.
+  when: rustfs_needs_install | bool
+  tags:
+    - install
+
+- name: Install the RustFS binary
+  ansible.builtin.copy:
+    src: "{{ (rustfs_unpacked.files | first).path }}"
+    dest: "{{ rustfs_binary_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: rustfs_needs_install | bool
+  notify: Restart rustfs
+  tags:
+    - install
+
+- name: Remove the staging directory
+  ansible.builtin.file:
+    path: "{{ rustfs_stage.path }}"
+    state: absent
+  when: rustfs_needs_install | bool
+  changed_when: false
+  tags:
+    - install
+
+# ---------------------------------------------------------------
+# Configuration and unit
+# ---------------------------------------------------------------
+# Reconciled on EVERY run, unlike the binary: these are cheap to write and are
+# the files an operator is most likely to have poked at by hand on the box.
+- name: Install the RustFS environment file
+  ansible.builtin.template:
+    src: rustfs.env.j2
+    dest: /etc/default/rustfs
+    owner: root
+    group: root
+    # 0600: this file holds the root access key and secret in plain text, which
+    # is how systemd's EnvironmentFile works. Upstream's installer sets the same
+    # mode.
+    mode: "0600"
+  no_log: true
+  notify: Restart rustfs
+  tags:
+    - install
+    - config
+
+- name: Install the RustFS systemd unit
+  ansible.builtin.template:
+    src: rustfs.service.j2
+    dest: /etc/systemd/system/rustfs.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart rustfs
+  tags:
+    - install
+    - config
+
+- name: Enable and start RustFS
+  ansible.builtin.systemd_service:
+    name: rustfs
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - install
+    - config
+
+# The handlers above have to run BEFORE the readiness wait below, or the wait
+# checks the old process and the version marker gets written for a binary that
+# never started.
+- name: Flush handlers so RustFS is running the new configuration
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - install
+    - config
+
+# ---------------------------------------------------------------
+# Readiness
+# ---------------------------------------------------------------
+# systemd reports the unit active as soon as the Type=notify handshake lands,
+# which is before the volume has been scanned and the S3 listener answers.
+# /health/ready is the endpoint that knows the difference.
+- name: Wait for the readiness probe
+  ansible.builtin.uri:
+    url: "{{ rustfs_health_url }}"
+    method: GET
+    status_code: 200
+  register: rustfs_ready
+  retries: "{{ rustfs_ready_retries }}"
+  delay: "{{ rustfs_ready_delay }}"
+  until: rustfs_ready.status | default(0) == 200
+  changed_when: false
+  tags:
+    - install
+    - config
+
+# After the readiness wait, so a failed start never leaves a marker claiming the
+# version is in place - the next run would then skip the install and "fix"
+# nothing.
+- name: Record the installed RustFS version
+  ansible.builtin.copy:
+    content: "{{ rustfs_version }}\n"
+    dest: "{{ rustfs_version_marker }}"
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - install

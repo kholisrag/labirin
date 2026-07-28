@@ -1,0 +1,199 @@
+---
+# ============================================
+# Pre-flight checks for RustFS
+# ============================================
+# Everything here is read-only. The point is to fail with an actionable message
+# BEFORE we format a block device or replace a running binary.
+# ============================================
+
+- name: Assert a supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+    fail_msg: >-
+      RustFS publishes linux binaries for x86_64 and aarch64 only, this host
+      reports '{{ ansible_facts['architecture'] }}'. Note that
+      rustfs_package_name is built from this fact verbatim - upstream names the
+      artifacts with the kernel spelling, not the Go spelling, so there is no
+      amd64/arm64 translation to do.
+  tags:
+    - always
+
+- name: Assert the distribution is supported
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'Debian'
+    fail_msg: >-
+      This playbook installs packages with apt and mounts via /etc/fstab in a
+      Debian-family layout. This host reports
+      '{{ ansible_facts['os_family'] }}'.
+  tags:
+    - always
+
+# The upstream installer picks the GNU build when glibc >= 2.31 and the MUSL
+# build otherwise. vars/main.yaml hard-codes gnu, so the assumption is checked
+# rather than trusted: a MUSL-needing host would otherwise get a binary that
+# fails at exec time with a linker error that says nothing about glibc.
+- name: Read the glibc version
+  ansible.builtin.command:
+    cmd: getconf GNU_LIBC_VERSION
+  register: rustfs_glibc
+  changed_when: false
+  failed_when: false
+  when: rustfs_libc == 'gnu'
+  tags:
+    - always
+
+- name: Assert glibc is new enough for the GNU build
+  ansible.builtin.assert:
+    that:
+      - rustfs_glibc.rc == 0
+      - rustfs_glibc.stdout.split(' ') | last is version('2.31', '>=')
+    fail_msg: >-
+      rustfs_libc is 'gnu' but this host reports
+      '{{ rustfs_glibc.stdout | default("no glibc") | trim }}'. Upstream builds
+      the GNU artifact against glibc 2.31. Set rustfs_libc to 'musl' in
+      vars/main.yaml (and update rustfs_package_sha256 to the musl checksum
+      from the release's SHA256SUMS).
+  when: rustfs_libc == 'gnu'
+  tags:
+    - always
+
+# RustFS's published minimum is 2 GiB for testing. The OpenTofu unit gives this
+# VM 8 GiB with a 4 GiB balloon floor, so anything under ~3.8 GiB means the
+# guest is not the one that unit describes.
+- name: Assert the host has enough memory
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['memtotal_mb'] >= 3800
+    fail_msg: >-
+      This host has {{ ansible_facts['memtotal_mb'] }} MiB of RAM. The OpenTofu
+      unit gives rustfs-01 8 GiB with a balloon floor of 4 GiB.
+  tags:
+    - always
+
+- name: Assert the credentials are configured
+  ansible.builtin.assert:
+    that:
+      - rustfs_access_key is defined
+      - rustfs_secret_key is defined
+      - rustfs_access_key | length >= 3
+      - rustfs_secret_key | length >= 8
+      # RustFS's own built-in defaults. Booting with these leaves the S3 API
+      # and the console wide open to anything that can reach the LAN.
+      - rustfs_access_key != 'rustfsadmin'
+      - rustfs_secret_key != 'rustfsadmin'
+      - "'REPLACE_ME' not in rustfs_secret_key"
+    fail_msg: >-
+      rustfs_access_key / rustfs_secret_key are unset, still placeholders, or
+      still the upstream default rustfsadmin/rustfsadmin. Populate them with:
+      ansible-vault edit live/ansible/playbooks/rustfs/vars/vault.yaml
+  no_log: true
+  tags:
+    - always
+
+# ---------------------------------------------------------------
+# Is the installed binary already the version we want?
+# ---------------------------------------------------------------
+# Without this the download/unarchive/copy chain reports `changed` on every run
+# and restarts RustFS every time the playbook is run. An object store bouncing
+# on a no-op run is how in-flight multipart uploads die.
+- name: Read the installed RustFS version marker
+  ansible.builtin.slurp:
+    src: "{{ rustfs_version_marker }}"
+  register: rustfs_version_marker_content
+  failed_when: false
+  changed_when: false
+  tags:
+    - always
+
+- name: Decide whether the binary needs to be installed
+  ansible.builtin.set_fact:
+    rustfs_needs_install: >-
+      {{ (rustfs_version_marker_content.content | default('') | b64decode | trim) != rustfs_version }}
+  tags:
+    - always
+
+- name: Report the install decision
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        'RustFS ' ~ rustfs_version ~ ' will be downloaded and installed'
+        if rustfs_needs_install
+        else 'RustFS ' ~ rustfs_version ~ ' already installed - the binary is left alone'
+      }}
+  tags:
+    - always
+
+# ---------------------------------------------------------------
+# The data device
+# ---------------------------------------------------------------
+- name: Check the dedicated data block device
+  ansible.builtin.stat:
+    path: "{{ rustfs_data_device }}"
+    follow: true
+  register: rustfs_data_device_stat
+  tags:
+    - always
+
+- name: Fail when the data block device is missing
+  ansible.builtin.fail:
+    msg:
+      - "Data block device '{{ rustfs_data_device }}' not found."
+      - ""
+      - "This playbook expects a second disk dedicated to RustFS. The OpenTofu"
+      - "unit attaches it as scsi1 with serial 'rustfs-data0', which the guest"
+      - "exposes at the by-id path above (QEMU prefixes a user-set serial with"
+      - "'S')."
+      - ""
+      - "Set rustfs_data_device in vars/main.yaml if your host uses a"
+      - "different device."
+  when: not rustfs_data_device_stat.stat.exists
+  tags:
+    - always
+
+# Resolved without following the symlink so lnk_source gives the real device
+# node (/dev/sdb), which is what ansible_facts.mounts reports.
+- name: Resolve the data block device to its real device node
+  ansible.builtin.stat:
+    path: "{{ rustfs_data_device }}"
+    follow: false
+  register: rustfs_data_device_link
+  tags:
+    - always
+
+- name: Determine the real data device node
+  ansible.builtin.set_fact:
+    rustfs_data_real_device: >-
+      {{ rustfs_data_device_link.stat.lnk_source
+         | default(rustfs_data_device, true) }}
+  tags:
+    - always
+
+# Matches both the whole device (/dev/sdb) and any partition on it (/dev/sdb1).
+# A mount at rustfs_data_mount is the expected steady state on every run after
+# the first, so it is excluded - anything else means the disk is not ours.
+- name: Gather unexpected mounts on the data block device
+  ansible.builtin.set_fact:
+    rustfs_data_foreign_mounts: >-
+      {{
+        ansible_facts['mounts']
+        | selectattr('device', 'match', rustfs_data_real_device ~ '[0-9]*$')
+        | map(attribute='mount')
+        | reject('equalto', rustfs_data_mount)
+        | list
+      }}
+  tags:
+    - always
+
+- name: Fail when the data block device is in use elsewhere
+  ansible.builtin.fail:
+    msg:
+      - "'{{ rustfs_data_real_device }}' is mounted at:"
+      - "{{ rustfs_data_foreign_mounts | join(', ') }}"
+      - ""
+      - "This device is formatted and mounted at {{ rustfs_data_mount }}."
+      - "Refusing to touch a disk that is already serving something else."
+  when: rustfs_data_foreign_mounts | length > 0
+  tags:
+    - always

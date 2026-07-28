@@ -47,6 +47,32 @@ onepanel_websites:
       - domain: <registry-host>
         port: 80
 
+  # RustFS - two sites for one guest, and they cannot be merged into one.
+  # S3 clients sign the request path (SigV4), so serving the API under a prefix
+  # like /s3/ makes RustFS read `s3` as the bucket name and every request fails
+  # signature validation. Upstream is explicit about this:
+  # https://docs.rustfs.com/integration/nginx
+  #
+  # rustfs-01 is 10.10.99.14 - an IP rather than a name for the same reason as
+  # Harbor above: nginx resolves a proxy_pass hostname once at config load and
+  # caches it forever. The address is a static DHCP reservation keyed on the
+  # VM's MAC, so it is as stable as the name would be.
+  - primary_domain: <s3-host>
+    remark: RustFS S3 API
+    upstream: http://10.10.99.14:9000
+    proxy_template: proxy-rustfs-s3.conf.j2
+    domains:
+      - domain: <s3-host>
+        port: 80
+
+  - primary_domain: <console-host>
+    remark: RustFS Console
+    upstream: http://10.10.99.14:9001
+    proxy_template: proxy-rustfs-console.conf.j2
+    domains:
+      - domain: <console-host>
+        port: 80
+
   - primary_domain: <goproxy-host>
     remark: Athens Go Module Proxy
     # Athens runs ON this box, as the 1Panel compose stack `athens` - see
@@ -66,6 +92,30 @@ onepanel_websites:
     domains:
       - domain: <goproxy-host>
         port: 80
+
+# ============================================
+# 1Panel WAF (1pwaf) per-site overrides
+# ============================================
+# Consumed by manage-waf-overrides.yaml, which runs against the 1Panel guest
+# rather than the API - 1pwaf's per-site rules are files on disk, not a
+# documented API surface.
+
+onepanel_waf_site_dir: /opt/1panel/apps/openresty/openresty/1pwaf/data/sites
+onepanel_openresty_container: openresty
+
+# Sites where the stock `TomcatBypass|Command|Base64` header rule has to lose
+# its `Command` alternative. That rule substring-matches the request headers,
+# and aws-cli v2 puts `md/command#<subcommand>` in its User-Agent on every
+# single request - so without this, every aws-cli call to these sites gets the
+# WAF's 403 block page and never reaches RustFS.
+#
+# Only add a site here if a legitimate client is being blocked by that rule.
+# See the header comment in manage-waf-overrides.yaml for exactly what coverage
+# is given up (very little) and what is kept (the log4shell rule, the scanner
+# rule, and every other WAF module).
+onepanel_waf_ua_command_sites:
+  - <s3-host>
+  - <console-host>
 
 # ============================================
 # 1Panel connection

@@ -1,0 +1,9 @@
+rustfs_all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  hosts:
+    # One host. RustFS's multi-node mode (MNMD) starts at four servers, not two,
+    # so there is no useful intermediate step between this and a rebuild.
+    rustfs_vm_01:
+      ansible_host: petruk-pve0-rustfs-01
+      ansible_user: ansible

@@ -47,6 +47,26 @@ onepanel_websites:
       - domain: harbor.internal.khol.is
         port: 80
 
+  - primary_domain: goproxy.internal.khol.is
+    remark: Athens Go Module Proxy
+    # Athens runs ON this box, as the 1Panel compose stack `athens` - see
+    # live/ansible/playbooks/athens/. Unlike Harbor there is no second VM.
+    #
+    # 127.0.0.1 works here and would NOT work for an ordinary containerised
+    # nginx: 1Panel's OpenResty runs with `network_mode: host`, so its loopback
+    # is the host's loopback. Athens publishes on 127.0.0.1 only, which means
+    # this website is the single way in and there is no plaintext port
+    # answering on the LAN.
+    #
+    # 3300, not Athens' default 3000, because Gitea already has 3000 on this
+    # box. Kept in step with athens_port in ../../athens/vars/main.yaml.
+    upstream: http://127.0.0.1:3300
+    # A cold cache miss is a git clone; the default timeouts cut it off.
+    proxy_template: proxy-athens.conf.j2
+    domains:
+      - domain: goproxy.internal.khol.is
+        port: 80
+
 # ============================================
 # 1Panel connection
 # ============================================

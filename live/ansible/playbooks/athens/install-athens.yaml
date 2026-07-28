@@ -1,0 +1,348 @@
+---
+- name: Install Athens as a 1Panel compose stack
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+    # panel_api_base / panel_api_key live with the other 1Panel API work rather
+    # than being duplicated here - same panel, same key. main.yaml re-exports
+    # the vault_* names the playbooks actually use, so both files are needed.
+    - ../1panel/vars/main.yaml
+    - ../1panel/vars/vault.yaml
+
+  module_defaults:
+    ansible.builtin.uri:
+      validate_certs: true
+      body_format: json
+      status_code: 200
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - panel_api_base is defined
+          - panel_api_key is defined
+          - panel_api_key | length > 0
+        fail_msg: >-
+          panel_api_base / panel_api_key are missing. Populate them with:
+          ansible-vault edit live/ansible/playbooks/1panel/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # An empty token is a supported configuration, not an error: Athens skips
+    # building the .netrc entirely when GithubToken is "" (see
+    # cmd/proxy/actions/app.go), so the proxy comes up and serves public
+    # modules exactly as it would otherwise. What it cannot do is fetch
+    # athens_private_patterns, and the way that failure presents - a bare 404
+    # that reads like a missing tag - is bad enough to be worth announcing at
+    # deploy time rather than leaving someone to discover it from a build log.
+    - name: Warn when running without GitHub credentials
+      ansible.builtin.debug:
+        msg:
+          - "NO GITHUB CREDENTIALS CONFIGURED."
+          - "Athens will cache public modules only."
+          - "{{ athens_private_patterns | join(', ') }} will fail with 404 until"
+          - "vault_athens_github_token is populated:"
+          - "  ansible-vault edit live/ansible/playbooks/athens/vars/vault.yaml"
+          - "A GitHub App is the better option - see the README."
+      when: athens_github_token | length == 0
+      tags:
+        - always
+
+    # Same auth scheme as live/ansible/playbooks/1panel/manage-websites.yaml:
+    # md5("1panel" + <api key> + <unix timestamp>) alongside the timestamp.
+    #
+    # THE TIMESTAMP IS ITS OWN FACT ON PURPOSE - see the long comment in
+    # manage-websites.yaml. Inlining the lookup evaluates it twice and the two
+    # evaluations occasionally straddle a second boundary, producing a token
+    # signed with N sent with a header saying N+1.
+    - name: Read the 1Panel API timestamp
+      ansible.builtin.set_fact:
+        onepanel_api_timestamp: "{{ lookup('pipe', 'date +%s') }}"
+      tags:
+        - always
+
+    - name: Build the 1Panel API authentication headers
+      ansible.builtin.set_fact:
+        onepanel_api_headers:
+          1Panel-Token: "{{ ('1panel' ~ panel_api_key ~ onepanel_api_timestamp) | hash('md5') }}"
+          1Panel-Timestamp: "{{ onepanel_api_timestamp }}"
+      no_log: true
+      tags:
+        - always
+
+    # ===== DISCOVERY =====
+    - name: List the existing compose stacks
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: onepanel_composes
+      changed_when: false
+      tags:
+        - athens
+
+    # 1Panel answers an auth failure with HTTP 200 and a body of
+    # {"code": <non-200>, ...} - the status line says nothing. Without this the
+    # run dies several tasks later inside a Jinja expression, pointing nowhere
+    # near the real problem.
+    - name: Assert the 1Panel API accepted the request
+      ansible.builtin.assert:
+        that:
+          - onepanel_composes.json.code | default(0) == 200
+          - onepanel_composes.json.data is not none
+        fail_msg: >-
+          1Panel rejected the request
+          (code={{ onepanel_composes.json.code | default('?') }},
+          message={{ onepanel_composes.json.message | default('') | trim or 'none' }}).
+          Causes, in the order they are worth checking:
+          the API key is disabled in Panel Settings; this workstation's IP is
+          not in the API key's allowlist; the key in
+          live/ansible/playbooks/1panel/vars/vault.yaml is stale; or the signing
+          timestamp fell outside the key's validity window.
+      tags:
+        - athens
+
+    # ===== PREFLIGHT =====
+    # The 1Panel guest is a busy box - sixteen stacks publishing on loopback -
+    # and docker reports a port clash only once the stack is already recorded,
+    # leaving a stack that exists but will not start. Athens' default port of
+    # 3000 was already Gitea's, which is how this check earned its place.
+    - name: List the published container ports
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 300
+          name: ""
+          state: all
+          orderBy: name
+          order: "null"
+          filters: ""
+          excludeAppStore: false
+      register: onepanel_containers
+      changed_when: false
+      tags:
+        - athens
+        - preflight
+
+    # A published port reads as "127.0.0.1:3300->3000/tcp". Match on the host
+    # side only - the container side of the arrow collides constantly between
+    # unrelated images and means nothing.
+    - name: Find the containers already publishing the host port
+      ansible.builtin.set_fact:
+        onepanel_port_owners: "{{ onepanel_port_owners | default([]) + [item.name] }}"
+      loop: "{{ onepanel_containers.json.data['items'] | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.ports is defined
+        - item.ports is not none
+        - item.ports | select('search', ':' ~ athens_port ~ '->') | list | length > 0
+      tags:
+        - athens
+        - preflight
+
+    - name: Assert the host port is free
+      ansible.builtin.assert:
+        that:
+          - onepanel_port_conflicts | length == 0
+        fail_msg: >-
+          Host port {{ athens_port }} is already published by
+          {{ onepanel_port_conflicts | join(', ') }}.
+          Pick another athens_port in vars/main.yaml - the container keeps
+          listening on 3000 internally either way, so only the left-hand side of
+          the port mapping and the `upstream` in ../1panel/vars/main.yaml need
+          to change.
+      vars:
+        # Athens itself is not a conflict on a re-run.
+        onepanel_port_conflicts: >-
+          {{ onepanel_port_owners | default([]) | reject('equalto', athens_container_name) | list }}
+      tags:
+        - athens
+        - preflight
+
+    - name: Record whether the stack already exists
+      ansible.builtin.set_fact:
+        athens_exists: >-
+          {{ athens_compose_name in (onepanel_composes.json.data['items'] | default([]) | map(attribute='name') | list) }}
+      tags:
+        - athens
+
+    # ===== STORAGE =====
+    # Before the stack, not after: docker creates a missing bind-mount source
+    # as a root-owned directory, and Athens runs as uid 1000. Getting there
+    # first is the difference between a working cache and a container that
+    # restarts on "permission denied" writing its first module.
+    #
+    # On the very first run the compose directory does not exist yet either -
+    # 1Panel only creates it as part of the create call - so this MkdirAll has
+    # to cover both levels.
+    - name: Create the module cache directory
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          path: "{{ athens_data_dir }}"
+          isDir: true
+          mode: 493 # 0755, as the decimal int the API wants
+        # The panel answers this one with HTTP 200 and a body code of 500 -
+        # "Internal server error: The file or folder already exists!" - which is
+        # the steady state on every run after the first. Listing 500 here is
+        # belt-and-braces for a version that starts using the status line.
+        status_code: [200, 500]
+      register: athens_mkdir
+      changed_when: athens_mkdir.json.code | default(0) == 200
+      # Hence keying off the BODY code, not the status. Anything that is not a
+      # success and not the already-exists message is a real failure.
+      failed_when:
+        - athens_mkdir.json.code | default(0) != 200
+        - "'exist' not in (athens_mkdir.json.message | default(''))"
+      tags:
+        - athens
+        - storage
+
+    # QUOTE THE IDS. FileRoleUpdate declares User and Group as `string`, and an
+    # unquoted `{{ athens_uid }}` serialises to a JSON *number* - Gin then
+    # fails to bind the body and the handler never runs. It looks like it
+    # worked: HTTP 200, task green, and the directory still root-owned. The
+    # container only reveals it later, with
+    # "mkdir /var/lib/athens/github.com: permission denied".
+    #
+    # uid 1000 is `ansible` on the host and `athens` inside the container.
+    # Different names, same number, which is all a bind mount cares about.
+    - name: Own the module cache directory as the athens user
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/owner"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          path: "{{ athens_data_dir }}"
+          user: "{{ athens_uid | string }}"
+          group: "{{ athens_gid | string }}"
+          sub: true
+      register: athens_chown
+      # And check the BODY, because the status line is 200 either way. Without
+      # this the bind failure above is completely invisible.
+      failed_when: athens_chown.json.code | default(0) != 200
+      changed_when: false
+      tags:
+        - athens
+        - storage
+
+    # ===== STACK =====
+    # Create and update are different endpoints with different bodies, and
+    # neither one does the other's job: /compose 400s on a name that already
+    # has a record, and /compose/update reads the existing file before writing
+    # so it cannot bootstrap one.
+    - name: Create the Athens compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          name: "{{ athens_compose_name }}"
+          # "edit" means "here is the file content" - 1Panel writes it to
+          # {DataDir}/docker/compose/{name}/docker-compose.yml itself. The
+          # alternatives are "path" (a file already on the box) and "template".
+          from: edit
+          file: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ athens_compose_env }}"
+          forcePull: false
+      vars:
+        athens_compose_env: "ATHENS_GITHUB_TOKEN={{ athens_github_token }}\n"
+      when: not athens_exists | bool
+      register: athens_created
+      # Same trap as the chown: a rejected body still answers HTTP 200.
+      failed_when:
+        - not athens_created.skipped | default(false)
+        - athens_created.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - athens
+
+    - name: Update the Athens compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/update"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          name: "{{ athens_compose_name }}"
+          # `path` is what gets `docker compose up`; `detailPath` is the file
+          # the new content is written to. For a single-file stack they are the
+          # same, but detailPath is read before the write and an empty one
+          # fails the task with a bare "load file with path failed".
+          path: "{{ athens_compose_file }}"
+          detailPath: "{{ athens_compose_file }}"
+          content: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ athens_compose_env }}"
+          forcePull: false
+      vars:
+        athens_compose_env: "ATHENS_GITHUB_TOKEN={{ athens_github_token }}\n"
+      when: athens_exists | bool
+      register: athens_updated
+      failed_when:
+        - not athens_updated.skipped | default(false)
+        - athens_updated.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - athens
+
+    # ===== CONVERGENCE =====
+    # Both endpoints hand the work to a background task and return 200
+    # immediately - the response says the request was accepted, not that the
+    # container is up. Poll until it actually is, otherwise a failed image pull
+    # or a bad env var looks like a successful run.
+    - name: Wait for the Athens container to be running
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: athens_status
+      until: >-
+        (athens_status.json.data['items'] | default([])
+         | selectattr('name', 'equalto', athens_compose_name) | list | first | default({})
+        ).runningCount | default(0) | int >= 1
+      retries: 30
+      delay: 10
+      changed_when: false
+      tags:
+        - athens
+
+    - name: Display post-install instructions
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Athens {{ athens_version }} running as 1Panel compose stack '{{ athens_compose_name }}'"
+          - "========================================"
+          - ""
+          - "Listening : {{ athens_bind_address }}:{{ athens_port }} on the 1Panel VM (loopback only)"
+          - "Compose   : {{ athens_compose_file }}"
+          - "Cache     : {{ athens_data_dir }}"
+          - "Private   : {{ athens_private_patterns | join(', ') }}"
+          - ""
+          - "It is not reachable yet unless the website exists. Create it with:"
+          - "  ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \\"
+          - "    live/ansible/playbooks/1panel/manage-websites.yaml"
+          - ""
+          - "Then, from any box on the LAN:"
+          - "  curl -fsS https://<goproxy-host>/readyz"
+          - "  GOPROXY=https://<goproxy-host> go mod download"
+          - ""
+      tags:
+        - always

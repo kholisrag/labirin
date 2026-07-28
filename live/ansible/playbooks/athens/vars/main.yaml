@@ -1,0 +1,114 @@
+---
+# ============================================
+# Athens - Go module proxy
+# ============================================
+# Athens runs as a Compose stack ON the 1Panel VM, created through 1Panel's own
+# API rather than over SSH. That is deliberate: a stack created with
+# `from: edit` shows up in Containers > Compose exactly like one made in the
+# dashboard, so the panel stays the single place where the box's containers are
+# listed, logged and restarted. `fizzy` is the other stack that got there this
+# way (createdBy "1Panel", as opposed to "Apps" for app-store installs).
+#
+# Consequence worth knowing: 1Panel decides where the files live. `from: edit`
+# writes to {DataDir}/docker/compose/{name}/docker-compose.yml and a sibling
+# .env - see loadPath()/newComposeEnv() in agent/app/service/container_compose.go.
+# The paths below mirror that decision; they are not free choices.
+
+athens_version: v0.18.1
+
+athens_compose_name: athens
+athens_container_name: athens
+
+# {DataDir} is /opt/1panel on this install.
+athens_compose_dir: /opt/1panel/docker/compose/{{ athens_compose_name }}
+athens_compose_file: "{{ athens_compose_dir }}/docker-compose.yml"
+athens_data_dir: "{{ athens_compose_dir }}/data"
+
+# The image does `adduser -D athens` with no explicit UID, so Alpine hands out
+# the first free one - 1000 - with a home at /home/athens. Running as that user
+# instead of root means the bind-mounted cache has to be owned by it, which is
+# what the chown task in install-athens.yaml is for.
+athens_uid: 1000
+athens_gid: 1000
+
+# Loopback ONLY. OpenResty on this box runs with `network_mode: host` (see its
+# docker-compose.yml), so 127.0.0.1 from nginx *is* the host's loopback and the
+# reverse proxy reaches this fine. Anything else on the LAN cannot, which is
+# the point: the only way in is the TLS website, and there is no second
+# plaintext door on 10.10.99.10:3000.
+athens_bind_address: 127.0.0.1
+
+# NOT 3000, which is Athens' own default and the first thing you would reach
+# for: Gitea already publishes 127.0.0.1:3000 on this box. The container still
+# listens on 3000 internally; only the host side moved. The preflight task in
+# install-athens.yaml fails the run if this ever collides again.
+athens_port: 3300
+
+# ============================================
+# Module fetching
+# ============================================
+# "sync": on a cache miss, fetch the module now, store it, and serve it in the
+# same request. The client waits, but every later request for that version is
+# served from disk. The alternatives all either 404 the first caller (async,
+# none) or hand them off to the upstream and cache in the background
+# (redirect, async_redirect) - which defeats the point of having the cache be
+# the thing clients depend on.
+athens_download_mode: sync
+
+# What Athens itself fetches through. Athens shells out to `go mod download`,
+# and the GOPROXY *that* subprocess sees is what decides where public modules
+# come from. The image default is "direct" - straight to GitHub for everything
+# - which is slower and loses the mirror's availability guarantee for modules
+# whose upstream repo has been deleted or rewritten.
+athens_upstream_proxy: https://proxy.golang.org
+
+# Module paths that must never touch the public mirror or the checksum
+# database. These are fetched direct from the VCS with the GitHub token below.
+#
+# Two separate settings need this list and they are NOT the same knob:
+#   - GOPRIVATE, passed to the go subprocess, keeps these paths off
+#     proxy.golang.org and out of sum.golang.org lookups.
+#   - ATHENS_GONOSUM_PATTERNS is Athens' own copy, used when it serves the
+#     sumdb proxy endpoints.
+# Setting one without the other produces a verification failure that reads like
+# a network problem.
+# DELIBERATELY NARROW. The GitHub account this proxy authenticates as can read
+# private Go modules in several employer/client orgs (kloia, TrugoSoftwareTeam,
+# togg-trumore, rate-mate) as well as this one. Athens does not authenticate
+# its callers - anything it can fetch, any client on the LAN can pull - so the
+# list of paths it will go direct for is kept to what actually belongs here.
+#
+# Widening this is not the dangerous part; widening the *credential* is. See
+# the README on why the GitHub App installation scope, not this list, is the
+# real boundary.
+athens_private_patterns:
+  - github.com/<org>/*
+
+# ============================================
+# Timeouts and concurrency
+# ============================================
+# Athens' own per-request budget, in seconds. A cold `git clone` of a large
+# module can genuinely take minutes, so these are generous - and the nginx
+# block in the 1panel playbook (templates/proxy-athens.conf.j2) is tuned to
+# outlast them. If nginx gives up first the client sees a 504 on exactly the
+# requests the cache exists to absorb.
+athens_timeout: 300
+athens_stash_timeout: 600
+
+# Concurrent `go mod download` invocations. Each one is a git clone into a temp
+# dir, so this is the knob that decides how much disk and memory a burst of CI
+# jobs can demand at once. The image default of 10 is right for a box that is
+# also running OpenResty and a dozen other apps.
+athens_goget_workers: 10
+athens_protocol_workers: 30
+
+# The image default is "debug", which logs a line per module operation in JSON.
+athens_log_level: info
+
+# ============================================
+# Secrets
+# ============================================
+# Sourced from vars/vault.yaml. Written to the stack's .env, not into
+# docker-compose.yml, so the token is not sitting in the file the dashboard
+# renders on the compose detail page.
+athens_github_token: "{{ vault_athens_github_token | default('') }}"

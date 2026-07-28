@@ -93,6 +93,29 @@ onepanel_websites:
       - domain: goproxy.internal.khol.is
         port: 80
 
+  # The GitHub Actions cache server - see live/ansible/playbooks/gha-cache/.
+  # Same shape as Athens above and 127.0.0.1 for the same reason: it is a
+  # compose stack on THIS box and OpenResty runs with `network_mode: host`, so
+  # the loopback publish is reachable from nginx and from nowhere else.
+  #
+  # 3400 because 3000 is Gitea's and 3300 is Athens'. Kept in step with
+  # gha_cache_port in ../../gha-cache/vars/main.yaml; nothing links them
+  # automatically, and install-gha-cache.yaml preflights the port but has no
+  # idea what this file says.
+  #
+  # It also has to match gha_cache_api_base_url over there, which is the URL
+  # handed to runners as the upload and download endpoint - if this site's name
+  # and that variable disagree, saves fail from the runner with the server
+  # looking healthy.
+  - primary_domain: actions-cache.internal.khol.is
+    remark: GitHub Actions Cache Server
+    upstream: http://127.0.0.1:3400
+    # Cache saves are large PUTs; the stock block's 1m body cap 413s them.
+    proxy_template: proxy-gha-cache.conf.j2
+    domains:
+      - domain: actions-cache.internal.khol.is
+        port: 80
+
 # ============================================
 # 1Panel WAF (1pwaf) per-site overrides
 # ============================================

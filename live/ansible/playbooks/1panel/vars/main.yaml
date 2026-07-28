@@ -117,6 +117,33 @@ onepanel_websites:
         port: 80
 
 # ============================================
+# 1Panel PostgreSQL databases
+# ============================================
+# Consumed by manage-databases.yaml. Same story as the websites above: the panel
+# keeps these in its own database, so the API is the only declarative surface,
+# and everything predating this list was made by hand in the dashboard.
+#
+# The app install these live in. It is the install's *name*, which is also the
+# database container's name and the value the panel hands its own app installs
+# as PANEL_DB_HOST - not a hostname that resolves anywhere else on the LAN.
+onepanel_postgresql_app: postgresql
+
+# CREATE-ONLY, and passwords are NOT stored here. Each entry points at the
+# consuming service's own vault, because a credential written in two places is a
+# credential that can disagree - and the way that presents is authentication
+# failing against a database that is running perfectly, with neither file named
+# in the error.
+#
+# The `_<suffix>` on the name and user is not decoration: it mirrors what the
+# dashboard does when it creates a database, so a list made through the API and
+# a list made by hand read the same way in the panel's UI.
+onepanel_databases:
+  - name: "{{ vault_gha_cache_db_name }}"
+    username: "{{ vault_gha_cache_db_user }}"
+    password: "{{ vault_gha_cache_db_password }}"
+    description: GitHub Actions cache server
+
+# ============================================
 # 1Panel WAF (1pwaf) per-site overrides
 # ============================================
 # Consumed by manage-waf-overrides.yaml, which runs against the 1Panel guest

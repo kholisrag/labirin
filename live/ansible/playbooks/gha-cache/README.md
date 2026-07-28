@@ -159,18 +159,54 @@ database still has rows for.
 carries no Postgres of its own; it uses the PostgreSQL that 1Panel already runs
 as an app install, alongside the databases for the other apps on that box.
 
-Create it in the dashboard — **Databases → PostgreSQL → Create** — and then copy
-what the panel shows you into the vault. Three things matter:
+**It is managed, not a hand step.** Put the name, user and password in this
+playbook's vault, add an entry to `onepanel_databases` in
+`../1panel/vars/main.yaml`, and run:
 
-- **1Panel appends a random suffix to the name you type.** Ask for `gha_cache`
-  and you get something like `gha_cache_a1b2c3`. The vault has to carry the
-  *generated* name, which is why nothing in this repo dictates one.
-- **1Panel mints the user and the password too**, and records them in its own
-  store. A database created by hand with `psql`, behind the panel's back, will
-  not appear in *Databases* and will not pass the playbook's preflight.
-- **The playbook will not create it.** Creating a database is a dashboard
-  action; doing it over the API from here would produce a database the panel
-  does not know it owns.
+```bash
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \
+  live/ansible/playbooks/1panel/manage-databases.yaml
+```
+
+That creates the database through the panel's own API, so it appears in
+*Databases* exactly like one made in the dashboard — and then does the one thing
+the panel does not (see below). It is create-only: an existing database is left
+completely alone, and in particular is never re-passworded.
+
+The `_<suffix>` on the name and user mirrors what the dashboard appends, so an
+API-made database and a hand-made one read the same way in the panel's UI. It is
+convention, not a requirement.
+
+Two traps live in that playbook, both of which cost real time to find:
+
+**The password field is base64, and nothing else on that endpoint is.** The
+handler runs `base64.StdEncoding.DecodeString(req.Password)` before validating
+anything. A password of `[A-Za-z0-9]` whose length divides by four *is* valid
+base64, so the decode **succeeds** and yields binary garbage, which then trips
+the panel's shell-safety check and comes back as
+`HTTP 500 Internal server error: Command has invalid characters` — an error
+naming the characters you sent, which were fine.
+
+**1Panel does not grant the schema, and on PostgreSQL 15+ that is not enough.**
+It issues `CREATE USER` and `GRANT ALL PRIVILEGES ON DATABASE`, and stops. PG15
+revoked role `PUBLIC`'s historical `CREATE` on schema `public`, so a user with
+every privilege on the *database* still cannot create a table in it — and this
+install is 18.4. The connection, the password and the network all work; the
+**first migration** is what fails:
+
+```
+[cache-server]  ERROR  Database migration failed permission denied for schema public
+SQLSTATE 42501 · create table if not exists "kysely_migration" (...)
+```
+
+which reads exactly like a broken application. The playbook's second play fixes
+it with `ALTER SCHEMA public OWNER TO "<user>"`, scoped to that one database.
+1Panel's own lever for this is `superUser: true` at create time, which is the
+wrong instrument on a shared instance — a superuser can read and modify every
+other database on it.
+
+That second play runs over SSH, which is why the command above passes `-i` and
+the other playbooks here do not.
 
 ### 4. Secrets
 
@@ -181,15 +217,20 @@ ansible-vault edit live/ansible/playbooks/gha-cache/vars/vault.yaml
 
 The vault ships with `vault_gha_cache_db_host` and `vault_gha_cache_db_port`
 already correct, and with **`CHANGEME` placeholders** for the name, user and
-password from step 3. The playbook's first assertion fails while they are still
-in place, so a half-configured vault costs ten seconds rather than a
-crash-looping container.
+password from step 3. Both playbooks assert on those placeholders before doing
+anything, so a half-configured vault costs ten seconds rather than a
+crash-looping container — or a database literally named `CHANGEME`.
 
-If you set a password of your own rather than accepting the generated one, keep
-it alphanumeric: it reaches the container through the stack's `.env`, which
-Docker Compose parses and expands `${...}` inside, so a `$` or a quote becomes a
-parse surprise that presents as authentication failing against a database that
-is running perfectly.
+**This vault is the single home for that credential.** `manage-databases.yaml`
+reads it from here rather than keeping a copy in the 1Panel vault, on the same
+rule that has `install-gha-cache.yaml` read the S3 key out of
+`../rustfs/vars/vault.yaml`: a secret written in two files is a secret that can
+disagree, and the way that presents — authentication failing against a database
+that is running perfectly — names neither file.
+
+Keep the password alphanumeric. It reaches the container through the stack's
+`.env`, which Docker Compose parses and expands `${...}` inside, so a `$` or a
+quote becomes a parse surprise with the same misleading symptom.
 
 The 1Panel API key comes from `../1panel/vars/vault.yaml` and the S3 credentials
 from `../rustfs/vars/vault.yaml` — same panel, same object store, not duplicated

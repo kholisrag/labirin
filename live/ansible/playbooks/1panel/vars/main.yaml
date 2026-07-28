@@ -212,6 +212,39 @@ onepanel_waf_ua_command_sites:
   - <s3-host>
   - <console-host>
 
+# Sites where the request-inspection modules have to be off entirely, because
+# what they inspect is opaque signed binary and no rule edit can fix that.
+#
+# 1pwaf scans the request BODY, not just headers and the URI - verified by
+# sending `1' or '1'='1` as a body to <s3-host> and getting the
+# 23,682-byte block page instead of RustFS's 110-byte XML. On an S3 endpoint
+# the body is a compressed object, so the scan is running injection heuristics
+# over gzip output. It false-positives, and it does so on SOME parts of the
+# same upload and not others - which is exactly what was observed.
+#
+# NOT a size limit and not the User-Agent rule above: the stored match value
+# for every denial is the whole 5 MiB part body, and it contains none of the
+# tokens those rules carry.
+#
+# There is no narrower fix available. `Command` could be dropped from a header
+# rule because a header is text with a knowable shape; a zstd stream has no
+# token to exempt, so the choice is the module or nothing.
+#
+# What stays on for these sites: methodWhite, defaultUaBlack, defaultUrlBlack,
+# header (minus the one token above), cookie, geoRestrict and cc.
+onepanel_waf_no_body_scan_sites:
+  - <s3-host>
+  - <cache-host>
+
+# The modules to turn off on those sites. All three read attacker-controlled
+# request data through injection heuristics: `sql` and `xss` via libinjection,
+# `args` via regex over the query string. The S3 query string carries a base64
+# uploadId, which is the same problem one layer up.
+onepanel_waf_body_scan_modules:
+  - sql
+  - xss
+  - args
+
 # ============================================
 # 1Panel connection
 # ============================================

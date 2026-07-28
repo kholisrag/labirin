@@ -214,7 +214,7 @@ fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key
 # image. No :latest is published, deliberately.
 # Source: https://github.com/oprek-sh/fireactions-images
 fireactions_registry_mirror: harbor.internal.khol.is
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/oprek-sh/fireactions-images/ubuntu24.04:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-d9c0d0a"
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/oprek-sh/fireactions-images/ubuntu24.04:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-fbf2fb9"
 
 # --------------------------------------------
 # Pools

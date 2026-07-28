@@ -3,9 +3,13 @@
 # 1Panel WAF (1pwaf) per-site rule overrides
 # ============================================
 # 1Panel ships a WAF that is enabled by default on every website it creates.
-# One of its stock rules is unusable in front of an S3 endpoint, and this
-# playbook narrows it - for the named sites only, leaving the module and every
-# other rule on.
+# Parts of it are unusable in front of an S3 endpoint, and this playbook
+# narrows them - for the named sites only, leaving every other site and every
+# other rule alone.
+#
+# There are two overrides here and they are different in kind. The first drops
+# one token from one header rule. The second turns three modules off outright,
+# because what they inspect is opaque signed binary and no rule edit can help.
 #
 # THE RULE
 #
@@ -34,8 +38,28 @@
 # substring match on the word "command" in a header, which was never load
 # bearing for a reverse proxy in front of an object store.
 #
+# THE MODULES
+#
+#   config.json -> sql, xss, args -> "state": "off"
+#
+# 1pwaf scans the request BODY, not only headers and the URI. Verified by
+# sending `1' or '1'='1` as a body to rustfs.internal.khol.is and getting the
+# 23,682-byte block page where a clean request gets RustFS's 110-byte XML.
+#
+# On an S3 endpoint the body is a compressed object, so those heuristics run
+# over gzip output and false-positive - on SOME parts of an upload and not
+# others, which is what makes it look intermittent rather than broken. Every
+# denial logged for that host stored the whole 5 MiB part body as its match
+# value, containing none of the tokens the rules carry, so this is neither a
+# size limit nor the User-Agent rule above.
+#
+# It fails open all the way to the caller: the storage 403 becomes an XML
+# parse error in the AWS SDK, then a 500, then a dropped upstream connection,
+# then a 502 to the runner - which `actions/cache` prints as a WARNING and the
+# job stays green. oprek-sh/oprek.sh#203.
+#
 # 1Panel rewrites these files when a site is recreated, so this is re-run after
-# any change that recreates a website - it is idempotent.
+# any change that recreates a website - both overrides are idempotent.
 # ============================================
 - name: Apply 1Panel WAF per-site rule overrides
   hosts: onepanel_all
@@ -93,6 +117,48 @@
       tags:
         - waf
 
+    # ===== REQUEST-INSPECTION MODULES ON S3 ENDPOINTS =====
+    #
+    # A targeted `replace` again rather than templating config.json, and for a
+    # stronger reason here: that file holds every module's settings including
+    # ones 1Panel adds between releases. Writing our own would silently drop
+    # whatever we did not know about. Anchoring on the module name flips one
+    # `state` and leaves the rest of the document untouched.
+    #
+    # Idempotent: the regexp only matches `"on"`, so a second run is a no-op.
+    - name: Assert the WAF config exists for the no-body-scan sites
+      ansible.builtin.stat:
+        path: "{{ onepanel_waf_site_dir }}/{{ item }}/config.json"
+      register: onepanel_waf_cfg_stat
+      loop: "{{ onepanel_waf_no_body_scan_sites }}"
+      loop_control:
+        label: "{{ item }}"
+      tags:
+        - waf
+
+    - name: Fail when a no-body-scan site has no WAF config
+      ansible.builtin.fail:
+        msg:
+          - "No WAF config for: {{ onepanel_waf_cfg_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}"
+          - ""
+          - "1Panel creates {{ onepanel_waf_site_dir }}/<domain>/config.json when"
+          - "the website is created. Run manage-websites.yaml first."
+      when: onepanel_waf_cfg_stat.results | rejectattr('stat.exists') | list | length > 0
+      tags:
+        - waf
+
+    - name: Turn off the request-inspection modules on the S3 endpoints
+      ansible.builtin.replace:
+        path: "{{ onepanel_waf_site_dir }}/{{ item.0 }}/config.json"
+        regexp: '"{{ item.1 }}":\{"state":"on"'
+        replace: '"{{ item.1 }}":{"state":"off"'
+      loop: "{{ onepanel_waf_no_body_scan_sites | product(onepanel_waf_body_scan_modules) | list }}"
+      loop_control:
+        label: "{{ item.0 }} / {{ item.1 }}"
+      notify: Reload OpenResty
+      tags:
+        - waf
+
     - name: Show the resulting appFilter1 rule
       ansible.builtin.shell:
         cmd: >-
@@ -110,6 +176,28 @@
       ansible.builtin.debug:
         msg: "{{ item.item }}: {{ item.stdout | trim }}"
       loop: "{{ onepanel_waf_rule.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      tags:
+        - waf
+
+    - name: Show the resulting module states
+      ansible.builtin.shell:
+        cmd: >-
+          grep -o '"\(sql\|xss\|args\)":{"state":"[a-z]*"'
+          {{ onepanel_waf_site_dir }}/{{ item }}/config.json
+      register: onepanel_waf_modules
+      changed_when: false
+      loop: "{{ onepanel_waf_no_body_scan_sites }}"
+      loop_control:
+        label: "{{ item }}"
+      tags:
+        - waf
+
+    - name: Display the resulting module states
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ item.stdout_lines | join(' ') }}"
+      loop: "{{ onepanel_waf_modules.results }}"
       loop_control:
         label: "{{ item.item }}"
       tags:

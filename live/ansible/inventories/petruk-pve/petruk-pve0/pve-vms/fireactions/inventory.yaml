@@ -12,3 +12,9 @@ fireactions_all:
     fireactions_vm_02:
       ansible_host: petruk-pve0-fireactions-02
       ansible_user: ansible
+    fireactions_vm_03:
+      ansible_host: petruk-pve0-fireactions-03
+      ansible_user: ansible
+    fireactions_vm_04:
+      ansible_host: petruk-pve0-fireactions-04
+      ansible_user: ansible

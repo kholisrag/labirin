@@ -18,11 +18,14 @@ locals {
   #
   # Adding a host requires a matching entry in network.enc.yaml for the MAC.
   #
-  # MEMORY BUDGET - petruk-pve0 is currently OVERCOMMITTED on allocation.
-  #   Physical 251.5 GiB, allocated 274.0 GiB (+22.5 GiB) with these two hosts.
-  #   Only ~83 GiB is actually touched today, so nothing is hurting yet - guest
-  #   RAM is faulted in lazily, and "allocated" is the commitment, not the
-  #   usage.
+  # MEMORY BUDGET - petruk-pve0 is OVERCOMMITTED on allocation.
+  #   Physical 251.5 GiB, allocated 354 GiB (+102.5 GiB, ~141%) with these four
+  #   hosts. Measured touched memory before -03/-04 was 174 GiB with 77 GiB
+  #   available, and a Fireactions host only faults in ~7 GiB idle / ~24 GiB
+  #   with every small runner busy. So the realistic add is +14 GiB idle and
+  #   +48 GiB under full CI load - it fits, but the node's spare memory is now
+  #   the thing that runs out first. Watch `free -g` on petruk-pve0, not the
+  #   allocation figure.
   #
   #   The swing factor is cantrik-01/02/03: 120 GiB allocated, ~9 GiB touched,
   #   and balloon=0 so none of it can be reclaimed as Talos takes on workload.
@@ -35,12 +38,18 @@ locals {
   #   regardless of how many microVMs are running inside. Only this value moves
   #   the host-level number.
   #
-  #   Note also that two hosts on the SAME Proxmox node add no throughput -
-  #   they partition the same cores. They buy blast-radius isolation and
-  #   rolling upgrades. Real scale-out needs a second node.
+  # CPU - the node has room, which is why scaling out beats raising replicas.
+  #   petruk-pve0 has 40 cores / 80 threads and measured 85% idle at load ~13.
+  #   Each host is only 8 vCPU, and a host saturates its own 8 vCPU at ~5
+  #   concurrent CI jobs (84% guest time), so replicas beyond ~8 per host just
+  #   trade queue wait for slower jobs. Adding hosts is what actually adds
+  #   throughput here. vCPU allocation across the node is 106 of 80 threads
+  #   (~1.33x) with these four - fine while the node sits this idle.
   hosts = {
     "fireactions-01" = { vm_id = 109 }
     "fireactions-02" = { vm_id = 110 }
+    "fireactions-03" = { vm_id = 113 }
+    "fireactions-04" = { vm_id = 114 }
   }
 
   # 4 cores x 2 sockets = 8 vCPU per host.

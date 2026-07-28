@@ -108,26 +108,37 @@ is written `0600 root:root` with `no_log: true` on the templating task.
 
 ### 4. Host resolution
 
-Both hosts have static DHCP reservations and internal DNS records, applied from
+Every host has a static DHCP reservation and an internal DNS record, applied from
 `live/ansible/playbooks/opnsense/vars/vault.yaml`:
 
 | Host | MAC | IP | DNS |
 | --- | --- | --- | --- |
 | fireactions-01 | `BC:24:11:88:AB:20` | `10.10.99.11` | `fireactions-01.<internal-domain>` |
 | fireactions-02 | `BC:24:11:88:AB:21` | `10.10.99.12` | `fireactions-02.<internal-domain>` |
+| fireactions-03 | `BC:24:11:88:AB:24` | `10.10.99.15` | `fireactions-03.<internal-domain>` |
+| fireactions-04 | `BC:24:11:88:AB:25` | `10.10.99.16` | `fireactions-04.<internal-domain>` |
 
 The reservations live in `dnsmasq_hosts` (applied with
 `manage-dnsmasq-host-overrides.yaml`) and the A records in `unbound_hosts`
 (applied with `manage-local-dns.yaml`). A new host needs an entry in both.
 
 > [!NOTE]
-> `opnsense_host` in that vault is `opnsense.<public-zone>`, which does not resolve
-> from a workstation whose `/etc/resolver/` only covers `<internal-domain>` —
-> every OPNsense playbook then fails with `nodename nor servname provided`. Run
-> them with `-e opnsense_host=opnsense.<internal-domain>`; it is the same box and
-> the Let's Encrypt wildcard covers it, so TLS still verifies.
+> `opnsense_host` in that vault is `opnsense.<public-zone>`. A workstation whose
+> `/etc/resolver/` only covers `<internal-domain>` cannot resolve it, and every
+> OPNsense playbook then fails with `nodename nor servname provided`. Fix it at
+> the resolver rather than per-run — pointing the whole zone at OPNsense is one
+> file:
+>
+> ```bash
+> sudo mkdir -p /etc/resolver
+> echo 'nameserver 192.168.3.102' | sudo tee /etc/resolver/<public-zone>
+> ```
+>
+> Overriding with `-e opnsense_host=<ip>` does **not** work: the certificate has
+> no IP SAN, so TLS verification fails, and disabling verification is not an
+> acceptable workaround.
 
-Then add both to `~/.ssh/config`, which is what the inventory's `ansible_host`
+Then add each to `~/.ssh/config`, which is what the inventory's `ansible_host`
 values resolve through:
 
 ```sshconfig
@@ -139,7 +150,20 @@ Host petruk-pve0-fireactions-02
     hostname 10.10.99.12
     port 22
     user ansible
+Host petruk-pve0-fireactions-03
+    hostname 10.10.99.15
+    port 22
+    user ansible
+Host petruk-pve0-fireactions-04
+    hostname 10.10.99.16
+    port 22
+    user ansible
 ```
+
+> [!NOTE]
+> The IPs are not contiguous with `-01`/`-02`: `.13` and `.14` were already taken
+> by `harbor-01` and `rustfs-01` when `-03`/`-04` were added. The MACs skip
+> `:22`/`:23` for the same reason.
 
 A reservation only takes effect at the guest's next DHCP negotiation. To move a
 guest that is still holding a pool lease, without rebooting it:
@@ -183,8 +207,8 @@ Four tiers are defined in `vars/main.yaml`. Pick one with `runs-on`:
 | large | `fireactions-large` | `<org>` org | 8 | 12 GiB | 1 | ~0.8 GiB | 12 GiB |
 | | | | | | **10 per host** | **~6.3 GiB** | **40 GiB** |
 
-`replicas` is per-host, so with two hosts deployed the concurrency doubles: **16
-`small` runners org-wide**, plus 2 each of `medium` and `large`.
+`replicas` is per-host, so with four hosts deployed the concurrency is 4×: **32
+`small` runners org-wide**, plus 4 each of `medium` and `large`.
 
 `small` carries the entire org: **12 `runs-on` declarations** across
 `security.yml` (7), `release.yml` (3), `ci.yml` and `pr-title-lint.yml` — and
@@ -435,9 +459,14 @@ per-host concurrency simply adds up.
 
 > [!CAUTION]
 > **`petruk-pve0` is overcommitted on memory allocation.** Physical 251.5 GiB,
-> allocated 274.0 GiB with the two hosts deployed. Only ~83 GiB is touched
-> today — guest RAM faults in lazily — so nothing is failing, but there is no
-> allocation headroom left.
+> allocated 354 GiB (~141%) with the four hosts deployed. Allocation is not the
+> number that bites — guest RAM faults in lazily — but the node's *touched*
+> memory now is, measured at **199 GiB used with 52 GiB available** right after
+> `-03`/`-04` came up. A Fireactions host faults in ~7 GiB idle and ~24 GiB with
+> every `small` runner busy, so a full-tilt CI burst across all four is roughly
+> another 60 GiB on top of idle. That still fits, but it is no longer
+> comfortable. **Watch `free -g` on the node, not the allocation figure**, and
+> treat a fifth host as needing headroom to come from somewhere first.
 >
 > The swing factor is `cantrik-01/02/03`: 120 GiB allocated, ~9 GiB touched,
 > `balloon=0` so none of it is reclaimable as Talos takes on workload. 1panel is
@@ -448,10 +477,17 @@ per-host concurrency simply adds up.
 > `floating = 0` means Proxmox commits the full 32 GiB per host regardless of
 > how many microVMs run inside it. Only `vm_memory_mib` moves that number.
 
-Note that two hosts on the **same** Proxmox node add no throughput — they
-partition the same 80 threads. They buy blast-radius isolation (a wedged
-devmapper pool takes out half your capacity, not all) and rolling upgrades.
-Real scale-out needs a second node.
+Adding hosts on the **same** Proxmox node does add throughput, as long as the
+node has CPU to spare — and it does: petruk-pve0 is 40 cores / 80 threads and
+measured **85% idle at load ~13** with two hosts running. Each host is only
+8 vCPU and saturates its own share at ~5 concurrent jobs, which is precisely why
+scaling out beat raising `replicas` further. Node-wide vCPU allocation is 106 of
+80 threads (~1.33×) with four hosts.
+
+Extra hosts also buy blast-radius isolation (a wedged devmapper pool now takes
+out a quarter of capacity, not half) and rolling upgrades. What a second *node*
+would buy beyond this is memory headroom, which is the resource actually running
+low — see the caution above.
 
 ## Why the fork
 

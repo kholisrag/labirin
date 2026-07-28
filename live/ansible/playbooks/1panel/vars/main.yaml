@@ -116,6 +116,51 @@ onepanel_websites:
       - domain: <cache-host>
         port: 80
 
+  # ------------------------------------------------------------------
+  # Brought under management by the July 2026 drift scan. All three were
+  # created by hand in the dashboard and had been serving for months with
+  # nothing in this repo describing them.
+  #
+  # Their proxy blocks are transcribed VERBATIM into the templates, because
+  # this file's create-only rule does not extend to the location block - that
+  # is rewritten from the template on every run. A tidier block would have been
+  # a silent behaviour change on the next unrelated run of this playbook.
+  # ------------------------------------------------------------------
+
+  - primary_domain: fizzy.<internal-domain>
+    remark: Fizzy
+    # The `fizzy` compose stack on this box, published on 127.0.0.1:8083.
+    upstream: http://127.0.0.1:8083
+    proxy_template: proxy-stock.conf.j2
+    domains:
+      - domain: fizzy.<internal-domain>
+        port: 80
+
+  - primary_domain: gitea-mirror.<internal-domain>
+    remark: Gitea Mirror
+    # The `gitea-mirror` compose stack on this box, published on 127.0.0.1:4321.
+    upstream: http://127.0.0.1:4321
+    proxy_template: proxy-stock.conf.j2
+    domains:
+      - domain: gitea-mirror.<internal-domain>
+        port: 80
+
+  - primary_domain: openclaw.<internal-domain>
+    remark: OpenClaw
+    # http, NOT the https the dashboard had. The upstream on :18789 speaks plain
+    # HTTP, so the hand-made config was failing every request with
+    # `SSL routines::wrong version number` and the site had been serving 502.
+    # This is the only correction the drift scan made rather than transcribing -
+    # see the header of proxy-openclaw.conf.j2.
+    #
+    # openclaw is an app-store install (createdBy "Apps"), so only the website
+    # is expressible here; the stack itself is not.
+    upstream: http://10.10.99.10:18789
+    proxy_template: proxy-openclaw.conf.j2
+    domains:
+      - domain: openclaw.<internal-domain>
+        port: 80
+
 # ============================================
 # 1Panel PostgreSQL databases
 # ============================================

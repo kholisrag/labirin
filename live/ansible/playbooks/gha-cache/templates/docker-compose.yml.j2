@@ -8,23 +8,28 @@
 #
 # Every secret is referenced as ${...} and lives in that .env, so the compose
 # detail page the dashboard renders carries no credentials.
+#
+# One service and no volumes: cache payloads go to RustFS over S3, and the index
+# goes to the PostgreSQL app install this stack joins 1panel-network to reach.
 services:
   {{ gha_cache_container_name }}:
     image: ghcr.io/falcondev-oss/github-actions-cache-server:{{ gha_cache_version }}
     container_name: {{ gha_cache_container_name }}
     restart: always
 
-    # Nothing starts until the database answers pg_isready. The server runs its
-    # Kysely migrations during startup and calls process.exit(1) if they fail
-    # (lib/db.ts), so racing Postgres turns a cold `compose up` into a restart
-    # loop that clears itself - eventually - and looks like a broken image.
-    depends_on:
-      {{ gha_cache_db_container_name }}:
-        condition: service_healthy
-
-    # Loopback only - see gha_cache_bind_address in vars/main.yaml.
+    # Loopback only - see gha_cache_bind_address in vars/main.yaml. This is what
+    # OpenResty proxies to; OpenResty runs with network_mode: host, so it cannot
+    # reach the container across the bridge below and needs the published port.
     ports:
       - "{{ gha_cache_bind_address }}:{{ gha_cache_port }}:3000"
+
+    # Declared explicitly, which also means Compose does NOT additionally create
+    # and attach this project's `default` network - there is nothing else in the
+    # stack to talk to. Outbound still works: this is a NAT bridge, so egress to
+    # token.actions.githubusercontent.com and to the RustFS website leaves
+    # through the host as usual.
+    networks:
+      - {{ gha_cache_network }}
 
     environment:
       # The URL the RUNNER will be told to connect to, not the one this
@@ -53,6 +58,12 @@ services:
       # requests go, and AWS_ENDPOINT_URL is the override this project declares
       # and tests. Omit it and the SDK resolves the real Amazon endpoint for
       # AWS_REGION - quietly, with no error until a request fails to sign.
+      #
+      # An https:// name rather than the RustFS guest's address, on purpose: it
+      # is an Unbound alias onto this very host, so the request goes back out
+      # through OpenResty, which terminates TLS with the wildcard and proxies on
+      # to rustfs-01. Nothing needs configuring for that certificate to verify -
+      # Node uses its own compiled-in root set, not the image's.
       AWS_REGION: "{{ gha_cache_s3_region }}"
       AWS_ENDPOINT_URL: "{{ gha_cache_s3_endpoint }}"
 
@@ -70,9 +81,13 @@ services:
       ENABLE_DIRECT_DOWNLOADS: "{{ gha_cache_enable_direct_downloads | lower }}"
 
       # ===== Database =====
-      # Discrete fields, not DB_POSTGRES_URL - the env schema accepts one form
-      # or the other and rejects a mixture, and this one needs no
-      # percent-encoding of the password.
+      # 1Panel's own PostgreSQL app install, reached by container name over
+      # 1panel-network. Discrete fields, not DB_POSTGRES_URL - the env schema
+      # accepts one form or the other and rejects a mixture, and this keeps the
+      # password out of a single pasteable string.
+      #
+      # The database and its user are created in the dashboard, not here; the
+      # playbook preflights that the database exists before pushing this file.
       DB_DRIVER: postgres
       DB_POSTGRES_HOST: "{{ gha_cache_db_host }}"
       DB_POSTGRES_PORT: "{{ gha_cache_db_port }}"
@@ -82,48 +97,22 @@ services:
 
     healthcheck:
       # /health is a flat 200 from the HTTP layer - it says the process is
-      # serving, not that S3 or Postgres are reachable. That is still the right
-      # probe for `depends_on`, because a server that cannot reach its database
-      # exits rather than serving unhealthily. Alpine base, so wget is present.
+      # serving, not that S3 or Postgres are reachable. That is still the useful
+      # probe, because a server that cannot reach its database exits rather than
+      # serving unhealthily: lib/db.ts calls process.exit(1) when the migrations
+      # fail. Alpine base, so wget is present.
       test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
 
-  {{ gha_cache_db_container_name }}:
-    image: postgres:{{ gha_cache_postgres_version }}
-    container_name: {{ gha_cache_db_container_name }}
-    restart: always
-
-    # No `ports:` on purpose. The only client is the service above, over this
-    # stack's own Compose network. Publishing it - even on loopback - would put
-    # it within reach of everything else on a box that already runs pgadmin4.
-
-    environment:
-      POSTGRES_DB: "{{ gha_cache_db_name }}"
-      POSTGRES_USER: "{{ gha_cache_db_user }}"
-      POSTGRES_PASSWORD: ${GHA_CACHE_DB_PASSWORD}
-
-    volumes:
-      # NOT ./data/postgres:/var/lib/postgresql/data, which is what every
-      # pre-18 example shows. Postgres 18 moved PGDATA to
-      # /var/lib/postgresql/18/docker and the volume up to /var/lib/postgresql.
-      # Mounting the old path against an 18 image initialises a fresh empty
-      # cluster and reports success.
-      #
-      # No `user:` and no chown task, unlike Athens: this image's entrypoint
-      # starts as root, runs docker_create_db_directories() to chown PGDATA to
-      # the postgres user on every start, and only then re-execs itself under
-      # gosu. Setting `user:` here would skip that and break the bind mount.
-      - ./data/postgres:{{ gha_cache_db_mount_path }}
-
-    healthcheck:
-      # pg_isready, not a TCP check: Postgres accepts connections during
-      # recovery and while initdb is still running, and `depends_on` would let
-      # the cache server's migrations start against it and fail.
-      test: ["CMD-SHELL", "pg_isready -U {{ gha_cache_db_user }} -d {{ gha_cache_db_name }}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+networks:
+  # `external: true` means "attach to the network that already exists under this
+  # name" - Compose will not create it, and refuses to start the stack if it is
+  # missing rather than inventing a project-prefixed one of its own. The
+  # playbook's preflight looks for it first so that refusal arrives as a
+  # readable failure instead of a stack that exists and will not come up.
+  {{ gha_cache_network }}:
+    name: {{ gha_cache_network }}
+    external: true

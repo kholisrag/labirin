@@ -1,0 +1,181 @@
+---
+# ============================================
+# RustFS - S3-compatible object storage
+# https://docs.rustfs.com/
+# ============================================
+# Single Node, Single Disk (SNSD). One volume, therefore no erasure coding:
+# losing the data device loses the data. The durability story is the array
+# under the `sas` datastore plus the PVE backup on that disk - see the reasoning
+# in live/opentofu/proxmox/petruk-pve/petruk-pve0/vms/rustfs/terragrunt.hcl.
+
+# --------------------------------------------
+# Version
+# --------------------------------------------
+# https://github.com/rustfs/rustfs/releases
+#
+# RustFS is PRE-1.0. Every published release so far is tagged as a prerelease,
+# the on-disk format is not promised to be stable across them, and there is no
+# documented in-place downgrade. Treat a version bump here as a change that
+# wants a backup of /data taken first, not as a routine patch.
+rustfs_version: "1.0.0-beta.11"
+
+# The upstream one-liner (`curl -O https://rustfs.com/install_rustfs.sh`) is
+# NOT used, for two reasons that are not stylistic:
+#
+#   1. It is interactive - it `read`s the service port, console port and data
+#     directory from a TTY. There is no non-interactive flag. Piping answers in
+#     would be a fragile way to reproduce what the tasks below do declaratively.
+#   2. It downloads `...-latest.zip`, so the installed version is whenever you
+#      happened to run it. That is the opposite of what this repo is for.
+#
+# What tasks/install.yaml does instead is exactly what that script does - drop
+# the binary at /usr/local/bin/rustfs, write /etc/default/rustfs, write
+# /etc/systemd/system/rustfs.service - from a pinned, checksummed artifact.
+#
+# `gnu` rather than `musl`: the installer picks GNU whenever glibc >= 2.31, and
+# Ubuntu 24.04 ships 2.39. tasks/preflight.yaml asserts that rather than
+# assuming it.
+rustfs_download_base: https://github.com/rustfs/rustfs/releases/download
+rustfs_libc: gnu
+rustfs_package_name: "rustfs-linux-{{ ansible_facts['architecture'] }}-{{ rustfs_libc }}-v{{ rustfs_version }}.zip"
+rustfs_package_url: "{{ rustfs_download_base }}/{{ rustfs_version }}/{{ rustfs_package_name }}"
+
+# From the SHA256SUMS asset published alongside the release. Verified by
+# ansible.builtin.get_url, so a corrupted or substituted artifact fails the
+# download task rather than becoming the running binary.
+#
+# Refresh on a version bump with:
+#   curl -fsSL https://github.com/rustfs/rustfs/releases/download/<version>/SHA256SUMS
+rustfs_package_sha256: ae77d173c520d523b7fd48fea93e8f8c4ad0c496b16cb47f14660677621424d5
+
+rustfs_binary_path: /usr/local/bin/rustfs
+# Records which version the binary at rustfs_binary_path was laid down from, so
+# a steady-state run neither re-downloads nor restarts the service. Same idea as
+# harbor_version_marker.
+rustfs_version_marker: /etc/rustfs-installed-version
+
+# --------------------------------------------
+# Identity
+# --------------------------------------------
+# Two names, and they are not interchangeable:
+#
+#   rustfs.internal.khol.is          - the S3 endpoint every client signs
+#                                      against. An Unbound ALIAS onto
+#                                      1panel.internal.khol.is.
+#   rustfs-console.internal.khol.is  - the web console. Also an alias.
+#   rustfs-01.internal.khol.is       - an A record for the guest itself, for
+#                                      SSH, Ansible and the 1Panel upstream.
+#
+# The S3 API and the console MUST be separate hostnames rather than paths on
+# one. S3 clients sign the request path (SigV4); serving the API under, say,
+# /s3/ makes RustFS read `s3` as the bucket name and every request fails
+# signature validation. https://docs.rustfs.com/integration/nginx
+rustfs_s3_host: rustfs.internal.khol.is
+rustfs_console_host: rustfs-console.internal.khol.is
+rustfs_s3_endpoint: "https://{{ rustfs_s3_host }}"
+rustfs_console_url: "https://{{ rustfs_console_host }}"
+
+# --------------------------------------------
+# Listeners
+# --------------------------------------------
+# Bound on all interfaces because OpenResty on the 1Panel VM (10.10.99.10) is
+# the client, not the loopback. TLS is terminated there with the Let's Encrypt
+# wildcard, so RustFS itself speaks plain HTTP on the LAN - the same shape as
+# Harbor. Setting RUSTFS_TLS_PATH here instead would mean a second copy of the
+# certificate to renew for no gain.
+rustfs_address: ":9000"
+rustfs_console_address: ":9001"
+rustfs_console_enable: true
+
+# --------------------------------------------
+# Data volume
+# --------------------------------------------
+# Dedicated block device, addressed by disk serial (set in the OpenTofu unit)
+# rather than /dev/sdb, which is not stable across reboots. Note the "S" prefix:
+# QEMU exposes a user-set serial as scsi-SQEMU_QEMU_HARDDISK_<serial>.
+rustfs_data_device: /dev/disk/by-id/scsi-SQEMU_QEMU_HARDDISK_rustfs-data0
+rustfs_data_mount: /data/rustfs0
+
+# XFS, not ext4, and this one is upstream's word rather than a preference:
+# "RustFS strongly recommends formatting all storage disks with the XFS file
+# system." The mkfs options come from the same page - `-i size=512` gives room
+# for inline extended attributes (RustFS stores object metadata in xattrs) and
+# `-n ftype=1` is required for the d_type support the storage layer expects.
+rustfs_data_filesystem: xfs
+rustfs_data_fs_label: RUSTFS0
+rustfs_data_mkfs_opts: "-i size=512 -n ftype=1 -L {{ rustfs_data_fs_label }}"
+# noatime/nodiratime: an object store touches enormous numbers of files and has
+# no use for access timestamps. Straight from upstream's fstab example.
+# nofail so a missing or renamed disk degrades to "RustFS will not start" rather
+# than "the guest drops to an emergency shell on boot".
+rustfs_data_mount_opts: "defaults,noatime,nodiratime,nofail"
+
+# RUSTFS_VOLUMES. A single path here is what makes this SNSD. Going multi-disk
+# means attaching more devices, mounting them at /data/rustfs1..N and setting
+# this to the ellipsis form "/data/rustfs{0...3}" - and wiping /data, because
+# the erasure layout is written at first format and is not migratable in place.
+rustfs_volumes: "{{ rustfs_data_mount }}"
+
+# --------------------------------------------
+# Credentials
+# --------------------------------------------
+# RustFS boots with rustfsadmin/rustfsadmin if these are unset. Unlike Harbor's
+# admin password these are NOT first-boot-only - they are read from the
+# environment on every start, so rotating them is: edit the vault, re-run,
+# service restarts, done. Update anything holding the old key at the same time.
+rustfs_access_key: "{{ vault_rustfs_access_key }}"
+rustfs_secret_key: "{{ vault_rustfs_secret_key }}"
+
+# --------------------------------------------
+# S3 semantics
+# --------------------------------------------
+# Clients that require a region and are given none tend to guess differently
+# from each other; pinning it makes the SigV4 credential scope predictable.
+rustfs_region: us-east-1
+
+# RUSTFS_SERVER_DOMAINS is deliberately NOT set, so only path-style addressing
+# works: https://rustfs.internal.khol.is/<bucket>/<key>, not
+# https://<bucket>.rustfs.internal.khol.is/<key>.
+#
+# The blocker is the certificate, not RustFS. The wildcard OPNsense renews
+# covers *.internal.khol.is, which matches exactly one label - so
+# `mybucket.rustfs.internal.khol.is` is two levels deep and does NOT verify.
+# Enabling virtual-host style would need a *.rustfs.internal.khol.is wildcard
+# issued and pushed into 1Panel, plus a matching DNS wildcard in Unbound.
+#
+# Practical consequence: SDKs must be configured for path style -
+# `--endpoint-url` plus `AWS_S3_FORCE_PATH_STYLE`/`force_path_style: true`.
+rustfs_server_domains: ""
+
+# --------------------------------------------
+# Logging
+# --------------------------------------------
+# /var/log/rustfs, not the /var/logs/rustfs the docs page shows in one place -
+# the upstream installer uses /var/log/rustfs and it is the FHS path.
+rustfs_log_directory: /var/log/rustfs
+rustfs_log_level: info
+# Defaults are hourly rotation, 30 files kept, 2 GiB total budget. Left alone;
+# the root disk is 40 GiB and the budget is enforced by RustFS itself.
+
+# --------------------------------------------
+# Health
+# --------------------------------------------
+# RUSTFS_HEALTH_ENDPOINT_ENABLE defaults to true and serves /health and
+# /health/ready unauthenticated on the S3 listener. tasks/install.yaml waits on
+# the readiness probe rather than on `systemctl is-active`, because systemd
+# reports the unit active as soon as the notify handshake lands - which is
+# before the volume has been scanned.
+rustfs_health_url: "http://127.0.0.1{{ rustfs_address }}/health/ready"
+rustfs_ready_retries: 30
+rustfs_ready_delay: 5
+
+# --------------------------------------------
+# System dependencies
+# --------------------------------------------
+# unzip: the release artifact is a .zip.
+# xfsprogs: mkfs.xfs and xfs_growfs.
+rustfs_packages:
+  - ca-certificates
+  - curl
+  - unzip
+  - xfsprogs

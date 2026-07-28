@@ -1,0 +1,48 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# The S3 API of rustfs-01. Every directive below is here because 1Panel's stock
+# reverse-proxy block breaks an S3 endpoint in a specific way.
+# Upstream reference: https://docs.rustfs.com/integration/nginx
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    # $http_host, NOT $host. $host strips the port and falls back to the
+    # server_name; $http_host is the Host header exactly as the client sent it,
+    # which is the string the client folded into its SigV4 signature. Rewriting
+    # it invalidates every signed request.
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+
+    # 1. THE ONE THAT LOOKS LIKE A RUSTFS BUG. nginx converts HEAD to GET so it
+    #    can populate its cache from the response. The rewritten method no
+    #    longer matches the one in the SigV4 signature, so RustFS rejects it -
+    #    and the symptom is "Bucket not found" or 403 on a bucket that plainly
+    #    exists. Nothing about the error points at nginx.
+    proxy_cache_convert_head off;
+
+    # 2. Objects are arbitrarily large and nginx's cap here is 1m by default
+    #    (1Panel's global http block sets 50m, which is no better). 0 disables
+    #    the check; anything finite is just an object size that mysteriously
+    #    fails with 413.
+    client_max_body_size 0;
+
+    # 3. Buffering means spooling the whole object to disk before a byte moves.
+    #    Off in both directions so uploads and downloads stream.
+    proxy_request_buffering off;
+    proxy_buffering off;
+
+    # 4. nginx re-chunking a body it is already streaming corrupts the payload
+    #    that the Content-MD5 / x-amz-content-sha256 header commits to.
+    chunked_transfer_encoding off;
+
+    # A large PUT legitimately holds the connection open for a long time;
+    # nginx's 60s default would cut off exactly the uploads worth proxying.
+    proxy_connect_timeout 300s;
+    proxy_read_timeout 900s;
+    proxy_send_timeout 900s;
+}

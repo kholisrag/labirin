@@ -119,16 +119,85 @@ ansible-vault edit live/ansible/playbooks/harbor/vars/vault.yaml
 
 `vault_harbor_admin_password` and `vault_harbor_db_password` are generated
 already — both are **first-install-only**, since one seeds Harbor's admin
-account and the other initialises Postgres' superuser. The one worth filling in is
-`vault_harbor_dockerhub_*`: anonymous Docker Hub pulls are rate-limited **per
-source IP**, and this cache is a single source IP for the whole homelab, so
-without a token every CI job shares one anonymous quota. Use a Personal Access
-Token with public-repo read scope.
+account and the other initialises Postgres' superuser.
 
 > [!NOTE]
 > `harbor_admin_password` is only read on the **first** install — it seeds
 > Postgres and is ignored on every later run. Rotate it in the UI and mirror it
 > back into the vault, or `tasks/proxy-cache.yaml` stops authenticating.
+
+#### Upstream credentials
+
+Every proxy cache pulls anonymously until one of these is filled in. Each pair
+is HTTP basic auth — **a username and a token, never an account password**,
+because Harbor stores what it is given and replays it on every cache miss.
+
+| Vault pair | Access key | Access secret |
+| --- | --- | --- |
+| `vault_harbor_dockerhub_*` | Docker Hub account name (not the email) | Personal access token, *public repo read-only* scope |
+| `vault_harbor_ghcr_*` | GitHub login that owns the token | **Classic** PAT with `read:packages` — fine-grained PATs carry no package scopes |
+| `vault_harbor_quay_*` | Robot account `namespace+robotname`, or the literal `$oauthtoken` | The robot's token, or an OAuth access token |
+| — | `registry.k8s.io` has no accounts at all | — |
+
+Docker Hub is the one worth doing first: anonymous pulls are rate-limited **per
+source IP**, and this cache is a single source IP for the whole homelab, so
+without a token every CI job in the lab shares one anonymous quota.
+
+For Quay, prefer a robot account (Organization → Robot accounts) over an OAuth
+token — it is scoped to the repositories you grant it and can be revoked on its
+own, where an OAuth token inherits the scopes of whoever generated it.
+
+Half a pair fails the run in `tasks/preflight.yaml`: a username with no token
+authenticates as nobody, which surfaces much later as a rate limit or a 404 on
+an image that plainly exists.
+
+##### Filling one in after the fact
+
+Credentials are the **one thing `tasks/proxy-cache.yaml` reconciles** — the
+registry endpoints and the projects themselves are create-only. So adding a
+token to a cache that is already serving CI is just:
+
+```bash
+ansible-vault edit live/ansible/playbooks/harbor/vars/vault.yaml
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
+  live/ansible/playbooks/harbor/install-harbor.yaml --tags proxy-cache
+```
+
+Nothing is deleted and the cache stays warm. That is *why* credentials are the
+exception: a registry endpoint cannot be replaced without taking its projects
+with it, since a project's `registry_id` is immutable.
+
+> [!IMPORTANT]
+> Harbor never hands a stored secret back — `GET /registries` masks it as
+> `*****` — so a run can see *that* a secret is set, and what username it goes
+> with, but not whether it still matches the vault. **Rotating a token without
+> changing the username** is invisible from the API, and needs:
+>
+> ```bash
+> ... --tags proxy-cache -e harbor_registry_credentials_force_update=true
+> ```
+
+Each endpoint is then pinged with its stored credentials
+(`POST /registries/ping`, which resolves the secret server-side). An
+unreachable *anonymous* upstream is only reported — Harbor should not fail a
+run because quay.io is having a morning — but an endpoint that has credentials
+and is rejected fails it, because that one is ours. Set
+`harbor_registry_verify_credentials: false` to skip the check entirely.
+
+> [!NOTE]
+> How much the ping proves depends on the adapter. `docker-hub` logs in for
+> real (and rejects a bad token before the ping, on the write itself); the
+> generic `docker-registry` adapter used for Quay and `registry.k8s.io` is
+> happy as long as the registry answers. Treat a green ping there as
+> "reachable", not "authenticated" — the `curl` in Troubleshooting is what
+> settles it.
+
+Every task that touches a credential — including the asserts that report on
+them — runs under `no_log`. That is not decoration: a *looped* task prints its
+whole loop item on failure rather than the label, and these loop over
+`harbor_registries`, whose entries hold the tokens. Anything added here that
+loops over the registry list, or over a result registered from it, needs the
+same treatment.
 
 ## Usage
 
@@ -311,6 +380,38 @@ only lists what has actually been cached.
   the UI and not mirrored back into `vars/vault.yaml`.
 - **Docker Hub `toomanyrequests`** — the anonymous quota for the whole homelab
   is used up. Fill in `vault_harbor_dockerhub_*`.
+- **A token was added but nothing changed** — the endpoint is reconciled only
+  when the *username* changes or a secret appears/disappears. Same username,
+  new token, needs `-e harbor_registry_credentials_force_update=true`.
+- **`Harbor refused the credentials for: dockerhub (HTTP 500)`** — the
+  `docker-hub` adapter validates eagerly: writing a credential makes Harbor log
+  in to `hub.docker.com/v2/users/login/` there and then, and a rejected login
+  comes back through the API as a bare `internal server error`. The real
+  message is in the core log, which is why the failure points at it:
+
+  ```bash
+  docker logs --since 10m harbor-core 2>&1 | grep -i error
+  # ... login to dockerhub error: {"detail":"Incorrect authentication credentials"}
+  ```
+
+  A rejected update stores nothing — the endpoint keeps whatever it had. To
+  check a credential without involving Harbor at all, ask Docker directly; the
+  second of these is exactly what a `docker pull` does:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' -u "$USER:$TOKEN" \
+    'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull'
+  ```
+
+  `200` means the pair is good, `401` means Docker rejected it. Run it without
+  `-u` first as a control — anonymous returns `200`, so a `401` there is a
+  network problem, not a credential one. The equivalents are
+  `https://ghcr.io/token?service=ghcr.io&scope=repository:OWNER/IMAGE:pull` and
+  `https://quay.io/v2/auth?service=quay.io&scope=repository:NS/IMAGE:pull`.
+- **`Harbor could not authenticate to '<name>'`** — the ping rejected the
+  credentials in the vault. Usually an account password where a token belongs,
+  a fine-grained GitHub PAT (no package scopes), or a Quay robot name without
+  its `namespace+` prefix.
 - **Harbor is down and CI stops refilling pools** — expected. The Fireactions
   runner image is pulled through this cache, so Harbor is a hard dependency for
   CI capacity. The escape hatch is to point `fireactions_runner_image` back at

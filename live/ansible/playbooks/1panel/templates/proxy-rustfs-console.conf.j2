@@ -1,0 +1,62 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# The RustFS web console (port 9001), which is a browser app rather than an S3
+# endpoint - so this is the S3 block plus WebSocket support, and without the
+# directives that only matter to signed requests.
+
+# The console is served at /rustfs/console/, NOT at the root. The root of the
+# :9001 listener is the same S3-style handler as :9000 and answers an
+# unauthenticated request with <Error><Code>AccessDenied</Code></Error> - which
+# looks exactly like a broken reverse proxy and is not.
+#
+# `location = /` is an exact match, which nginx evaluates before the `^~ /`
+# prefix below, so this redirects the bare hostname and nothing else.
+location = / {
+    return 302 /rustfs/console/;
+}
+
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    # The console builds absolute URLs and issues redirects from these. Without
+    # X-Forwarded-Proto it hands the browser http:// links for a page loaded
+    # over https and the login round-trip breaks.
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+
+    # WebSocket upgrade, done WITHOUT the `map $http_upgrade $connection_upgrade`
+    # block every nginx guide (including RustFS's) opens with. That map lives in
+    # the http context, and this file is written into a website's proxy/
+    # directory, which nginx includes inside a `server` block - there is nowhere
+    # here to put it, and 1Panel's OpenResty does not define one globally.
+    #
+    # Passing $http_connection through verbatim gives the same three outcomes
+    # the map is written to produce:
+    #   client sends `Connection: Upgrade`    -> forwarded, WebSocket works
+    #   client sends `Connection: keep-alive` -> forwarded, keepalive preserved
+    #   client sends nothing                  -> nginx omits the header, and
+    #                                            HTTP/1.1 defaults to keepalive
+    # The failure the map exists to avoid - nginx defaulting to
+    # `Connection: close` and killing upstream keepalives - does not occur.
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $http_connection;
+
+    # The console proxies object uploads and downloads through itself, so it
+    # needs the same streaming behaviour as the S3 site.
+    proxy_cache_convert_head off;
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    chunked_transfer_encoding off;
+
+    proxy_connect_timeout 300s;
+    # Long, because an idle WebSocket looks exactly like a stalled request to
+    # nginx and gets closed at the read timeout.
+    proxy_read_timeout 900s;
+    proxy_send_timeout 900s;
+}

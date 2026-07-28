@@ -1,0 +1,45 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# Athens is a read-only cache in front of the Go module ecosystem. The stock
+# reverse-proxy block breaks it in one specific way - the timeouts - and the
+# rest of this file is the ordinary proxy preamble.
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    # Athens' `secure` middleware reads this to decide whether the request
+    # already arrived over TLS. Without it, ForceSSL deployments redirect in a
+    # loop; harmless here (ForceSSL is off) but wrong to omit.
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_http_version 1.1;
+
+    # THE ONE THAT MATTERS. In sync download mode a cache MISS makes Athens
+    # run `go mod download`, which is a git clone of the module's repository -
+    # for a large module on a cold cache that is minutes, not seconds. Athens'
+    # own budget for this is ATHENS_TIMEOUT (300s) with ATHENS_STASH_TIMEOUT
+    # (600s) behind it, so nginx has to outlast both or it cuts the connection
+    # first and the client gets a 504 on exactly the requests the cache exists
+    # to absorb. 660s leaves a margin over the 600s stash timeout, so Athens is
+    # always the component that gives up first and the client gets its real
+    # error instead of a bare gateway timeout.
+    proxy_connect_timeout 75s;
+    proxy_read_timeout 660s;
+    proxy_send_timeout 660s;
+
+    # Module zips run to tens of megabytes. Buffering means nginx spools the
+    # whole thing before the client sees a byte, which turns a slow download
+    # into a long silence and then a burst - and `go` reports the silence as a
+    # stalled fetch.
+    proxy_buffering off;
+
+    # client_max_body_size is deliberately NOT raised. Every route Athens
+    # serves is a GET; there is no upload path to size for, so the 1m default
+    # is a free cap on anything trying to POST at it.
+}

@@ -1,0 +1,78 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/athens/install-athens.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# 1Panel stores this at /opt/1panel/docker/compose/athens/docker-compose.yml
+# with the .env beside it. Both are written by the panel, not by Ansible over
+# SSH, so the panel's own Compose page stays authoritative for start/stop/logs.
+services:
+  athens:
+    image: gomods/athens:{{ athens_version }}
+    container_name: {{ athens_container_name }}
+    restart: always
+
+    # The image's built-in unprivileged user. Requires ./data to be owned by
+    # it - install-athens.yaml chowns the directory before this stack is
+    # brought up, because 1Panel creates the compose directory as root.
+    user: "{{ athens_uid }}:{{ athens_gid }}"
+
+    # Loopback only - see athens_bind_address in vars/main.yaml.
+    ports:
+      - "{{ athens_bind_address }}:{{ athens_port }}:3000"
+
+    environment:
+      # go-homedir resolves $HOME first and only then falls back to parsing
+      # /etc/passwd. Docker does not reliably set HOME when the user is given
+      # numerically, so pin it: Athens writes the .netrc it builds from the
+      # GitHub token to $HOME/.netrc, and a wrong HOME means private fetches
+      # fail with a plain 404 from GitHub.
+      HOME: /home/athens
+
+      ATHENS_STORAGE_TYPE: disk
+      ATHENS_DISK_STORAGE_ROOT: /var/lib/athens
+
+      ATHENS_LOG_LEVEL: "{{ athens_log_level }}"
+      ATHENS_DOWNLOAD_MODE: "{{ athens_download_mode }}"
+
+      # Only consulted by the redirecting download modes, but the image default
+      # is "http://localhost:3001" - a port nothing listens on. Pointing it at
+      # the real upstream means a later switch to async_redirect does not
+      # silently break.
+      ATHENS_GLOBAL_ENDPOINT: "{{ athens_upstream_proxy }}"
+
+      # Environment for the `go mod download` / `go list` subprocesses Athens
+      # runs. Semicolon-separated ON PURPOSE: comma is a valid separator inside
+      # GOPROXY and GOPRIVATE, so Athens splits this variable on ';' instead.
+      #
+      # This REPLACES the config file's value rather than merging with it, so
+      # everything the go subprocess needs has to be on this one line.
+      ATHENS_GO_BINARY_ENV_VARS: "GOPROXY={{ athens_upstream_proxy }},direct; GOPRIVATE={{ athens_private_patterns | join(',') }}; GONOSUMDB={{ athens_private_patterns | join(',') }}"
+
+      # Athens' own copy of the private-path list, for the sumdb endpoints it
+      # proxies. See the note in vars/main.yaml about why both exist.
+      ATHENS_GONOSUM_PATTERNS: "{{ athens_private_patterns | join(',') }}"
+
+      ATHENS_TIMEOUT: "{{ athens_timeout }}"
+      ATHENS_STASH_TIMEOUT: "{{ athens_stash_timeout }}"
+      ATHENS_GOGET_WORKERS: "{{ athens_goget_workers }}"
+      ATHENS_PROTOCOL_WORKERS: "{{ athens_protocol_workers }}"
+
+      # From the stack's .env, which install-athens.yaml writes from the vault.
+      # Athens turns this into ~/.netrc itself at startup; do not also set
+      # ATHENS_NETRC_PATH, the two are mutually exclusive and Athens refuses to
+      # start if both are present.
+      ATHENS_GITHUB_TOKEN: ${ATHENS_GITHUB_TOKEN}
+
+    volumes:
+      # The module cache. Grows with every distinct module@version any client
+      # asks for and is never evicted - Athens has no retention policy.
+      - ./data:/var/lib/athens
+
+    healthcheck:
+      # /readyz reports on the storage backend, unlike /healthz which returns
+      # 200 as soon as the HTTP server is up. Alpine base, so wget is present.
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/readyz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

@@ -181,13 +181,40 @@ fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key
 # ghcr.io/hostinger/fireactions-images/... and re-run with --tags fireactions.
 #
 # The path after the project name is the upstream path verbatim:
-#   ghcr.io/hostinger/fireactions-images/ubuntu24.04:TAG
-#     -> <registry-host>/ghcr/hostinger/fireactions-images/ubuntu24.04:TAG
+#   ghcr.io/<org>/fireactions-images/ubuntu24.04:TAG
+#     -> <registry-host>/ghcr/<org>/fireactions-images/ubuntu24.04:TAG
 #
-# Pinned rather than :latest so a pool restart cannot silently change the
-# toolchain mid-week. Tags: https://github.com/hostinger/fireactions-images/pkgs/container/fireactions-images%2Fubuntu24.04
+# NOW OURS, not Hostinger's directly. <org>/fireactions-images derives from
+# the same upstream image, pinned by digest, and adds two things that cannot be
+# set any other way:
+#
+#   1. A run.sh shim. Fireactions' in-guest agent starts the runner with a fixed
+#      six-variable environment allowlist, so a Dockerfile ENV, /etc/environment,
+#      a systemd Environment= and a pool metadata: entry all go nowhere. The shim
+#      sources /opt/runner/env.d/*.sh and execs upstream's launcher. This is what
+#      <org>/<repo>#116 and #131 need and neither could have on its own.
+#
+#   2. /etc/resolv.conf pointing at 10.10.1.1. The upstream image bakes
+#      1.1.1.1 and 8.8.8.8, so NO microVM could resolve *.<internal-domain> —
+#      measured, <org>/<repo>#133. Athens was configured correctly for days
+#      and served nothing, because GOPROXY's pipe separators fall through to the
+#      public proxy on any error including an unresolvable name, so CI stayed
+#      green throughout.
+#
+# THE PACKAGE IS PRIVATE, and that is fine on this path specifically. containerd
+# here carries no credentials, but it does not need any: Harbor's ghcr proxy
+# authenticates upstream with vault_harbor_ghcr_*, and its own project is public.
+# Verified before this switch — an anonymous token against
+# /v2/ghcr/<org>/fireactions-images/ubuntu24.04/manifests/<tag> returns 200.
+# A DIRECT ghcr.io/<org>/... reference would NOT work, which matters because
+# that is exactly what the emergency escape hatch above would reach for. Fall
+# back to ghcr.io/hostinger/... instead, which is public.
+#
+# The tag is <base-image-digest>-<commit-sha7>: both inputs that can change the
+# image. No :latest is published, deliberately.
+# Source: https://github.com/<org>/fireactions-images
 fireactions_registry_mirror: <registry-host>
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/hostinger/fireactions-images/ubuntu24.04:20260702062356"
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/<org>/fireactions-images/ubuntu24.04:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-d9c0d0a"
 
 # --------------------------------------------
 # Pools

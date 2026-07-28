@@ -276,13 +276,38 @@ thin pool (`lvs containerd` showed **1.36% used** across 4 microVMs on the
 190 GiB pool it had then). That measurement is why the backing disk was cut
 from 200 GiB to 100 GiB — see [Resizing the containerd disk](#resizing-the-containerd-disk).
 
-## The runner image comes from Harbor
+## The runner image is ours, and comes from Harbor
 
 `fireactions_runner_image` points at
-`<registry-host>/ghcr/hostinger/fireactions-images/ubuntu24.04:TAG`,
-not at ghcr.io. Harbor runs a pull-through proxy cache on `harbor-01`
-(`live/ansible/playbooks/harbor/`), and the path after the project name is the
-upstream path verbatim.
+`<registry-host>/ghcr/<org>/fireactions-images/ubuntu24.04:TAG`,
+not at ghcr.io and no longer at Hostinger's image directly. Harbor runs a
+pull-through proxy cache on `harbor-01` (`live/ansible/playbooks/harbor/`), and
+the path after the project name is the upstream path verbatim.
+
+[`<org>/fireactions-images`](https://github.com/<org>/fireactions-images)
+derives from the same Hostinger base, pinned by digest, and adds exactly two
+things — both of which are unreachable by any other mechanism:
+
+- **A `run.sh` shim.** Fireactions' in-guest agent starts the runner with a fixed
+  six-variable environment allowlist, so a Dockerfile `ENV`, `/etc/environment`,
+  a systemd `Environment=` and a pool `metadata:` entry all go nowhere.
+- **`/etc/resolv.conf` pointing at `10.10.1.1`.** The upstream image bakes
+  `1.1.1.1` and `8.8.8.8`, so **no microVM could resolve `*.<internal-domain>`** —
+  which is why Athens was configured correctly for days and served nothing while
+  CI stayed green. Measured in
+  [<org>/<repo>#133](https://github.com/<org>/<repo>/issues/133).
+
+> [!IMPORTANT]
+> **The package is private, and the escape hatch changes because of it.**
+> containerd here carries no registry credentials and does not need any on this
+> path: Harbor's ghcr proxy authenticates upstream with `vault_harbor_ghcr_*`
+> and its own project is public — verified, an anonymous token against
+> `/v2/ghcr/<org>/fireactions-images/ubuntu24.04/manifests/<tag>` returns 200.
+>
+> But a **direct** `ghcr.io/<org>/...` reference would fail, and that is what
+> the emergency escape hatch below reaches for. Fall back to
+> `ghcr.io/hostinger/fireactions-images/...`, which is public — at the cost of
+> the resolver fix, so expect internal names to stop resolving again.
 
 A pool refills a microVM after **every** job, so a busy PR pulls this image
 dozens of times. From the LAN that is seconds rather than a WAN round trip, and

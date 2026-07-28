@@ -1,0 +1,35 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# The stock block plus X-Forwarded-Host, which openclaw's dashboard-made config
+# carried and the other stock sites do not.
+#
+# THIS IS THE ONE PLACE THE DRIFT SCAN DID NOT TRANSCRIBE THE LIVE CONFIG
+# VERBATIM, because the live config was broken. The dashboard had
+# `proxy_pass https://10.10.99.10:18789` with `proxy_ssl_verify off` and a
+# pinned SNI - and the upstream on that port speaks PLAIN HTTP:
+#
+#   https://10.10.99.10:18789  ->  SSL_do_handshake() failed:
+#                                  error:0A00010B:SSL routines::wrong version number
+#   http://10.10.99.10:18789   ->  200
+#
+# So the site had been answering 502 to every request, and the three
+# proxy_ssl_* directives were configuring TLS for a hop that has none. Scheme
+# corrected and they are gone; if the upstream ever does gain TLS, that is a
+# certificate to trust rather than a verify to switch off.
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $http_connection;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_http_version 1.1;
+    add_header X-Cache $upstream_cache_status;
+}

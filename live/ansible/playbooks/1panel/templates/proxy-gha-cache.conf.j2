@@ -1,0 +1,56 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# The Actions cache server is the opposite shape to Athens next door: Athens is
+# read-only and its one hard requirement is long timeouts, while this one takes
+# multi-gigabyte UPLOADS. Two directives below are load-bearing for that and the
+# stock reverse-proxy block gets both wrong.
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_http_version 1.1;
+
+    # THE FIRST ONE THAT MATTERS. nginx's default is 1m, and a cache archive is
+    # not 1m. A runner saving a cache smaller than its chunk size sends the
+    # whole archive as a single PUT (see routes/upload/[uploadId].put.ts - no
+    # blockid means one part), so the cap has to cover a WHOLE archive, not a
+    # chunk. Left at the default, the very first `actions/cache` save fails with
+    # a 413 that the action reports as a generic upload failure.
+    #
+    # 2g rather than 0: unlimited would also remove the only backstop on a
+    # request body streaming until the disk or the socket gives out, and nothing
+    # this homelab builds produces a 2 GiB archive. Raise it if something does -
+    # and note that the real size bound is CACHE_MAX_SIZE_BYTES, which is
+    # enforced after the upload lands, not during it.
+    client_max_body_size 2g;
+
+    # THE SECOND ONE. With request buffering on - the default - nginx spools the
+    # entire request body to disk before opening the upstream connection. The
+    # 1Panel guest's root disk is 50 GiB and shared with every other app on the
+    # box, so a few concurrent cache saves would fill it; and the handler
+    # streams the body straight into the S3 multipart upload, so buffering also
+    # throws away the streaming this server was built for.
+    proxy_request_buffering off;
+
+    # Same argument in the download direction. A restore streams the object out
+    # of RustFS through this proxy; buffering turns it into a long silence
+    # followed by a burst, which the action reports as a stalled download.
+    proxy_buffering off;
+
+    # A cold restore of a large archive is minutes of transfer, and the upload
+    # side has RustFS's own 30s socket timeout behind it
+    # (STORAGE_S3_SOCKET_TIMEOUT_MS). These are generous so that the cache
+    # server is always the component that gives up first and the runner gets a
+    # real error instead of a bare 504.
+    proxy_connect_timeout 75s;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+}

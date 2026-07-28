@@ -1,0 +1,254 @@
+---
+# ============================================
+# GitHub Actions cache server
+# https://github.com/falcondev-oss/github-actions-cache-server
+# ============================================
+# A drop-in replacement for GitHub's hosted Actions cache. Runners keep using
+# `actions/cache` unchanged; only the endpoint they are pointed at moves.
+#
+# Same deployment shape as Athens next door: a Compose stack ON the 1Panel VM,
+# created through 1Panel's own API rather than over SSH, so it appears in
+# Containers > Compose exactly like one made in the dashboard and the panel
+# stays the single place the box's containers are listed, logged and restarted.
+#
+# Consequence worth knowing: 1Panel decides where the files live. `from: edit`
+# writes to {DataDir}/docker/compose/{name}/docker-compose.yml and a sibling
+# .env - see loadPath()/newComposeEnv() in agent/app/service/container_compose.go.
+# The paths below mirror that decision; they are not free choices.
+#
+# Two services in one stack, not two stacks: the database exists only to serve
+# this cache and has no other consumer, so splitting them would buy nothing and
+# lose the single start/stop the panel gives a stack.
+
+# https://github.com/falcondev-oss/github-actions-cache-server/releases
+# GHCR publishes `<major>.<minor>.<patch>` with no `v` prefix, plus a `-caged`
+# variant built on node-caged. The caged image refuses to run with the sqlite
+# driver; we use postgres, so either would work - the plain image is the one
+# upstream's own docs and Helm chart default to.
+gha_cache_version: "9.6.2"
+
+gha_cache_compose_name: gha-cache
+gha_cache_container_name: gha-cache
+gha_cache_db_container_name: gha-cache-db
+
+# {DataDir} is /opt/1panel on this install.
+gha_cache_compose_dir: /opt/1panel/docker/compose/{{ gha_cache_compose_name }}
+gha_cache_compose_file: "{{ gha_cache_compose_dir }}/docker-compose.yml"
+
+# Only the database is on disk here. Cache payloads go to RustFS, so this
+# directory holds tens of megabytes of Postgres, not the cache itself.
+gha_cache_data_dir: "{{ gha_cache_compose_dir }}/data"
+gha_cache_db_data_dir: "{{ gha_cache_data_dir }}/postgres"
+
+# ============================================
+# Identity
+# ============================================
+# One name, an Unbound ALIAS onto 1panel.internal.khol.is - there is no second
+# guest to address, the same as Athens and unlike Harbor or RustFS. Add it in
+# live/ansible/playbooks/opnsense/vars/vault.yaml under unbound_host_aliases or
+# the name does not resolve and the website is unreachable.
+gha_cache_host: actions-cache.internal.khol.is
+
+# API_BASE_URL. THE TRIP HAZARD. This is not cosmetic and it is not the address
+# the server binds to: it is the prefix the server hands back to the runner in
+# the Twirp CreateCacheEntry response as `signed_upload_url`, and in
+# GetCacheEntryDownloadURL as the download URL. Whatever is here is the URL the
+# runner then connects to. Point it at 127.0.0.1 or at the container name and
+# every cache save fails from the runner's side while the server's own logs look
+# perfectly healthy.
+gha_cache_api_base_url: "https://{{ gha_cache_host }}"
+
+# ============================================
+# Listener
+# ============================================
+# Loopback ONLY. OpenResty on this box runs with `network_mode: host` (see its
+# docker-compose.yml), so 127.0.0.1 from nginx *is* the host's loopback and the
+# reverse proxy reaches this fine. Anything else on the LAN cannot, which is the
+# point: the only way in is the TLS website, and there is no second plaintext
+# door on 10.10.99.10:3400.
+gha_cache_bind_address: 127.0.0.1
+
+# NOT 3000, which is the image's own listening port and the first thing you
+# would reach for: Gitea already publishes 127.0.0.1:3000 on this box and Athens
+# took 3300. The container still listens on 3000 internally; only the host side
+# moved. The preflight task in install-gha-cache.yaml fails the run if this ever
+# collides.
+gha_cache_port: 3400
+
+# ============================================
+# Authentication
+# ============================================
+# ACTIONS_TOKEN_ISSUER IS LOAD-BEARING, NOT DECORATION. lib/scope.ts derives the
+# JWKS URL as `{issuer}/.well-known/jwks` and verifies every incoming runner
+# token against it, then requires a `repository_id` claim and matches cache
+# reads and writes on `repoId` plus `scope`. That verification is the entire
+# reason one repository's cache cannot be read or poisoned by another's job.
+# Point this at anything whose JWKS you do not control and the scoping is gone.
+#
+# This is the upstream default; it is set explicitly so that a future upgrade
+# changing the default cannot move it silently.
+gha_cache_actions_token_issuer: https://token.actions.githubusercontent.com
+
+# SKIP_TOKEN_VALIDATION IS DELIBERATELY ABSENT AND MUST STAY THAT WAY - there is
+# no variable for it here on purpose. Setting it makes lib/scope.ts call
+# jose.decodeJwt() instead of jose.jwtVerify(): the token is decoded but its
+# signature is never checked, and the only trace is a single WARN line at
+# request time. Any client that can reach the website could then mint a token
+# claiming any repository_id and read or overwrite that repository's cache.
+#
+# It is tempting while debugging, because a JWKS fetch failure and a genuinely
+# bad token produce the same 401. Debug it by reading the server logs and
+# checking egress to token.actions.githubusercontent.com instead.
+
+# ============================================
+# Storage - S3 on RustFS
+# ============================================
+# The bucket. NOT created by this playbook: RustFS has no Ansible module here
+# and S3Adapter.fromEnv() sends a HeadBucket at startup and fails with
+# "Bucket gha-cache does not exist" if it is missing, which is a clear enough
+# error to be worth leaving as the prompt to create it. See the README.
+gha_cache_s3_bucket: gha-cache
+
+# There is NO STORAGE_S3_ENDPOINT variable in this project - looking for one is
+# how an afternoon goes missing. lib/storage.ts constructs `new S3Client({...})`
+# with region, forcePathStyle and a request handler, and NO `endpoint` key at
+# all, so the endpoint comes from the AWS SDK's own config resolution.
+# AWS_ENDPOINT_URL is the variable the project declares in lib/schemas.ts,
+# exercises in tests/setup.ts and ships in its Helm chart, and it is what the
+# compose template sets.
+#
+# Getting this wrong does not fail loudly: with no endpoint override the SDK
+# resolves the real AWS S3 endpoint for AWS_REGION and the server tries to talk
+# to Amazon.
+#
+# `forcePathStyle: true` is hardcoded upstream, which happens to be exactly what
+# RustFS needs - RUSTFS_SERVER_DOMAINS is unset there, so virtual-host style
+# addressing is not available. Nothing to configure, but it is the reason this
+# combination works at all.
+gha_cache_s3_endpoint: "{{ rustfs_s3_endpoint }}"
+gha_cache_s3_region: "{{ rustfs_region }}"
+
+# STORAGE_S3_SOCKET_TIMEOUT_MS - per-socket inactivity, not a total request
+# budget. The image default is 10000. Raised because this path is longer than
+# the SDK's usual one: cache-server -> OpenResty (TLS) -> rustfs-01, with a
+# single-disk XFS volume at the end and other stacks competing for the same
+# 1Panel VM. A ten-second stall part-way through a multi-hundred-megabyte part
+# is plausible under a CI burst and would abort an otherwise fine upload. 30s is
+# still short enough that a genuinely dead backend fails the job rather than
+# hanging it.
+gha_cache_s3_socket_timeout_ms: 30000
+
+# RustFS's ROOT credentials, reused rather than duplicated - the same names the
+# RustFS playbook defines, resolved from ../rustfs/vars/vault.yaml.
+#
+# A dedicated per-tenant key would be better and is not available: RustFS is
+# pre-1.0 and its IAM surface is not exposed by anything in this repo, so
+# creating one would be a hand step in the console that nothing here records.
+# Worth revisiting when RustFS gains a managed-user API - the cache server needs
+# only Get/Put/Delete/List on one bucket.
+gha_cache_s3_access_key: "{{ rustfs_access_key }}"
+gha_cache_s3_secret_key: "{{ rustfs_secret_key }}"
+
+# ============================================
+# Retention
+# ============================================
+# CACHE_MAX_SIZE_BYTES. 50 GiB.
+#
+# SET THIS. It is optional upstream and omitting it is not a neutral default:
+# lib/storage.ts enforceStorageBudget() falls back to the adapter's
+# getFilesystemUsage(), which the S3 adapter does not implement, so with no
+# explicit budget `budget` is undefined, the function returns immediately and
+# the cache grows without any bound at all. Athens next door has exactly that
+# shape and it is a known, recorded mistake on this same shared hardware.
+#
+# Why 50 GiB and not more: /data/rustfs0 is a single 200 GiB XFS volume, SNSD,
+# no erasure coding (see ../rustfs/vars/main.yaml). A build cache is by
+# definition reconstructible - the worst a full eviction costs is one slow CI
+# run - so it should not be the tenant that crowds out data that is not
+# reconstructible. A quarter of the volume is a generous share for the first
+# tenant while leaving room for the ones that follow.
+#
+# Why not closer to full: upstream ADR-0008 is explicit that eviction runs only
+# AFTER an upload completes, with no reservations, no chunk accounting and no
+# global capacity lock. Concurrent completions can overshoot the budget, and an
+# oversized payload can be evicted while its own upload still reports success.
+# The budget is a high-water mark to fall back from, not a ceiling, so the
+# headroom between 50 GiB and 200 GiB is doing real work.
+#
+# Steady state sits between 45 and 50 GiB: eviction triggers above the budget
+# and deletes in cache-recency order until usage is at most 90% of it.
+gha_cache_max_size_bytes: 53687091200
+
+# CACHE_CLEANUP_OLDER_THAN_DAYS - a daily job drops entries not touched in this
+# many days. This is the upstream default, set explicitly so the knob is visible
+# next to the byte budget. The two are independent: this one bounds staleness,
+# the budget bounds size, and only the budget can stop a busy week filling the
+# disk. Set to 0 to disable time-based cleanup entirely.
+#
+# GitHub's hosted cache uses 7 days. 90 is kept because a homelab builds far
+# less often than a busy org and a cache that expires between weekend sessions
+# is a cache that never hits.
+gha_cache_cleanup_older_than_days: 90
+
+# ENABLE_DIRECT_DOWNLOADS - hand the runner a presigned RustFS URL instead of
+# streaming the object back through this server. Left off.
+#
+# It would work: the presigned URL is built against AWS_ENDPOINT_URL, so it
+# names rustfs.internal.khol.is, which every runner on the LAN can already
+# resolve and reach. What it costs is that downloads stop passing through the
+# only component that verifies the runner's token - the URL itself becomes the
+# capability - and reachability of a second hostname becomes load-bearing for
+# every cache restore. Turn it on if OpenResty becomes the bottleneck, not
+# before, and note that it also changes what the eviction job counts as a cache
+# access (issuing the URL, rather than the download happening).
+gha_cache_enable_direct_downloads: false
+
+# MANAGEMENT_API_KEY is deliberately unset. routes/management-api/[...].ts
+# answers 503 "Management API is disabled" when it is empty, which is the state
+# we want: nothing here needs to list or delete cache entries out of band, and
+# an unset key is one fewer credential to hold.
+
+# ============================================
+# Database
+# ============================================
+# Postgres rather than the default sqlite. Not a scale argument - it is that the
+# cache server's own cleanup tasks run on a schedule inside the process while
+# request handlers write concurrently, and sqlite's single-writer lock turns
+# that into avoidable contention. Postgres is also the only driver that survives
+# NITRO_CLUSTER_WORKERS > 1 if that is ever raised.
+#
+# 18.x, pinned to a patch. A MAJOR bump is a migration, not a tag change: the
+# on-disk cluster is version-specific and Postgres does not read the previous
+# major's data directory.
+gha_cache_postgres_version: "18.4-alpine"
+
+gha_cache_db_name: gha_cache
+gha_cache_db_user: gha_cache
+
+# Postgres 18 MOVED THE DATA DIRECTORY, and this is the part that silently eats
+# a database if it is copied from an older example. In 17 and earlier PGDATA was
+# /var/lib/postgresql/data and that was the documented volume. From 18 it is
+# /var/lib/postgresql/18/docker, with the volume one level up at
+# /var/lib/postgresql - see the NOTE in the official image's Dockerfile. Mount
+# the old path against an 18 image and Postgres initialises a brand new empty
+# cluster inside it while the real one sits untouched next door.
+gha_cache_db_mount_path: /var/lib/postgresql
+
+# The cache server talks to the database over the stack's own Compose network,
+# by service name. Nothing is published on the host: there is no reason for
+# anything outside this stack to reach it, and pgadmin4 on this box would
+# happily be pointed at it if there were.
+gha_cache_db_host: "{{ gha_cache_db_container_name }}"
+gha_cache_db_port: 5432
+
+# The discrete DB_POSTGRES_* form rather than DB_POSTGRES_URL. lib/schemas.ts
+# accepts either but not both - supplying the URL alongside any discrete field
+# fails env validation at startup. Discrete wins here because a password with a
+# `@`, `:` or `/` in it has to be percent-encoded inside a URL and is not
+# encoded at all in its own variable; that encoding step is a rotation footgun
+# for no gain.
+#
+# Sourced from vars/vault.yaml. Written to the stack's .env, not into
+# docker-compose.yml, so it is not sitting in the file the dashboard renders on
+# the compose detail page.
+gha_cache_db_password: "{{ vault_gha_cache_db_password }}"

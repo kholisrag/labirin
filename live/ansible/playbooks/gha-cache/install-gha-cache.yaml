@@ -1,0 +1,344 @@
+---
+- name: Install the GitHub Actions cache server as a 1Panel compose stack
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+    # The stack's .env, written by 1Panel beside the compose file. Secrets go
+    # here rather than into docker-compose.yml so the panel's compose detail
+    # page renders no credentials.
+    #
+    # Docker Compose parses this file itself and expands ${...} inside it, so
+    # every value has to be free of `$`, quotes and leading/trailing space. The
+    # vault comments say so where the values are generated.
+    gha_cache_compose_env: |
+      GHA_CACHE_S3_ACCESS_KEY_ID={{ gha_cache_s3_access_key }}
+      GHA_CACHE_S3_SECRET_ACCESS_KEY={{ gha_cache_s3_secret_key }}
+      GHA_CACHE_DB_PASSWORD={{ gha_cache_db_password }}
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+    # panel_api_base / panel_api_key live with the other 1Panel API work rather
+    # than being duplicated here - same panel, same key. main.yaml re-exports
+    # the vault_* names the playbooks actually use, so both files are needed.
+    - ../1panel/vars/main.yaml
+    - ../1panel/vars/vault.yaml
+    # And the S3 backend, for the same reason: the endpoint, region and root
+    # credentials are the RustFS playbook's to define. A second copy here would
+    # be a second thing to remember on a key rotation.
+    - ../rustfs/vars/main.yaml
+    - ../rustfs/vars/vault.yaml
+
+  module_defaults:
+    ansible.builtin.uri:
+      validate_certs: true
+      body_format: json
+      status_code: 200
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - panel_api_base is defined
+          - panel_api_key is defined
+          - panel_api_key | length > 0
+        fail_msg: >-
+          panel_api_base / panel_api_key are missing. Populate them with:
+          ansible-vault edit live/ansible/playbooks/1panel/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # Unlike Athens' GitHub token, none of these has a working empty state.
+    # Postgres refuses to initialise without POSTGRES_PASSWORD, and the S3
+    # adapter's startup HeadBucket fails without credentials - both several
+    # minutes into a deploy, in container logs nobody is watching.
+    - name: Validate the stack's own secrets
+      ansible.builtin.assert:
+        that:
+          - gha_cache_db_password | length > 0
+          - gha_cache_s3_access_key | length > 0
+          - gha_cache_s3_secret_key | length > 0
+        fail_msg: >-
+          Missing secrets. The database password comes from
+          live/ansible/playbooks/gha-cache/vars/vault.yaml
+          (vault_gha_cache_db_password) and the S3 credentials from
+          live/ansible/playbooks/rustfs/vars/vault.yaml
+          (vault_rustfs_access_key / vault_rustfs_secret_key).
+          Edit either with `ansible-vault edit <file>`.
+      no_log: true
+      tags:
+        - always
+
+    # Same auth scheme as live/ansible/playbooks/1panel/manage-websites.yaml:
+    # md5("1panel" + <api key> + <unix timestamp>) alongside the timestamp.
+    #
+    # THE TIMESTAMP IS ITS OWN FACT ON PURPOSE - see the long comment in
+    # manage-websites.yaml. Inlining the lookup evaluates it twice and the two
+    # evaluations occasionally straddle a second boundary, producing a token
+    # signed with N sent with a header saying N+1.
+    - name: Read the 1Panel API timestamp
+      ansible.builtin.set_fact:
+        onepanel_api_timestamp: "{{ lookup('pipe', 'date +%s') }}"
+      tags:
+        - always
+
+    - name: Build the 1Panel API authentication headers
+      ansible.builtin.set_fact:
+        onepanel_api_headers:
+          1Panel-Token: "{{ ('1panel' ~ panel_api_key ~ onepanel_api_timestamp) | hash('md5') }}"
+          1Panel-Timestamp: "{{ onepanel_api_timestamp }}"
+      no_log: true
+      tags:
+        - always
+
+    # ===== DISCOVERY =====
+    - name: List the existing compose stacks
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: onepanel_composes
+      changed_when: false
+      tags:
+        - gha_cache
+
+    # 1Panel answers an auth failure with HTTP 200 and a body of
+    # {"code": <non-200>, ...} - the status line says nothing. Without this the
+    # run dies several tasks later inside a Jinja expression, pointing nowhere
+    # near the real problem.
+    - name: Assert the 1Panel API accepted the request
+      ansible.builtin.assert:
+        that:
+          - onepanel_composes.json.code | default(0) == 200
+          - onepanel_composes.json.data is not none
+        fail_msg: >-
+          1Panel rejected the request
+          (code={{ onepanel_composes.json.code | default('?') }},
+          message={{ onepanel_composes.json.message | default('') | trim or 'none' }}).
+          Causes, in the order they are worth checking:
+          the API key is disabled in Panel Settings; this workstation's IP is
+          not in the API key's allowlist; the key in
+          live/ansible/playbooks/1panel/vars/vault.yaml is stale; or the signing
+          timestamp fell outside the key's validity window.
+      tags:
+        - gha_cache
+
+    # ===== PREFLIGHT =====
+    # The 1Panel guest is a busy box - sixteen stacks publishing on loopback -
+    # and docker reports a port clash only once the stack is already recorded,
+    # leaving a stack that exists but will not start. 3000 is Gitea's and 3300
+    # is Athens', which is how this check earned its place next door.
+    - name: List the published container ports
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 300
+          name: ""
+          state: all
+          orderBy: name
+          order: "null"
+          filters: ""
+          excludeAppStore: false
+      register: onepanel_containers
+      changed_when: false
+      tags:
+        - gha_cache
+        - preflight
+
+    # A published port reads as "127.0.0.1:3400->3000/tcp". Match on the host
+    # side only - the container side of the arrow collides constantly between
+    # unrelated images and means nothing.
+    - name: Find the containers already publishing the host port
+      ansible.builtin.set_fact:
+        onepanel_port_owners: "{{ onepanel_port_owners | default([]) + [item.name] }}"
+      loop: "{{ onepanel_containers.json.data['items'] | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.ports is defined
+        - item.ports is not none
+        - item.ports | select('search', ':' ~ gha_cache_port ~ '->') | list | length > 0
+      tags:
+        - gha_cache
+        - preflight
+
+    - name: Assert the host port is free
+      ansible.builtin.assert:
+        that:
+          - onepanel_port_conflicts | length == 0
+        fail_msg: >-
+          Host port {{ gha_cache_port }} is already published by
+          {{ onepanel_port_conflicts | join(', ') }}.
+          Pick another gha_cache_port in vars/main.yaml - the container keeps
+          listening on 3000 internally either way, so only the left-hand side of
+          the port mapping and the `upstream` in ../1panel/vars/main.yaml need
+          to change.
+      vars:
+        # This stack is not a conflict with itself on a re-run.
+        onepanel_port_conflicts: >-
+          {{ onepanel_port_owners | default([]) | reject('equalto', gha_cache_container_name) | list }}
+      tags:
+        - gha_cache
+        - preflight
+
+    - name: Record whether the stack already exists
+      ansible.builtin.set_fact:
+        gha_cache_exists: >-
+          {{ gha_cache_compose_name in (onepanel_composes.json.data['items'] | default([]) | map(attribute='name') | list) }}
+      tags:
+        - gha_cache
+
+    # ===== STORAGE =====
+    # Only the database lives on this box; cache payloads go to RustFS. Created
+    # before the stack because on the very first run the compose directory does
+    # not exist either - 1Panel creates it as part of the create call - so this
+    # MkdirAll has to cover both levels.
+    #
+    # NO CHOWN TASK, unlike Athens, and that is deliberate rather than an
+    # omission: the official Postgres image's entrypoint starts as root, runs
+    # docker_create_db_directories() to chown PGDATA to the postgres user on
+    # every start, and only then re-execs itself under gosu. A root-owned bind
+    # mount is the expected input. Adding a `user:` to the service - or chowning
+    # ahead of it - is what breaks that.
+    - name: Create the database directory
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          path: "{{ gha_cache_db_data_dir }}"
+          isDir: true
+          mode: 493 # 0755, as the decimal int the API wants
+        # The panel answers this one with HTTP 200 and a body code of 500 -
+        # "Internal server error: The file or folder already exists!" - which is
+        # the steady state on every run after the first. Listing 500 here is
+        # belt-and-braces for a version that starts using the status line.
+        status_code: [200, 500]
+      register: gha_cache_mkdir
+      changed_when: gha_cache_mkdir.json.code | default(0) == 200
+      # Hence keying off the BODY code, not the status. Anything that is not a
+      # success and not the already-exists message is a real failure.
+      failed_when:
+        - gha_cache_mkdir.json.code | default(0) != 200
+        - "'exist' not in (gha_cache_mkdir.json.message | default(''))"
+      tags:
+        - gha_cache
+        - storage
+
+    # ===== STACK =====
+    # Create and update are different endpoints with different bodies, and
+    # neither one does the other's job: /compose 400s on a name that already
+    # has a record, and /compose/update reads the existing file before writing
+    # so it cannot bootstrap one.
+    - name: Create the cache server compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          name: "{{ gha_cache_compose_name }}"
+          # "edit" means "here is the file content" - 1Panel writes it to
+          # {DataDir}/docker/compose/{name}/docker-compose.yml itself. The
+          # alternatives are "path" (a file already on the box) and "template".
+          from: edit
+          file: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ gha_cache_compose_env }}"
+          forcePull: false
+      when: not gha_cache_exists | bool
+      register: gha_cache_created
+      # Same trap as everything else here: a rejected body still answers 200.
+      failed_when:
+        - not gha_cache_created.skipped | default(false)
+        - gha_cache_created.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - gha_cache
+
+    - name: Update the cache server compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/update"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          name: "{{ gha_cache_compose_name }}"
+          # `path` is what gets `docker compose up`; `detailPath` is the file
+          # the new content is written to. For a single-file stack they are the
+          # same, but detailPath is read before the write and an empty one
+          # fails the task with a bare "load file with path failed".
+          path: "{{ gha_cache_compose_file }}"
+          detailPath: "{{ gha_cache_compose_file }}"
+          content: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ gha_cache_compose_env }}"
+          forcePull: false
+      when: gha_cache_exists | bool
+      register: gha_cache_updated
+      failed_when:
+        - not gha_cache_updated.skipped | default(false)
+        - gha_cache_updated.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - gha_cache
+
+    # ===== CONVERGENCE =====
+    # Both endpoints hand the work to a background task and return 200
+    # immediately - the response says the request was accepted, not that the
+    # containers are up. Poll until they actually are, otherwise a failed image
+    # pull, a missing bucket or a bad env var looks like a successful run.
+    #
+    # TWO, not one: a stack whose database is healthy while the server restarts
+    # in a loop reports runningCount 1, and that is exactly the shape of a
+    # missing bucket or a wrong S3 endpoint.
+    - name: Wait for both containers to be running
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: gha_cache_status
+      until: >-
+        (gha_cache_status.json.data['items'] | default([])
+         | selectattr('name', 'equalto', gha_cache_compose_name) | list | first | default({})
+        ).runningCount | default(0) | int >= 2
+      retries: 30
+      delay: 10
+      changed_when: false
+      tags:
+        - gha_cache
+
+    - name: Display post-install instructions
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "GitHub Actions cache server {{ gha_cache_version }} running as 1Panel compose stack '{{ gha_cache_compose_name }}'"
+          - "========================================"
+          - ""
+          - "Listening : {{ gha_cache_bind_address }}:{{ gha_cache_port }} on the 1Panel VM (loopback only)"
+          - "Compose   : {{ gha_cache_compose_file }}"
+          - "Database  : {{ gha_cache_db_data_dir }} (postgres {{ gha_cache_postgres_version }})"
+          - "Objects   : {{ gha_cache_s3_endpoint }}/{{ gha_cache_s3_bucket }}"
+          - "Budget    : {{ (gha_cache_max_size_bytes | int / 1073741824) | round(1) }} GiB"
+          - ""
+          - "It is not reachable yet unless the website exists. Create it with:"
+          - "  ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \\"
+          - "    live/ansible/playbooks/1panel/manage-websites.yaml"
+          - ""
+          - "Then, from any box on the LAN:"
+          - "  curl -fsS {{ gha_cache_api_base_url }}/health"
+          - ""
+          - "Runners are NOT pointed at this yet - that is ACTIONS_RESULTS_URL,"
+          - "and it is deliberately not wired here. See the README."
+          - ""
+      tags:
+        - always

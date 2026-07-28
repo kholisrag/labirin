@@ -12,11 +12,15 @@ Like Athens and unlike Harbor, it does **not** get its own VM. It is a Compose
 stack on the 1Panel guest, created through 1Panel's API so it appears in
 *Containers → Compose* exactly like one made in the dashboard.
 
+**One container, no volumes.** Both pieces of state live somewhere that already
+exists — payloads in RustFS, index in the PostgreSQL the panel already runs.
+
 | Piece | Role |
 | --- | --- |
 | `github-actions-cache-server` container | The server itself, on `127.0.0.1:3400` |
-| `postgres` container, same stack | Cache index, leases, upload state |
 | [RustFS](../rustfs/README.md) bucket `gha-cache` | Every byte of every cache archive |
+| 1Panel's **PostgreSQL app install** | Cache index, leases, upload state |
+| `1panel-network` (external) | How the container reaches that database |
 | 1Panel Compose (`from: edit`) | Owns the stack; panel writes the files |
 | 1Panel website + OpenResty | TLS termination for `<cache-host>` |
 
@@ -26,10 +30,10 @@ stack on the 1Panel guest, created through 1Panel's API so it appears in
 live/ansible/playbooks/gha-cache/
 ├── install-gha-cache.yaml      # entrypoint — talks to the 1Panel API
 ├── templates/
-│   └── docker-compose.yml.j2   # both services, pushed as `file`/`content`
+│   └── docker-compose.yml.j2   # one service, pushed as `file`/`content`
 └── vars/
-    ├── main.yaml               # version, ports, budget, database
-    └── vault.yaml              # database password (ansible-vault)
+    ├── main.yaml               # version, ports, budget, network
+    └── vault.yaml              # the database coordinate (ansible-vault)
 ```
 
 The reverse proxy is **not** here — it lives with the other 1Panel websites:
@@ -56,9 +60,11 @@ files that can drift apart.
         v
   cache server container, same VM, published on loopback only
         |
-        +--> gha-cache-db, same stack       (index, leases, upload state)
+        +--> postgresql container, over 1panel-network   (index, leases, uploads)
+        |
         +--> https://<s3-host>/gha-cache
-                    |  back out through OpenResty on the same box
+                    |  an Unbound alias onto THIS host, so back out
+                    |  through OpenResty, TLS terminated there
                     v
               rustfs-01 (10.10.99.14) — /data/rustfs0
 ```
@@ -67,6 +73,13 @@ files that can drift apart.
 1Panel's OpenResty runs with `network_mode: host`, so its loopback *is* the
 host's loopback. That is what lets the server publish on `127.0.0.1:3400`
 instead of `0.0.0.0:3400` — the TLS website becomes the only way in.
+
+**The RustFS hop looks like a detour and is meant to.** `<s3-host>`
+is an Unbound alias onto `<panel-host>`, so a container on this box
+resolves it to its own host, hits OpenResty, and is proxied on to
+`10.10.99.14:9000`. Pointing `AWS_ENDPOINT_URL` straight at that address would
+save a hop and would also drop TLS on the wire and give this one client a
+different endpoint string from every other S3 client on the LAN. Don't.
 
 One name, because there is no second guest to address:
 
@@ -140,18 +153,43 @@ No bucket policy, no lifecycle rule. Retention is the cache server's job — see
 [Retention](#retention) — and a bucket-side expiry would delete objects the
 database still has rows for.
 
-### 3. Secrets
+### 3. The database
+
+**This is the step that is easiest to skip and hardest to diagnose.** The stack
+carries no Postgres of its own; it uses the PostgreSQL that 1Panel already runs
+as an app install, alongside the databases for the other apps on that box.
+
+Create it in the dashboard — **Databases → PostgreSQL → Create** — and then copy
+what the panel shows you into the vault. Three things matter:
+
+- **1Panel appends a random suffix to the name you type.** Ask for `gha_cache`
+  and you get something like `gha_cache_a1b2c3`. The vault has to carry the
+  *generated* name, which is why nothing in this repo dictates one.
+- **1Panel mints the user and the password too**, and records them in its own
+  store. A database created by hand with `psql`, behind the panel's back, will
+  not appear in *Databases* and will not pass the playbook's preflight.
+- **The playbook will not create it.** Creating a database is a dashboard
+  action; doing it over the API from here would produce a database the panel
+  does not know it owns.
+
+### 4. Secrets
 
 ```bash
 sops -d .vault_pass.enc > .vault_pass && chmod 600 .vault_pass
 ansible-vault edit live/ansible/playbooks/gha-cache/vars/vault.yaml
 ```
 
-`vault_gha_cache_db_password` ships populated with 48 random alphanumeric
-characters. **Keep it alphanumeric**: it reaches Postgres through the stack's
-`.env`, which Docker Compose parses and expands `${...}` inside, so a `$` or a
-quote becomes a parse surprise that presents as authentication failing against a
-database that is running perfectly.
+The vault ships with `vault_gha_cache_db_host` and `vault_gha_cache_db_port`
+already correct, and with **`CHANGEME` placeholders** for the name, user and
+password from step 3. The playbook's first assertion fails while they are still
+in place, so a half-configured vault costs ten seconds rather than a
+crash-looping container.
+
+If you set a password of your own rather than accepting the generated one, keep
+it alphanumeric: it reaches the container through the stack's `.env`, which
+Docker Compose parses and expands `${...}` inside, so a `$` or a quote becomes a
+parse surprise that presents as authentication failing against a database that
+is running perfectly.
 
 The 1Panel API key comes from `../1panel/vars/vault.yaml` and the S3 credentials
 from `../rustfs/vars/vault.yaml` — same panel, same object store, not duplicated
@@ -174,6 +212,22 @@ to the 1Panel guest.
 Re-running is safe. The playbook creates the stack the first time and pushes the
 rendered compose file through `/compose/update` after that, so a version bump in
 `vars/main.yaml` is a one-line change plus a re-run.
+
+### What the preflight checks, and what it cannot
+
+Four things, all read-only against the panel's API, all before the compose file
+is pushed:
+
+| Check | Catches |
+| --- | --- |
+| host port `3400` unpublished | a clash that would leave a stack that will not start |
+| `1panel-network` exists | `external: true` failing at `compose up` |
+| an app install runs the configured container | the database being stopped or renamed |
+| the configured database is in the panel's list | a typo'd or uncreated database |
+
+**The password is not among them.** The panel holds it, but reading it back to
+compare would put a live credential through this playbook for no gain, so a
+wrong password is the one failure left to the container's own log.
 
 ## Verify
 
@@ -245,9 +299,16 @@ ships in its Helm chart. Omit it and the SDK quietly resolves the real Amazon
 endpoint for `AWS_REGION`; the failure is a signature or DNS error that reads
 like a RustFS problem.
 
-`forcePathStyle: true` is hardcoded upstream, which is exactly what RustFS
-needs — `RUSTFS_SERVER_DOMAINS` is unset there, so virtual-host addressing is
-not available. Nothing to configure; it is just the reason the pair works.
+**Path style and TLS trust both need nothing set, which is worth knowing before
+you go looking for the knob.** `forcePathStyle: true` is hardcoded upstream and
+is not exposed as an environment variable — which happens to be exactly what
+RustFS needs, since `RUSTFS_SERVER_DOMAINS` is unset there and virtual-host
+style would address `gha-cache.<s3-host>`, a name with neither a
+DNS alias nor certificate coverage. And the wildcard is a public Let's Encrypt
+certificate that Node verifies against its own compiled-in Mozilla root set
+rather than the OS store, so the image's package list does not come into it. If
+verification ever does fail, the fix is `NODE_EXTRA_CA_CERTS` — **never**
+`NODE_TLS_REJECT_UNAUTHORIZED`.
 
 **nginx's 1 MiB default body cap 413s the first cache save.** A cache smaller
 than the client's chunk size arrives as one PUT, so the cap has to cover a whole
@@ -256,16 +317,14 @@ archive rather than a chunk. `proxy-gha-cache.conf.j2` sets `client_max_body_siz
 spools every upload to the 1Panel guest's 50 GiB root disk before forwarding a
 byte.
 
-**Postgres 18 moved the data directory.** `PGDATA` is
-`/var/lib/postgresql/18/docker` and the volume is `/var/lib/postgresql`, not the
-`/var/lib/postgresql/data` every pre-18 example shows. Mount the old path
-against an 18 image and Postgres initialises a fresh empty cluster inside it and
-reports success. A **major** version bump is a migration, not a tag change.
-
-**No chown task, unlike Athens.** The official Postgres entrypoint starts as
-root, chowns `PGDATA` to the `postgres` user on every start, and only then
-re-execs itself under `gosu`. A root-owned bind mount is the expected input —
-adding a `user:` to the service is what breaks it.
+**Joining `1panel-network` puts this container next to every other app on the
+box.** That is the price of reaching the panel's PostgreSQL by name, and it is
+the same position every 1Panel app install is already in. The alternative —
+reaching Postgres over the host — does not work as written, because Postgres
+publishes on `127.0.0.1:5432` and a container's `127.0.0.1` is its own loopback,
+not the host's; it would need an `extra_hosts` host-gateway mapping or the
+bridge gateway address, both more fragile than a network name the panel
+maintains itself.
 
 **1Panel answers a rejected request body with HTTP 200.** The status line is not
 a result; the outcome is the `code` field in the JSON body. Every write task in
@@ -283,6 +342,6 @@ is the WAF, not the cache server.
 
 **The database is the index, not the cache.** Losing it does not lose the
 objects, but it does orphan them: the cleanup job reaps storage with no matching
-row after `ORPHANED_STORAGE_GRACE_PERIOD_HOURS` (24). Restoring the stack
-without its Postgres volume means a cold cache and a day of quiet deletion, not
-a broken server.
+row after `ORPHANED_STORAGE_GRACE_PERIOD_HOURS` (24). It also means this stack
+is no longer self-contained — restoring the 1Panel guest has to bring the
+PostgreSQL app install back before this container will start at all.

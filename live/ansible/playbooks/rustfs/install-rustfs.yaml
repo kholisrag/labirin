@@ -1,0 +1,86 @@
+---
+- name: Install RustFS
+  hosts: rustfs_all
+  become: true
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    # `restarted`, not `reloaded`: RustFS reads its whole configuration from the
+    # environment at start and has no SIGHUP path.
+    - name: Restart rustfs
+      ansible.builtin.systemd_service:
+        name: rustfs
+        state: restarted
+
+  tasks:
+    # ============================================
+    # Pre-flight checks
+    # ============================================
+    - name: Run pre-flight checks
+      ansible.builtin.include_tasks:
+        file: tasks/preflight.yaml
+      tags:
+        - always
+
+    # ============================================
+    # Components
+    # ============================================
+    - name: Install system dependencies
+      ansible.builtin.include_tasks:
+        file: tasks/dependencies.yaml
+      tags:
+        - dependencies
+
+    # Before the service, not after: RustFS initialises its store the first time
+    # it starts, and if it starts against an unmounted directory it initialises
+    # one on the root disk.
+    - name: Prepare the RustFS data volume
+      ansible.builtin.include_tasks:
+        file: tasks/data-volume.yaml
+      tags:
+        - data-volume
+
+    - name: Install RustFS
+      ansible.builtin.include_tasks:
+        file: tasks/install.yaml
+      tags:
+        - install
+        - config
+
+    # ============================================
+    # Summary
+    # ============================================
+    - name: Display post-install instructions
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "RustFS {{ rustfs_version }} installed on {{ inventory_hostname }}"
+          - "========================================"
+          - ""
+          - "S3 API   : {{ rustfs_s3_endpoint }}  (path-style only)"
+          - "Console  : {{ rustfs_console_url }}"
+          - "Volumes  : {{ rustfs_volumes }} on {{ rustfs_data_device }}"
+          - "Logs     : {{ rustfs_log_directory }}"
+          - ""
+          - "Both hostnames are served by OpenResty on the 1Panel VM. If they do"
+          - "not resolve or 502, run:"
+          - "  ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \\"
+          - "    live/ansible/playbooks/1panel/manage-websites.yaml"
+          - ""
+          - "Verify on the host:"
+          - "  systemctl status rustfs --no-pager"
+          - "  curl -fsS http://127.0.0.1{{ rustfs_address }}/health/ready"
+          - ""
+          - "Verify from the LAN (aws-cli, path style is required):"
+          - "  aws --endpoint-url {{ rustfs_s3_endpoint }} s3 mb s3://scratch"
+          - "  aws --endpoint-url {{ rustfs_s3_endpoint }} s3 ls"
+          - ""
+      tags:
+        - always

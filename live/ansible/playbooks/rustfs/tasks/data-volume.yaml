@@ -1,0 +1,92 @@
+---
+# ============================================
+# RustFS data volume
+# ============================================
+# The whole device is formatted - no partition table. There is exactly one
+# consumer, growing it later is then just `xfs_growfs` after the disk is
+# enlarged in Proxmox, and there is no partition offset to get wrong.
+#
+# The filesystem is NEVER recreated on a re-run: `force: false` means an
+# existing XFS is left alone. Destroying every object in the store is a
+# decision, not a side effect of running the playbook.
+# ============================================
+
+- name: Create the XFS filesystem on the data device
+  community.general.filesystem:
+    fstype: "{{ rustfs_data_filesystem }}"
+    dev: "{{ rustfs_data_device }}"
+    opts: "{{ rustfs_data_mkfs_opts }}"
+    force: false
+  tags:
+    - data-volume
+
+# Mounted by device path rather than by LABEL=. The label is set at mkfs time
+# and is real, but the by-id path is set by the OpenTofu unit - so if this
+# playbook is ever pointed at a second data disk, exactly one file
+# (vars/main.yaml) decides which device that is.
+- name: Mount the data volume
+  ansible.posix.mount:
+    path: "{{ rustfs_data_mount }}"
+    src: "{{ rustfs_data_device }}"
+    fstype: "{{ rustfs_data_filesystem }}"
+    opts: "{{ rustfs_data_mount_opts }}"
+    state: mounted
+  tags:
+    - data-volume
+
+# RustFS runs as root (see templates/rustfs.service.j2), so this is about
+# keeping the store unreadable to anything else on the box rather than about
+# granting access. 0750 matches upstream's guidance.
+- name: Ensure the data volume permissions
+  ansible.builtin.file:
+    path: "{{ rustfs_data_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - data-volume
+
+# A mount that silently failed leaves rustfs_data_mount as an empty directory on
+# the ROOT disk, and RustFS will happily initialise a store there - 40 GiB of
+# object storage that vanishes the moment the mount starts working again. Cheap
+# to check, miserable to diagnose.
+#
+# `findmnt` rather than ansible_facts['mounts']: those facts were gathered at
+# the start of the play, which on a first run is BEFORE the mount above, so the
+# fact-based check would fail on exactly the run it matters most.
+- name: Verify the data volume is a real mount
+  ansible.builtin.command:
+    cmd: "findmnt --noheadings --target {{ rustfs_data_mount }} --output SOURCE,FSTYPE"
+  register: rustfs_data_findmnt
+  changed_when: false
+  tags:
+    - data-volume
+
+- name: Assert the data volume is a real mount
+  ansible.builtin.assert:
+    that:
+      - rustfs_data_filesystem in rustfs_data_findmnt.stdout
+      - "'/dev/' in rustfs_data_findmnt.stdout"
+    fail_msg: >-
+      {{ rustfs_data_mount }} resolves to
+      '{{ rustfs_data_findmnt.stdout | trim }}' rather than an
+      {{ rustfs_data_filesystem }} block device - the mount did not take and
+      RustFS would initialise its store on the root filesystem. Check `dmesg`
+      and `findmnt {{ rustfs_data_mount }}`.
+  tags:
+    - data-volume
+
+- name: Read the data volume size
+  ansible.builtin.command:
+    cmd: "df -h --output=size,used,avail,pcent {{ rustfs_data_mount }}"
+  changed_when: false
+  register: rustfs_data_df
+  tags:
+    - data-volume
+
+- name: Show the data volume size
+  ansible.builtin.debug:
+    msg: "{{ rustfs_data_df.stdout_lines }}"
+  tags:
+    - data-volume

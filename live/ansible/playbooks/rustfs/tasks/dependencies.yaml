@@ -1,0 +1,14 @@
+---
+# ============================================
+# System dependencies
+# ============================================
+# The cloud-init user-data already installs most of these on first boot; this
+# task is what makes the playbook work against a guest that was built before
+# that list existed, or rebuilt from a different image.
+
+- name: Install base packages
+  ansible.builtin.package:
+    name: "{{ rustfs_packages }}"
+    state: present
+  tags:
+    - dependencies

@@ -1,0 +1,116 @@
+---
+# ============================================
+# 1Panel WAF (1pwaf) per-site rule overrides
+# ============================================
+# 1Panel ships a WAF that is enabled by default on every website it creates.
+# One of its stock rules is unusable in front of an S3 endpoint, and this
+# playbook narrows it - for the named sites only, leaving the module and every
+# other rule on.
+#
+# THE RULE
+#
+#   rules/header.json -> appFilter1 -> "TomcatBypass|Command|Base64"
+#
+# It is matched, case-insensitively and as a plain substring, against the
+# request HEADERS - which includes User-Agent. aws-cli v2 always appends the
+# subcommand you ran to its User-Agent:
+#
+#   aws-cli/2.36.8 ... md/prompt#off md/command#s3.ls
+#                                       ^^^^^^^
+#
+# so EVERY aws-cli v2 request to a 1Panel site is answered with the WAF's
+# 403 block page before it ever reaches the upstream. The symptom is
+# indistinguishable from a credentials problem: botocore reports
+# `An error occurred (403) ... Forbidden` and the body is HTML it cannot parse.
+# The give-away is that the response carries `Server: openresty` and no
+# `x-request-id`, and that the same request signed by hand with curl succeeds.
+#
+# THE OVERRIDE
+#
+# `Command` is dropped from that one rule, for the listed sites only. What
+# survives: `TomcatBypass` and `Base64` in the same rule, the log4shell/JNDI
+# rule (appFilter2), the scanner rule (scannerFilter1), and every other WAF
+# module (sql, xss, args, cookie, methodWhite, ...). The lost coverage is a
+# substring match on the word "command" in a header, which was never load
+# bearing for a reverse proxy in front of an object store.
+#
+# 1Panel rewrites these files when a site is recreated, so this is re-run after
+# any change that recreates a website - it is idempotent.
+# ============================================
+- name: Apply 1Panel WAF per-site rule overrides
+  hosts: onepanel_all
+  become: true
+
+  vars_files:
+    - vars/main.yaml
+
+  handlers:
+    # 1pwaf loads its rule files at worker start (`lua_code_cache on`), so an
+    # edited file does nothing until the workers are recycled. `nginx -s reload`
+    # is enough - no connection is dropped.
+    - name: Reload OpenResty
+      ansible.builtin.command:
+        cmd: docker exec {{ onepanel_openresty_container }} nginx -s reload
+      changed_when: true
+
+  tasks:
+    - name: Assert the WAF site directories exist
+      ansible.builtin.stat:
+        path: "{{ onepanel_waf_site_dir }}/{{ item }}/rules/header.json"
+      register: onepanel_waf_stat
+      loop: "{{ onepanel_waf_ua_command_sites }}"
+      loop_control:
+        label: "{{ item }}"
+      tags:
+        - waf
+
+    - name: Fail when a site has no WAF rule directory
+      ansible.builtin.fail:
+        msg:
+          - "No WAF rules for: {{ onepanel_waf_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}"
+          - ""
+          - "1Panel creates {{ onepanel_waf_site_dir }}/<domain>/ when the"
+          - "website is created. Run manage-websites.yaml first."
+      when: onepanel_waf_stat.results | rejectattr('stat.exists') | list | length > 0
+      tags:
+        - waf
+
+    # A targeted substring edit rather than templating the whole file. Writing
+    # our own header.json would freeze 1Panel's current default rules into this
+    # repo, and they would silently stop tracking upstream on the next 1Panel
+    # release - we would be pinning a security ruleset we do not maintain. This
+    # removes one alternative from one rule and leaves the rest as 1Panel ships
+    # it.
+    - name: Drop the `Command` token from the WAF appFilter1 header rule
+      ansible.builtin.replace:
+        path: "{{ onepanel_waf_site_dir }}/{{ item }}/rules/header.json"
+        regexp: '"rule":\s*"TomcatBypass\|Command\|Base64"'
+        replace: '"rule": "TomcatBypass|Base64"'
+      loop: "{{ onepanel_waf_ua_command_sites }}"
+      loop_control:
+        label: "{{ item }}"
+      notify: Reload OpenResty
+      tags:
+        - waf
+
+    - name: Show the resulting appFilter1 rule
+      ansible.builtin.shell:
+        cmd: >-
+          grep -o '"rule": "TomcatBypass[^"]*"'
+          {{ onepanel_waf_site_dir }}/{{ item }}/rules/header.json
+      register: onepanel_waf_rule
+      changed_when: false
+      loop: "{{ onepanel_waf_ua_command_sites }}"
+      loop_control:
+        label: "{{ item }}"
+      tags:
+        - waf
+
+    - name: Display the resulting appFilter1 rule
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ item.stdout | trim }}"
+      loop: "{{ onepanel_waf_rule.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      tags:
+        - waf

@@ -129,6 +129,15 @@ harbor_api_ready_delay: 10
 # whole homelab, so filling in vault_harbor_dockerhub_* is worth doing before
 # CI leans on it. Harbor uses HEAD to revalidate cached manifests, which does
 # not count against the limiter.
+#
+# Every credential is `basic` - an access key and an access secret, which for
+# all three upstreams below means "a username and a token", never an account
+# password. What goes in each pair differs per registry; see vars/vault.yaml.
+#
+# Credentials on an endpoint that ALREADY EXISTS are reconciled by
+# tasks/proxy-cache.yaml, unlike the endpoints and projects themselves, which
+# are create-only. Filling in a vault value therefore takes effect on the next
+# `--tags proxy-cache` run without deleting anything.
 harbor_registries:
   - name: dockerhub
     type: docker-hub
@@ -154,14 +163,40 @@ harbor_registries:
     type: docker-registry
     url: https://quay.io
     description: Quay.io upstream (generic adapter - see note above)
-    access_key: ""
-    access_secret: ""
+    access_key: "{{ vault_harbor_quay_username | default('') }}"
+    access_secret: "{{ vault_harbor_quay_token | default('') }}"
+  # registry.k8s.io has no accounts to authenticate as - it is an anonymous,
+  # unmetered redirector in front of the regional mirrors. There is nothing to
+  # put here, so this endpoint stays credential-less on purpose.
   - name: k8s
     type: docker-registry
     url: https://registry.k8s.io
-    description: Kubernetes registry upstream
+    description: Kubernetes registry upstream (anonymous - no accounts exist)
     access_key: ""
     access_secret: ""
+
+# --------------------------------------------
+# Credential reconciliation
+# --------------------------------------------
+# Harbor never returns a stored access secret - GET /registries masks it as the
+# literal "*****" - so a run can tell whether an endpoint HAS a secret, and what
+# its username is, but not whether the secret still matches the vault. The
+# reconcile in tasks/proxy-cache.yaml therefore rewrites credentials when the
+# username changes, or when a secret appears or disappears, and leaves them
+# alone otherwise. That keeps a steady-state run idempotent.
+#
+# The gap is rotating a token WITHOUT changing the username, which looks
+# identical from the API. Set this to true for that run:
+#
+#   ansible-playbook ... --tags proxy-cache \
+#     -e harbor_registry_credentials_force_update=true
+harbor_registry_credentials_force_update: false
+
+# After writing credentials, ask Harbor to reach each upstream with them
+# (POST /registries/ping). Bad credentials do not fail the write - they fail
+# later, at pull time, as a misleading 404 or `unauthorized` on an image that
+# clearly exists - so this is where a typo in the vault gets caught.
+harbor_registry_verify_credentials: true
 
 # --------------------------------------------
 # Proxy cache projects

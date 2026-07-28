@@ -1,0 +1,70 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/rustfs/install-rustfs.yaml
+# Rewritten in full on every run - edits made on the box are lost.
+#
+# This is upstream's unit (install_rustfs.sh) with exactly one addition:
+# RequiresMountsFor, noted inline.
+
+[Unit]
+Description=RustFS Object Storage Server
+Documentation=https://rustfs.com/docs/
+After=network-online.target
+Wants=network-online.target
+# The store lives on a separate device. Without this the service races the
+# mount on boot and can start against an empty directory on the root disk.
+RequiresMountsFor={{ rustfs_data_mount }}
+
+[Service]
+# RustFS raises sd_notify(READY=1) itself, so systemd knows the difference
+# between "the process exists" and "the process is serving".
+Type=notify
+NotifyAccess=main
+User=root
+Group=root
+WorkingDirectory=/usr/local
+EnvironmentFile=-/etc/default/rustfs
+# No arguments: everything comes from the environment file. Upstream's
+# prerequisites page shows `ExecStart=... $RUSTFS_VOLUMES`, which is redundant
+# with RUSTFS_VOLUMES and - because systemd does not word-split unquoted
+# variables the way a shell does - would pass a multi-volume value as one
+# argument.
+ExecStart={{ rustfs_binary_path }}
+
+LimitNOFILE=1048576
+LimitNPROC=32768
+TasksMax=infinity
+Restart=always
+RestartSec=10s
+# The OOM killer should take almost anything on this box before it takes the
+# process holding open file handles into the object store.
+OOMScoreAdjust=-1000
+SendSIGKILL=no
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+
+# --- Sandboxing --------------------------------------------------------------
+# Upstream's set, verbatim. Two of these constrain where the store may live, so
+# they are worth knowing about before someone edits rustfs_volumes:
+#
+#   ProtectHome=true    - /home, /root and /run/user are invisible to the
+#                         process. A RUSTFS_VOLUMES path under any of them fails
+#                         with an error that reads like a permissions problem.
+#   PrivateTmp=true     - /tmp and /var/tmp are private, which is why upstream's
+#                         installer refuses a data directory under either: the
+#                         store would be invisible to everything else and gone
+#                         on restart.
+#
+# {{ rustfs_data_mount }} is under none of them.
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target

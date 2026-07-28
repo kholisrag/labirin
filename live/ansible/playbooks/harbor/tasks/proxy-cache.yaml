@@ -12,6 +12,12 @@
 # left untouched rather than reconciled, so a bandwidth limit or retention
 # policy tuned in the UI survives the next playbook run. Renaming an entry in
 # vars/main.yaml therefore creates a new one and orphans the old.
+#
+# UPSTREAM CREDENTIALS ARE THE ONE EXCEPTION. They are reconciled onto existing
+# endpoints, because the alternative - deleting an endpoint to re-create it with
+# a token - takes its proxy cache projects with it (a project's registry_id is
+# immutable, so it cannot be re-pointed at the replacement). Adding a token to
+# a cache that is already serving CI would then mean a cold cache.
 # ============================================
 
 - name: Wait for the Harbor API to become healthy
@@ -64,10 +70,55 @@
         access_key: "{{ item.access_key | default('') }}"
         access_secret: "{{ item.access_secret | default('') }}"
     status_code: 201
+  register: harbor_registry_creates
   loop: "{{ harbor_registries }}"
   loop_control:
     label: "{{ item.name }} -> {{ item.url }}"
   when: item.name not in (harbor_existing_registries.json | default([]) | map(attribute='name') | list)
+  # The body carries the upstream token now that these endpoints have one.
+  # no_log censors the loop label with it, so failures are surfaced by the two
+  # tasks below instead of arriving as "item=(censored due to no_log)".
+  failed_when: false
+  # Referenced through the REGISTERED NAME, not as a bare `status`. Module
+  # return values are not in scope for changed_when in ansible-core 2.21 - a
+  # bare `status` is simply undefined, and `| default(0)` then turns the
+  # conditional into a silent always-false. Ansible does bind the register name
+  # to the current result before evaluating this, loop item by loop item.
+  changed_when: harbor_registry_creates.status | default(0) == 201
+  no_log: true
+  tags:
+    - proxy-cache
+
+# EVERY TASK THAT LOOPS OVER A REGISTERED RESULT NEEDS no_log, INCLUDING THE
+# ASSERTS. A registered result carries the loop item that produced it, so
+# `harbor_registry_creates.results[*].item` is the vars/main.yaml entry with the
+# token still in it - and Ansible prints the whole item, not the label, when a
+# looped task FAILS. An assert without no_log therefore prints the token at
+# exactly the moment something goes wrong. Reduce to name/status/message here,
+# under no_log, and let the assert below work on that.
+- name: Reduce the creation results to name, status and message
+  ansible.builtin.set_fact:
+    harbor_registry_create_failures: >-
+      {{ harbor_registry_create_failures | default([])
+         + ([item.item.name ~ ' (HTTP ' ~ (item.status | default('no response')) ~ '): '
+             ~ (item.json.errors[0].message | default(item.msg) | default(''))]
+            if (item.status | default(0)) != 201 else []) }}
+  loop: "{{ harbor_registry_creates.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: not (item.skipped | default(false))
+  no_log: true
+  tags:
+    - proxy-cache
+
+# Not looped, so there is no `item` to print - the fail_msg is the reduced list.
+- name: Fail on any registry endpoint Harbor refused to create
+  ansible.builtin.assert:
+    that:
+      - (harbor_registry_create_failures | default([])) | length == 0
+    fail_msg: >-
+      Harbor refused to create:
+      {{ harbor_registry_create_failures | default([]) | join(' / ') }}
   tags:
     - proxy-cache
 
@@ -90,6 +141,241 @@
   ansible.builtin.set_fact:
     harbor_registry_ids: >-
       {{ dict(harbor_registries_after.json | map(attribute='name') | zip(harbor_registries_after.json | map(attribute='id'))) }}
+  tags:
+    - proxy-cache
+
+# ---------------------------------------------------------------
+# Upstream credentials
+# ---------------------------------------------------------------
+# Only the endpoints that already existed can be out of date here - the ones
+# just created were POSTed with whatever the vault holds. Both go through the
+# same comparison anyway, so a partially-created set converges in one run.
+#
+# GET /registries returns credential.access_key in the clear and replaces
+# credential.access_secret with the literal "*****" (and omits it entirely when
+# no secret is stored). So "is a secret set?" is answerable and "is it the right
+# secret?" is not; see harbor_registry_credentials_force_update in vars/main.yaml.
+- name: Start from an empty set of credential targets
+  ansible.builtin.set_fact:
+    harbor_registry_credential_targets: []
+  tags:
+    - proxy-cache
+
+# The three clauses are: the username changed; a secret appeared or was
+# withdrawn (emptying both vault values reverts an endpoint to anonymous); or
+# the operator said the secret changed underneath an unchanged username.
+#
+# Every intermediate here is a STRING, and the comparisons are on lengths
+# rather than on booleans, so nothing depends on whether an expression came
+# back as a bool or as the word "False". Only the force flag goes through
+# `| bool`, because it is meant to arrive as `-e ...=true` - a string.
+- name: Work out which registry endpoints need their credentials rewritten
+  ansible.builtin.set_fact:
+    harbor_registry_credential_targets: >-
+      {{ harbor_registry_credential_targets
+         + ([item.name] if (
+              harbor_registry_declared_key != harbor_registry_live_key
+              or (harbor_registry_declared_secret | length > 0)
+                 != (harbor_registry_live_secret | length > 0)
+              or (harbor_registry_credentials_force_update | bool
+                  and harbor_registry_declared_secret | length > 0)
+            ) else []) }}
+  vars:
+    harbor_registry_live: >-
+      {{ harbor_registries_after.json
+         | selectattr('name', 'equalto', item.name)
+         | first | default({}, true) }}
+    harbor_registry_live_credential: >-
+      {{ harbor_registry_live.credential | default({}, true) }}
+    harbor_registry_live_key: >-
+      {{ harbor_registry_live_credential.access_key | default('', true) }}
+    # "*****" when Harbor holds a secret, empty when it holds none.
+    harbor_registry_live_secret: >-
+      {{ harbor_registry_live_credential.access_secret | default('', true) }}
+    harbor_registry_declared_key: "{{ item.access_key | default('') }}"
+    harbor_registry_declared_secret: "{{ item.access_secret | default('') }}"
+  loop: "{{ harbor_registries }}"
+  loop_control:
+    label: "{{ item.name }}"
+  # The loop item is a vars/main.yaml entry with the token in it; a failure here
+  # would print it. The fact this builds is names only, and it is reported by
+  # "Report the credential reconciliation" below.
+  no_log: true
+  tags:
+    - proxy-cache
+
+# PUT /registries/{id} takes RegistryUpdate, which is FLAT - credential_type,
+# access_key and access_secret sit at the top level. That is not the shape
+# POST /registries takes (a nested `credential` object), and posting the nested
+# form here is the trap: go-swagger drops the unknown field, Harbor answers 200,
+# and nothing has changed.
+#
+# Unlike ping below, this endpoint does not health-check what it stores.
+- name: Write the upstream credentials onto those registry endpoints
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/registries/{{ harbor_registry_ids[item.name] }}"
+    method: PUT
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      credential_type: basic
+      access_key: "{{ item.access_key | default('') }}"
+      access_secret: "{{ item.access_secret | default('') }}"
+    status_code: 200
+  register: harbor_registry_credential_writes
+  loop: "{{ harbor_registries | selectattr('name', 'in', harbor_registry_credential_targets) | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  # ansible.cfg sets `diff: always`, and the body is a token. no_log censors the
+  # loop label along with it, so the failure is reported by the next task.
+  failed_when: false
+  # Through the registered name - see the note on the creation task above.
+  changed_when: harbor_registry_credential_writes.status | default(0) == 200
+  no_log: true
+  tags:
+    - proxy-cache
+
+# Reduced under no_log for the same reason as the creation results above: the
+# registered result still carries the token that produced it.
+- name: Reduce the credential write results to name, status and message
+  ansible.builtin.set_fact:
+    harbor_registry_credential_failures: >-
+      {{ harbor_registry_credential_failures | default([])
+         + ([item.item.name ~ ' (HTTP ' ~ (item.status | default('no response')) ~ '): '
+             ~ (item.json.errors[0].message | default(item.msg) | default(''))]
+            if (item.status | default(0)) != 200 else []) }}
+  loop: "{{ harbor_registry_credential_writes.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  no_log: true
+  tags:
+    - proxy-cache
+
+# Some adapters validate on write and some do not - the docker-hub one builds a
+# client and logs in to hub.docker.com during the update, so a bad token comes
+# back as a 500 here rather than waiting for the ping below. Harbor's own
+# message for that is a bare "internal server error"; the useful one is in the
+# core log, which the fail_msg points at.
+#
+# Either way the endpoint keeps its previous credential - nothing is
+# half-written by a rejected update.
+- name: Fail on any credential Harbor refused to store
+  ansible.builtin.assert:
+    that:
+      - (harbor_registry_credential_failures | default([])) | length == 0
+    fail_msg: >-
+      Harbor refused the credentials for:
+      {{ harbor_registry_credential_failures | default([]) | join(' / ') }}.
+      Check the matching vault_harbor_*_username / _token in vars/vault.yaml.
+      Harbor logs the upstream's own words - the reason behind a 500 here is in:
+      docker logs --since 10m harbor-core 2>&1 | grep -i error
+  tags:
+    - proxy-cache
+
+# no_log above hides the loop labels too, so say what happened here instead.
+- name: Report the credential reconciliation
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        'Upstream credentials rewritten for: '
+        ~ (harbor_registry_credential_targets | join(', '))
+        if harbor_registry_credential_targets | length > 0
+        else 'Upstream credentials already match the vault on every endpoint'
+      }}
+  tags:
+    - proxy-cache
+
+# `{"id": N}` makes Harbor load the stored endpoint - including the decrypted
+# secret, which is why this can validate a credential the API will not show us -
+# and run the adapter's health check against the upstream.
+#
+# Not fatal by itself. An anonymous endpoint can report unhealthy for reasons
+# that have nothing to do with this playbook (quay.io answers /v2/ with a 401
+# challenge, upstreams have outages), and failing the run on that would make
+# Harbor's own availability depend on four third parties being up. The assert
+# below narrows it to the case that is unambiguously our bug.
+- name: Ping every registry endpoint with its stored credentials
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/registries/ping"
+    method: POST
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      id: "{{ harbor_registry_ids[item.name] }}"
+    status_code: 200
+  register: harbor_registry_pings
+  loop: "{{ harbor_registries }}"
+  loop_control:
+    label: "{{ item.name }}"
+  failed_when: false
+  changed_when: false
+  when: harbor_registry_verify_credentials | bool
+  # Loops over the credential-bearing list; see the note above the creation
+  # results. The outcome is reported by name below.
+  no_log: true
+  tags:
+    - proxy-cache
+
+- name: Start from no unhealthy registry endpoints
+  ansible.builtin.set_fact:
+    harbor_registry_unhealthy: []
+  tags:
+    - proxy-cache
+
+# Accumulated one result at a time rather than filtered in a single expression
+# because a `uri` task that fails before it gets a response has no `status` at
+# all, and selectattr() on the missing key is a templating error rather than a
+# match. `| default(0)` reads that case as unhealthy, which is what it is.
+- name: Collect the registry endpoints that failed their ping
+  ansible.builtin.set_fact:
+    harbor_registry_unhealthy: >-
+      {{ harbor_registry_unhealthy
+         + ([item.item.name] if (item.status | default(0)) != 200 else []) }}
+  loop: "{{ harbor_registry_pings.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: not (item.skipped | default(false))
+  no_log: true
+  tags:
+    - proxy-cache
+
+- name: Report the registry endpoints that failed their ping
+  ansible.builtin.debug:
+    msg: >-
+      Unhealthy upstream(s): {{ harbor_registry_unhealthy | join(', ') }}.
+      Pulls through the matching proxy cache project will fail until this is
+      fixed - check the upstream is reachable from this host.
+  when: harbor_registry_unhealthy | length > 0
+  tags:
+    - proxy-cache
+
+# A credentialed endpoint that cannot ping is a different thing from an
+# anonymous one that cannot: the credentials are ours, they are wrong, and they
+# would otherwise surface as a 404 on an image that plainly exists.
+# Not looped over harbor_registries - that list holds the tokens, and a failing
+# looped assert prints its item. The task-level var reduces it to names before
+# anything can be displayed.
+- name: Assert no credentialed registry endpoint was rejected by its upstream
+  vars:
+    harbor_registry_credentialed: >-
+      {{ harbor_registries
+         | selectattr('access_secret', 'defined')
+         | selectattr('access_secret', 'ne', '')
+         | map(attribute='name') | list }}
+  ansible.builtin.assert:
+    that:
+      - harbor_registry_unhealthy | intersect(harbor_registry_credentialed) | length == 0
+    fail_msg: >-
+      Harbor could not authenticate to
+      {{ harbor_registry_unhealthy | intersect(harbor_registry_credentialed) | join(', ') }}
+      with the credentials in vars/vault.yaml. The access key is a username (or
+      a Quay robot account, or '$oauthtoken') and the secret is a token, never
+      an account password.
+  when: harbor_registry_verify_credentials | bool
   tags:
     - proxy-cache
 

@@ -64,6 +64,41 @@
   tags:
     - always
 
+# Half a credential is the likely mistake with these: a token pasted with no
+# username, or a username left behind after a token was cleared. Harbor stores
+# either without complaint and then authenticates as nobody, which surfaces
+# much later as a rate limit or a 404 on a private image. Cheap to catch here.
+#
+# Reduced to names first, and NOT asserted with a loop over harbor_registries:
+# that list holds the tokens, and Ansible prints the whole loop item - not the
+# label - when a looped task fails. The assert would leak the token in the one
+# situation it exists to report.
+- name: Find upstream credentials that are only half filled in
+  ansible.builtin.set_fact:
+    harbor_registry_half_credentials: >-
+      {{ (harbor_registries
+          | selectattr('access_key', 'defined') | selectattr('access_key', 'ne', '')
+          | selectattr('access_secret', 'defined') | selectattr('access_secret', 'eq', '')
+          | map(attribute='name') | list)
+         + (harbor_registries
+            | selectattr('access_secret', 'defined') | selectattr('access_secret', 'ne', '')
+            | selectattr('access_key', 'defined') | selectattr('access_key', 'eq', '')
+            | map(attribute='name') | list) }}
+  tags:
+    - always
+
+- name: Assert every upstream credential is a complete pair
+  ansible.builtin.assert:
+    that:
+      - harbor_registry_half_credentials | length == 0
+    fail_msg: >-
+      Registry endpoint(s) {{ harbor_registry_half_credentials | join(', ') }}
+      have only half a credential - one of the access key / access secret is
+      set and the other is empty. Fill in both or neither:
+      ansible-vault edit live/ansible/playbooks/harbor/vars/vault.yaml
+  tags:
+    - always
+
 # ---------------------------------------------------------------
 # Is the installer tree already at the version we want?
 # ---------------------------------------------------------------

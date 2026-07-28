@@ -309,8 +309,8 @@ pull-through proxy cache on `harbor-01` (`live/ansible/playbooks/harbor/`), and
 the path after the project name is the upstream path verbatim.
 
 [`oprek-sh/fireactions-images`](https://github.com/oprek-sh/fireactions-images)
-derives from the same Hostinger base, pinned by digest, and adds exactly two
-things — both of which are unreachable by any other mechanism:
+derives from the same Hostinger base, pinned by digest, and adds three things —
+each unreachable by any other mechanism:
 
 - **A `run.sh` shim.** Fireactions' in-guest agent starts the runner with a fixed
   six-variable environment allowlist, so a Dockerfile `ENV`, `/etc/environment`,
@@ -320,6 +320,23 @@ things — both of which are unreachable by any other mechanism:
   which is why Athens was configured correctly for days and served nothing while
   CI stayed green. Measured in
   [oprek-sh/oprek.sh#133](https://github.com/oprek-sh/oprek.sh/issues/133).
+- **A patched `Runner.Worker.dll`**, from `-a1abf5a` onward, so `actions/cache`
+  reaches `actions-cache.internal.khol.is` instead of GitHub. The shim is not
+  enough on its own: the runner reads `ACTIONS_RESULTS_URL` out of every job
+  message and writes it over whatever the environment held — a second overwrite,
+  independent of the allowlist above.
+  [oprek-sh/oprek.sh#131](https://github.com/oprek-sh/oprek.sh/issues/131).
+
+> [!WARNING]
+> **The runner can undo that third one by itself.** `--jitconfig` leaves no
+> `config.sh --disableupdate`, so a mid-life self-update replaces `/opt/runner/bin`
+> and the patch is gone. It degrades **silently** — the cache server proxies
+> anything it does not serve straight to GitHub, so no job fails and nothing goes
+> red. The image warns at boot; the evidence is the server's own counters:
+>
+> ```bash
+> curl -s https://actions-cache.internal.khol.is/metrics | grep '^cache_'
+> ```
 
 > [!IMPORTANT]
 > **The package is private, and the escape hatch changes because of it.**

@@ -32,14 +32,17 @@ harbor_version_marker: /etc/harbor-installed-version
 # --------------------------------------------
 # Identity
 # --------------------------------------------
-# The DNS name every client uses. It is an Unbound ALIAS onto
-# <panel-host>, not an A record for this guest: OpenResty on the
-# 1Panel VM terminates TLS with the Let's Encrypt wildcard and reverse-proxies
-# to port 80 here. The guest itself answers to <harbor-guest>.
+# The DNS name every client uses. It is an Unbound ALIAS onto the 1Panel host,
+# not an A record for this guest: OpenResty on the 1Panel VM terminates TLS
+# with the Let's Encrypt wildcard and reverse-proxies to port 80 here. The
+# guest itself answers to a different name - vault_harbor_guest_host.
+#
+# Vaulted, like every name in this estate: the tree is public, and a resolvable
+# name is the first half of a reachable service. See live/ansible/README.md.
 #
 # See live/ansible/playbooks/opnsense/vars/vault.yaml (unbound_host_aliases)
 # and live/ansible/playbooks/1panel/manage-websites.yaml.
-harbor_registry_host: <registry-host>
+harbor_registry_host: "{{ vault_harbor_registry_host }}"
 
 # When harbor_external_url is non-empty the role's template emits it and
 # Harbor ignores harbor_hostname - but the role still asserts the hostname is
@@ -208,6 +211,8 @@ harbor_registry_verify_credentials: true
 #     -> <registry-host>/dockerhub/library/alpine:3
 #   ghcr.io/hostinger/fireactions-images/ubuntu24.04:2026...
 #     -> <registry-host>/ghcr/hostinger/fireactions-images/ubuntu24.04:2026...
+#
+# <registry-host> is harbor_registry_host, which is vaulted.
 #
 # The `library/` prefix is NOT optional for Docker Hub official images. Docker
 # only expands the bare name `alpine` into `library/alpine` for Docker Hub

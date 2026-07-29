@@ -44,6 +44,12 @@ athens_bind_address: 127.0.0.1
 # install-athens.yaml fails the run if this ever collides again.
 athens_port: 3300
 
+# The public name of the TLS website in front of this proxy - an Unbound ALIAS
+# onto the 1Panel host, not an A record, because Athens has no second guest.
+# Vaulted: this tree is public and a resolvable name is the first half of a
+# reachable service. See live/ansible/README.md.
+athens_goproxy_host: "{{ vault_athens_goproxy_host }}"
+
 # ============================================
 # Module fetching
 # ============================================
@@ -81,8 +87,12 @@ athens_upstream_proxy: https://proxy.golang.org
 # Widening this is not the dangerous part; widening the *credential* is. See
 # the README on why the GitHub App installation scope, not this list, is the
 # real boundary.
+#
+# The org name itself is vaulted in ../../vars/github-identity.yaml: this list
+# is the set of paths the proxy will go direct for, so it names the org whose
+# private modules matter.
 athens_private_patterns:
-  - github.com/<org>/*
+  - "github.com/{{ vault_github_org }}/*"
 
 # ============================================
 # Timeouts and concurrency

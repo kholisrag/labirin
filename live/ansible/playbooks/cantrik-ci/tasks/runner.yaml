@@ -159,7 +159,7 @@
       #
       # This runner holds /dev/kvm and is the ONLY one that does. It exists
       # because a fireactions job runs inside Firecracker, and Firecracker
-      # cannot expose VMX to its guest (<repo> ADR-0021).
+      # cannot expose VMX to its guest.
       [Unit]
       Description=GitHub Actions runner (Tier 1, holds /dev/kvm)
       After=network-online.target

@@ -11,11 +11,41 @@ rediscovered.
 
 Order matters: each one fails before the next is reached.
 
-### 1. Split DNS for `<internal-domain>`
+### 1. Split DNS for the internal zone
 
-Nothing in this repo resolves without it. Every playbook targets a
-`*.<internal-domain>` name served by Unbound on OPNsense, which is not a public
-zone.
+Nothing in this repo resolves without it. Every playbook targets a name under a
+private wildcard zone served by Unbound on OPNsense, which is not a public zone.
+
+> [!IMPORTANT]
+> **Names are vaulted, and this README will not tell you what they are.** This
+> repository is public. A hostname is not a credential, but it is the first half
+> of a reachable service, and the estate behind these playbooks is small enough
+> that a name is an address. So every FQDN lives in `ansible-vault` and the
+> plain tree carries only the reference.
+>
+> Read the real values the same way a playbook does:
+>
+> ```bash
+> ansible-vault view live/ansible/playbooks/<playbook>/vars/vault.yaml
+> ```
+>
+> The conventions, which the rest of this README uses as placeholders:
+>
+> | Placeholder | Vault key | Owner |
+> | --- | --- | --- |
+> | `<internal-domain>` | the private wildcard zone | OPNsense |
+> | `<panel-host>` | `vault_panel_host` | `1panel` |
+> | `<registry-host>` | `vault_harbor_registry_host` | `harbor` |
+> | `<s3-host>` / `<console-host>` | `vault_rustfs_s3_host` / `vault_rustfs_console_host` | `rustfs` |
+> | `<goproxy-host>` | `vault_athens_goproxy_host` | `athens` |
+> | `<cache-host>` | `vault_gha_cache_host` | `gha-cache` |
+>
+> **A name has exactly one home.** A playbook that needs another service's name
+> cross-loads that service's vault in its `vars_files` rather than keeping a
+> copy — the same rule `manage-databases.yaml` already follows for the
+> `gha-cache` database password. A value in two files is a value that can
+> disagree, and here the disagreement surfaces as a website created for a name
+> Unbound does not alias, which reads as a DNS fault rather than a drifted copy.
 
 ```bash
 # macOS
@@ -33,11 +63,11 @@ Without it the failure is `Could not resolve host` from `curl`, or
 DNS scope.
 
 > [!IMPORTANT]
-> **This resolver covers `<internal-domain>` and nothing else.** `<public-zone>` names
-> still resolve publicly, and the two differ. The OPNsense vault sets
-> `opnsense_host` to `opnsense.<public-zone>`, which therefore does **not** resolve
-> from a workstation configured this way — so every OPNsense playbook is run
-> with an override:
+> **This resolver covers the internal zone and nothing else.** Names in the
+> parent public zone still resolve publicly, and the two differ. The OPNsense
+> vault sets `opnsense_host` to a name in the **public** zone, which therefore
+> does **not** resolve from a workstation configured this way — so every
+> OPNsense playbook is run with an override naming the internal equivalent:
 >
 > ```bash
 > ansible-playbook live/ansible/playbooks/opnsense/manage-local-dns.yaml \
@@ -53,7 +83,7 @@ two disagree and neither is wrong:
 
 ```bash
 dig +short @192.168.3.102 <name>.<internal-domain>   # the truth
-sudo dscacheutil -flushcache                        # then the OS agrees
+sudo dscacheutil -flushcache                         # then the OS agrees
 ```
 
 ### 2. The virtualenv, at `.labirin_venv`

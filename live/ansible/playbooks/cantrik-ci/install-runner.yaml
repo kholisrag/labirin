@@ -1,6 +1,6 @@
 ---
-# Installs a plain GitHub Actions runner directly on cantrik-ci, so that
-# <repo>'s Tier 1 jobs can open /dev/kvm and boot a real Machine.
+# Installs a plain GitHub Actions runner directly on cantrik-ci, so that the
+# consuming project's Tier 1 jobs can open /dev/kvm and boot a nested VM.
 #
 #   ansible-playbook -i inventories/petruk-pve/petruk-pve0/pve-vms/cantrik-ci/inventory.yaml \
 #     playbooks/cantrik-ci/install-runner.yaml \
@@ -13,6 +13,9 @@
 
   vars_files:
     - vars/main.yaml
+    # The GitHub org and repo this runner registers against. Vaulted and
+    # shared, not copied - see the note in that file.
+    - ../../vars/github-identity.yaml
 
   handlers:
     - name: Restart github-runner

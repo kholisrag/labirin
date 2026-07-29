@@ -116,12 +116,12 @@ ansible-vault edit live/ansible/playbooks/opnsense/vars/vault.yaml
 ```
 
 Append to `dnsmasq_hosts` (the `.<public-zone>` domain here is the DHCP reservation's
-own zone, mirroring `harbor.<public-zone>` — the name clients use is the Unbound alias
+own zone, mirroring `harbor.<dhcp-zone>` — the name clients use is the Unbound alias
 further down, not this):
 
 ```yaml
   - description: RustFS Object Storage Host 01
-    domain: rustfs.<public-zone>
+    domain: rustfs.<dhcp-zone>
     hardware_addr:
       - BC:24:11:88:AB:23
     host: rustfs-01

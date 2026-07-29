@@ -145,8 +145,7 @@ fireactions_log_level: info
 # A pool's runners register EITHER with an organisation or with a single
 # repository - exactly one of `organization` / `repository` per pool. Every pool
 # below is organisation-scoped; the repository-scoped tier that used to serve
-# personal repos under `kholisrag` was retired once that work moved into the
-# <org> org.
+# personal repos was retired once that work moved into the org.
 #
 # Repository scope is still available (it is the fork's addition, and the only
 # option for personal accounts, which have no runner groups). To use it, set
@@ -154,7 +153,9 @@ fireactions_log_level: info
 # and install the App on that repo's owner with Administration: read+write. The
 # installation is discovered automatically per scope, so no installation_id
 # needs pinning.
-fireactions_github_organization: <org>
+# Vaulted in ../../vars/github-identity.yaml - see the note there on why the
+# org name has one home rather than a copy per playbook.
+fireactions_github_organization: "{{ vault_github_org }}"
 # 1 is the "Default" self-hosted runner group. Organisation pools only.
 fireactions_github_runner_group_id: 1
 
@@ -184,51 +185,55 @@ fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key
 #   ghcr.io/<org>/fireactions-images/ubuntu24.04:TAG
 #     -> <registry-host>/ghcr/<org>/fireactions-images/ubuntu24.04:TAG
 #
-# NOW OURS, not Hostinger's directly. <org>/fireactions-images derives from
-# the same upstream image, pinned by digest, and adds two things that cannot be
-# set any other way:
+# NOW OURS, not Hostinger's directly. Our own fireactions-images derives from
+# the same upstream image, pinned by digest, and adds three things that cannot
+# be set any other way:
 #
 #   1. A run.sh shim. Fireactions' in-guest agent starts the runner with a fixed
 #      six-variable environment allowlist, so a Dockerfile ENV, /etc/environment,
 #      a systemd Environment= and a pool metadata: entry all go nowhere. The shim
-#      sources /opt/runner/env.d/*.sh and execs upstream's launcher. This is what
-#      <org>/<repo>#116 and #131 need and neither could have on its own.
+#      sources /opt/runner/env.d/*.sh and execs upstream's launcher. Two
+#      separate consumer requirements need this and neither could have it on
+#      its own.
 #
 #   2. /etc/resolv.conf pointing at 10.10.1.1. The upstream image bakes
-#      1.1.1.1 and 8.8.8.8, so NO microVM could resolve *.<internal-domain> —
-#      measured, <org>/<repo>#133. Athens was configured correctly for days
-#      and served nothing, because GOPROXY's pipe separators fall through to the
-#      public proxy on any error including an unresolvable name, so CI stayed
-#      green throughout.
+#      1.1.1.1 and 8.8.8.8, so NO microVM could resolve this estate's internal
+#      wildcard — measured. Athens was configured correctly for days and served
+#      nothing, because GOPROXY's pipe separators fall through to the public
+#      proxy on any error including an unresolvable name, so CI stayed green
+#      throughout.
 #
 #   3. A patched Runner.Worker.dll, from -a1abf5a onward. The runner reads
 #      ACTIONS_RESULTS_URL out of every job message and writes it over whatever
 #      the environment held — a SECOND overwrite, independent of the allowlist
 #      in (1), which the shim alone cannot defeat. The image renames the UTF-16
 #      literal so the runner overwrites a name nothing sends, and env.d sets the
-#      real one to https://<cache-host>/. <org>/<repo>#131.
+#      real one to the internal cache endpoint.
 #
 #      This is the one thing here the runner can undo by itself: --jitconfig
 #      leaves no `config.sh --disableupdate`, so a mid-life self-update replaces
 #      /opt/runner/bin and the patch is gone. It degrades to GitHub's cache
 #      silently — the cache server proxies what it does not serve, so nothing
 #      reddens. The image warns at boot; the counters at
-#      https://<cache-host>/metrics are the actual signal.
+#      the cache server's /metrics are the actual signal.
 #
 # THE PACKAGE IS PRIVATE, and that is fine on this path specifically. containerd
 # here carries no credentials, but it does not need any: Harbor's ghcr proxy
 # authenticates upstream with vault_harbor_ghcr_*, and its own project is public.
-# Verified before this switch — an anonymous token against
-# /v2/ghcr/<org>/fireactions-images/ubuntu24.04/manifests/<tag> returns 200.
-# A DIRECT ghcr.io/<org>/... reference would NOT work, which matters because
-# that is exactly what the emergency escape hatch above would reach for. Fall
-# back to ghcr.io/hostinger/... instead, which is public.
+# Verified before this switch — an anonymous token against the mirrored
+# manifest path returns 200. A DIRECT ghcr.io/<org>/... reference would NOT
+# work, which matters because that is exactly what the emergency escape hatch
+# above would reach for. Fall back to ghcr.io/hostinger/... instead, which is
+# public.
 #
 # The tag is <base-image-digest>-<commit-sha7>: both inputs that can change the
 # image. No :latest is published, deliberately.
-# Source: https://github.com/<org>/fireactions-images
-fireactions_registry_mirror: <registry-host>
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/<org>/fireactions-images/ubuntu24.04:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-a1abf5a"
+#
+# Both halves of the reference are vaulted - the mirror is Harbor's registry
+# host, read from ../harbor/vars/vault.yaml rather than copied, and the image
+# path embeds the GitHub org. Only the tag is a digest and stays in the clear.
+fireactions_registry_mirror: "{{ vault_harbor_registry_host }}"
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-a1abf5a"
 
 # --------------------------------------------
 # Pools
@@ -302,13 +307,13 @@ fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/<org>/fireacti
 #   runs-on: [self-hosted, fireactions] -> ANY tier, whichever is idle. Handy,
 #                                        but it can hand a trivial job a large
 #                                        microVM. Prefer the explicit tier.
-# Every pool is org-scoped, so only workflows in <org> repositories can see
+# Every pool is org-scoped, so only workflows in this org's repositories can see
 # these runners. Should a repository-scoped pool ever be added back, note that
 # the two scopes are never interchangeable - GitHub does not offer an org runner
 # to a repo-scoped workflow, or vice versa, even with identical labels.
 fireactions_pools:
   - name: fireactions-small
-    # 8 per host = 32 org-wide across four hosts. Every <repo> job targets this;
+    # 8 per host = 32 org-wide across four hosts. Every ordinary job targets this;
     # see the fan-out note in the memory budget above before lowering it, and the
     # CPU note before raising it - 8 is roughly where this host stops paying off.
     replicas: 8

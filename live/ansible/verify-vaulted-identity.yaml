@@ -1,0 +1,168 @@
+---
+# Proves every hostname and identity that moved into ansible-vault still
+# resolves - without printing any of the values.
+#
+# This exists because the failure it guards against is SILENT at the only point
+# anyone would look. A name that lost its vault key is undefined, and Ansible
+# does not evaluate an undefined variable until something templates it: a
+# playbook whose vars_files no longer reach the vault it needs still passes
+# `--syntax-check`, and only fails partway through a real run against live
+# infrastructure. Each play below loads exactly the vars_files its real
+# playbook loads and forces the consumed variables to render.
+#
+#   ansible-playbook live/ansible/verify-vaulted-identity.yaml
+#
+# Run it after touching a vault, a vars_files list, or any *_host variable.
+#
+- name: 1panel websites and WAF overrides
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - playbooks/1panel/vars/main.yaml
+    - playbooks/1panel/vars/vault.yaml
+    - playbooks/harbor/vars/vault.yaml
+    - playbooks/rustfs/vars/vault.yaml
+    - playbooks/athens/vars/vault.yaml
+    - playbooks/gha-cache/vars/vault.yaml
+  tasks:
+    - name: Every website has a resolved primary domain and matching domains entry
+      ansible.builtin.assert:
+        that:
+          - item.primary_domain is string
+          - item.primary_domain | length > 0
+          - item.domains | map(attribute='domain') | select('equalto', item.primary_domain) | list | length > 0
+        quiet: true
+        fail_msg: "unresolved primary_domain for site {{ item.remark }}"
+      loop: "{{ onepanel_websites }}"
+      loop_control:
+        label: "{{ item.remark }}"
+
+    - name: WAF override lists resolve to non-empty domains
+      ansible.builtin.assert:
+        that:
+          - item is string
+          - item | length > 0
+        quiet: true
+        fail_msg: "unresolved WAF site entry"
+      loop: "{{ onepanel_waf_ua_command_sites + onepanel_waf_no_body_scan_sites }}"
+      loop_control:
+        label: "waf site {{ ansible_loop.index }}"
+        extended: true
+
+    - name: The acme certificate variables resolve
+      ansible.builtin.assert:
+        that:
+          - item | length > 0
+        quiet: true
+      loop:
+        - "{{ cert_description }}"
+        - "{{ cert_directory }}"
+        - "{{ cert_domain }}"
+      loop_control:
+        label: "cert var {{ ansible_loop.index }}"
+        extended: true
+
+- name: Harbor identity
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - playbooks/harbor/vars/main.yaml
+    - playbooks/harbor/vars/vault.yaml
+  tasks:
+    - name: Registry identity resolves
+      ansible.builtin.assert:
+        that:
+          - harbor_registry_host | length > 0
+          - harbor_hostname == harbor_registry_host
+          - harbor_external_url == 'https://' + harbor_registry_host
+        quiet: true
+
+- name: RustFS identity
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - playbooks/rustfs/vars/main.yaml
+    - playbooks/rustfs/vars/vault.yaml
+  tasks:
+    - name: S3 and console identity resolve and differ
+      ansible.builtin.assert:
+        that:
+          - rustfs_s3_host | length > 0
+          - rustfs_console_host | length > 0
+          - rustfs_s3_host != rustfs_console_host
+          - rustfs_s3_endpoint == 'https://' + rustfs_s3_host
+        quiet: true
+
+- name: Gha-cache identity
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - playbooks/gha-cache/vars/main.yaml
+    - playbooks/gha-cache/vars/vault.yaml
+    - playbooks/rustfs/vars/main.yaml
+    - playbooks/rustfs/vars/vault.yaml
+  tasks:
+    - name: Cache host and its RustFS backend resolve
+      ansible.builtin.assert:
+        that:
+          - gha_cache_host | length > 0
+          - gha_cache_s3_endpoint == rustfs_s3_endpoint
+        quiet: true
+
+- name: Athens identity
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - playbooks/athens/vars/main.yaml
+    - playbooks/athens/vars/vault.yaml
+    - vars/github-identity.yaml
+  tasks:
+    - name: Proxy host and private module patterns resolve
+      ansible.builtin.assert:
+        that:
+          - athens_goproxy_host | length > 0
+          - athens_private_patterns | length > 0
+          - athens_private_patterns[0].startswith('github.com/')
+          - athens_private_patterns[0].endswith('/*')
+        quiet: true
+
+- name: Fireactions identity
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - playbooks/fireactions/vars/main.yaml
+    - playbooks/fireactions/vars/vault.yaml
+    - vars/github-identity.yaml
+    - playbooks/harbor/vars/vault.yaml
+  tasks:
+    - name: Org, mirror and runner image resolve
+      ansible.builtin.assert:
+        that:
+          - fireactions_github_organization | length > 0
+          - fireactions_registry_mirror == vault_harbor_registry_host
+          - fireactions_runner_image.startswith(fireactions_registry_mirror + '/')
+        quiet: true
+
+    - name: Every pool names the vaulted organisation
+      ansible.builtin.assert:
+        that:
+          - item.runner.organization == fireactions_github_organization
+          - item.runner.image == fireactions_runner_image
+        quiet: true
+      loop: "{{ fireactions_pools }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+- name: Cantrik-ci identity
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - playbooks/cantrik-ci/vars/main.yaml
+    - vars/github-identity.yaml
+  tasks:
+    - name: Runner owner and repo resolve
+      ansible.builtin.assert:
+        that:
+          - github_runner_owner | length > 0
+          - github_runner_repo | length > 0
+        quiet: true

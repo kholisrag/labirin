@@ -57,21 +57,22 @@ rustfs_version_marker: /etc/rustfs-installed-version
 # --------------------------------------------
 # Identity
 # --------------------------------------------
-# Two names, and they are not interchangeable:
+# Three names, and they are not interchangeable. All vaulted - the tree is
+# public, and a resolvable name is the first half of a reachable service. See
+# live/ansible/README.md.
 #
-#   <s3-host>          - the S3 endpoint every client signs
-#                                      against. An Unbound ALIAS onto
-#                                      <panel-host>.
-#   <console-host>  - the web console. Also an alias.
-#   <rustfs-guest>       - an A record for the guest itself, for
-#                                      SSH, Ansible and the 1Panel upstream.
+#   vault_rustfs_s3_host       - the S3 endpoint every client signs against.
+#                                An Unbound ALIAS onto the 1Panel host.
+#   vault_rustfs_console_host  - the web console. Also an alias.
+#   vault_rustfs_guest_host    - an A record for the guest itself, for SSH,
+#                                Ansible and the 1Panel upstream.
 #
 # The S3 API and the console MUST be separate hostnames rather than paths on
 # one. S3 clients sign the request path (SigV4); serving the API under, say,
 # /s3/ makes RustFS read `s3` as the bucket name and every request fails
 # signature validation. https://docs.rustfs.com/integration/nginx
-rustfs_s3_host: <s3-host>
-rustfs_console_host: <console-host>
+rustfs_s3_host: "{{ vault_rustfs_s3_host }}"
+rustfs_console_host: "{{ vault_rustfs_console_host }}"
 rustfs_s3_endpoint: "https://{{ rustfs_s3_host }}"
 rustfs_console_url: "https://{{ rustfs_console_host }}"
 
@@ -134,14 +135,12 @@ rustfs_secret_key: "{{ vault_rustfs_secret_key }}"
 rustfs_region: us-east-1
 
 # RUSTFS_SERVER_DOMAINS is deliberately NOT set, so only path-style addressing
-# works: https://<s3-host>/<bucket>/<key>, not
-# https://<bucket>.<s3-host>/<key>.
+# works: https://<s3-host>/<bucket>/<key>, not https://<bucket>.<s3-host>/<key>.
 #
 # The blocker is the certificate, not RustFS. The wildcard OPNsense renews
-# covers *.<internal-domain>, which matches exactly one label - so
-# `mybucket.<s3-host>` is two levels deep and does NOT verify.
-# Enabling virtual-host style would need a *.<s3-host> wildcard
-# issued and pushed into 1Panel, plus a matching DNS wildcard in Unbound.
+# matches exactly one label - so `<bucket>.<s3-host>` is two levels deep and
+# does NOT verify. Enabling virtual-host style would need a wildcard one level
+# deeper issued and pushed into 1Panel, plus a matching DNS wildcard in Unbound.
 #
 # Practical consequence: SDKs must be configured for path style -
 # `--endpoint-url` plus `AWS_S3_FORCE_PATH_STYLE`/`force_path_style: true`.

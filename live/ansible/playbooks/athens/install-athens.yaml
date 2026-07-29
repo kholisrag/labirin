@@ -9,6 +9,9 @@
   vars_files:
     - vars/main.yaml
     - vars/vault.yaml
+    # The GitHub org whose private modules this proxy is allowed to go direct
+    # for. Shared, not copied - see the note in that file.
+    - ../../vars/github-identity.yaml
     # panel_api_base / panel_api_key live with the other 1Panel API work rather
     # than being duplicated here - same panel, same key. main.yaml re-exports
     # the vault_* names the playbooks actually use, so both files are needed.
@@ -341,8 +344,8 @@
           - "    live/ansible/playbooks/1panel/manage-websites.yaml"
           - ""
           - "Then, from any box on the LAN:"
-          - "  curl -fsS https://<goproxy-host>/readyz"
-          - "  GOPROXY=https://<goproxy-host> go mod download"
+          - "  curl -fsS https://{{ athens_goproxy_host }}/readyz"
+          - "  GOPROXY=https://{{ athens_goproxy_host }} go mod download"
           - ""
       tags:
         - always

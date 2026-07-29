@@ -3,12 +3,12 @@
 # cantrik-ci - the one GitHub Actions runner that holds /dev/kvm
 # ============================================
 # NOT fireactions. A fireactions job runs inside a Firecracker microVM, and
-# Firecracker cannot expose VMX/SVM to its guest (<repo> ADR-0021), so such a
-# job has no /dev/kvm and cannot boot a Machine. Tier 1 exists to boot one.
+# Firecracker cannot expose VMX/SVM to its guest, so such a job has no /dev/kvm
+# and cannot boot a nested VM. This tier exists to boot one.
 #
-# Everything here is pinned and verified, per <repo> ADR-0035: "a pin that
-# nobody can move rots, and that is worse than an unpinned dependency because it
-# looks deliberate." Renovate proposes the successor; CI proves it.
+# Everything here is pinned and verified: a pin that nobody can move rots, and
+# that is worse than an unpinned dependency because it looks deliberate.
+# Renovate proposes the successor; CI proves it.
 
 # --------------------------------------------
 # GitHub Actions runner
@@ -32,8 +32,12 @@ github_runner_workdir: /opt/github-runner/_work
 # Repository-scoped, not organisation-scoped. This runner is far more privileged
 # than a fireactions one and must not be reachable from any other repository in
 # the org by accident.
-github_runner_owner: <org>
-github_runner_repo: <repo>
+#
+# Vaulted in ../../vars/github-identity.yaml, which is loaded by
+# install-runner.yaml. The org and repo name are the address of the thing this
+# privileged runner is attached to, and this tree is public.
+github_runner_owner: "{{ vault_github_org }}"
+github_runner_repo: "{{ vault_github_platform_repo }}"
 
 # The labels a workflow must name to land here. `kvm` is the meaningful one:
 # a job that does not say `kvm` must never run on this box, which is what keeps

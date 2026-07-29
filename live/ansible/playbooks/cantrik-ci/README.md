@@ -5,8 +5,8 @@ and the reason is not a preference.
 
 ## Why not fireactions
 
-<repo> splits CI into two tiers, and the split is **by what can host
-`/dev/kvm`**, not by speed:
+The consuming project splits CI into two tiers, and the split is **by what can
+host `/dev/kvm`**, not by speed:
 
 | Tier | Runs | Where |
 | --- | --- | --- |
@@ -14,10 +14,9 @@ and the reason is not a preference.
 | 1 | boot a real Machine on the Firecracker / jailer / kernel under test, and SSH in | **here** |
 
 A fireactions job runs **inside** a Firecracker microVM, and Firecracker cannot
-expose VMX/SVM to its guest — <repo> ADR-0021, stated in `design.md` §6.1 as
-*"nested virtualization (Kata, QEMU, Incus VMs, **Firecracker-in-Playground**) is
-impossible without it."* So a fireactions job has no `/dev/kvm` and cannot start
-a Machine. No fireactions configuration fixes this; it is a property of the VMM.
+expose VMX/SVM to its guest — so nested virtualization is impossible there. A
+fireactions job therefore has no `/dev/kvm` and cannot start a nested VM. No
+fireactions configuration fixes this; it is a property of the VMM.
 
 Tier 1 is the **only** test that proves a Firecracker, jailer, guest-kernel, or
 CNI bump. Every Tier 0 check can pass on a kernel that does not boot.
@@ -29,7 +28,7 @@ On `cantrik-01/02/03` that would be a direct path from "a bot opened a PR" to
 root beside other Users' Machines.
 
 This bounds the blast radius. It does not eliminate it — a breakout still lands
-on `petruk-pve0`, which <repo> ADR-0026 already says the Workers share.
+on `petruk-pve0`, which the workload VMs already share.
 
 ## Why the kernel *build* is not here
 
@@ -47,7 +46,9 @@ ansible-playbook \
   -e github_runner_pat="$(gh auth token)"
 ```
 
-The PAT needs only `repo` scope on `<org>/<repo>`. It is used **once**, to
+The PAT needs only `repo` scope on the repository this runner registers
+against — vaulted, see `live/ansible/vars/github-identity.yaml`. It is used
+**once**, to
 mint a registration token that expires in about an hour, and is never written to
 disk or logged. Registration tokens are not stored because they cannot usefully
 be.
@@ -66,7 +67,7 @@ it is a security boundary rather than a routing convenience.
 
 Firecracker, jailer, and the guest kernel. A Tier 1 job installs the versions
 **under test** itself. Installing them from this playbook would test this file
-rather than the pin, which defeats the point of <repo> ADR-0035.
+rather than the pin, which defeats the point of pinning them.
 
 ## The weak point, stated plainly
 
@@ -83,7 +84,7 @@ Two things keep that acceptable, and both are conditional:
 - **The runner account has no sudo.** Its only grant is `kvm` group membership,
   which means "may start a VM", not "may become root".
 
-If `<org>/<repo>` ever goes public, the first of those disappears and the
+If that repository ever goes public, the first of those disappears and the
 workflow needs
 `if: github.event.pull_request.head.repo.full_name == github.repository`.
 Never `pull_request_target` on this runner, under any visibility.

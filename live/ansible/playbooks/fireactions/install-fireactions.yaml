@@ -6,6 +6,12 @@
   vars_files:
     - vars/main.yaml
     - vars/vault.yaml
+    # The GitHub org the pools register against, shared with cantrik-ci and
+    # athens rather than copied into each vault.
+    - ../../vars/github-identity.yaml
+    # fireactions_registry_mirror is Harbor's registry host, read from its
+    # owner's vault so the two cannot drift.
+    - ../harbor/vars/vault.yaml
 
   handlers:
     - name: Restart containerd

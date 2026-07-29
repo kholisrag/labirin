@@ -65,7 +65,7 @@ to be **installed separately on every account** whose runners you want — the A
 existing is not enough, and a missing installation shows up as a `404` on
 `GET /orgs/.../installation` rather than anything more helpful.
 
-1. Go to <https://github.com/organizations/<org>/settings/apps> →
+1. Go to `https://github.com/organizations/<org>/settings/apps` →
    **New GitHub App**.
 2. Name it e.g. `<org>-fireactions`. Homepage URL can be anything.
 3. Uncheck **Webhook → Active**. Fireactions has no webhook handler at all — it
@@ -225,7 +225,7 @@ you prefer to pin by shape rather than by name.
 
 > [!NOTE]
 > A repository-scoped tier (`fireactions-repo-small`, registered with
-> `kholisrag/labirin`) was removed once that work moved into the `<org>` org.
+> this repo) was removed once that work moved into the `<org>` org.
 > The fork still supports the scope — set `repository: <owner>/<repo>` on a pool
 > *instead of* `organization` + `group_id`, and install the App on that repo's
 > owner. `group_id` must be omitted there: user accounts have no runner groups,
@@ -308,7 +308,7 @@ not at ghcr.io and no longer at Hostinger's image directly. Harbor runs a
 pull-through proxy cache on `harbor-01` (`live/ansible/playbooks/harbor/`), and
 the path after the project name is the upstream path verbatim.
 
-[`<org>/fireactions-images`](https://github.com/<org>/fireactions-images)
+our own `<org>/fireactions-images`
 derives from the same Hostinger base, pinned by digest, and adds three things —
 each unreachable by any other mechanism:
 
@@ -319,13 +319,13 @@ each unreachable by any other mechanism:
   `1.1.1.1` and `8.8.8.8`, so **no microVM could resolve `*.<internal-domain>`** —
   which is why Athens was configured correctly for days and served nothing while
   CI stayed green. Measured in
-  [<org>/<repo>#133](https://github.com/<org>/<repo>/issues/133).
+  Measured; tracked in the consuming project's own issue tracker.
 - **A patched `Runner.Worker.dll`**, from `-a1abf5a` onward, so `actions/cache`
   reaches `<cache-host>` instead of GitHub. The shim is not
   enough on its own: the runner reads `ACTIONS_RESULTS_URL` out of every job
   message and writes it over whatever the environment held — a second overwrite,
   independent of the allowlist above.
-  [<org>/<repo>#131](https://github.com/<org>/<repo>/issues/131).
+  Tracked in the consuming project's own issue tracker.
 
 > [!WARNING]
 > **The runner can undo that third one by itself.** `--jitconfig` leaves no
@@ -429,7 +429,7 @@ fireactions pools ls
 ```
 
 All runners should appear as **Idle** at
-<https://github.com/organizations/<org>/settings/actions/runners>.
+`https://github.com/organizations/<org>/settings/actions/runners`.
 
 Then run a job against the pool labels:
 

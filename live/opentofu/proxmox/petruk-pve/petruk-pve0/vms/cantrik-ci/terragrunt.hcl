@@ -11,20 +11,20 @@ locals {
   # ------------------------------------------------------------------
   # cantrik-ci - the ONE runner that is allowed to hold /dev/kvm
   # ------------------------------------------------------------------
-  # <repo>'s CI has two tiers, split by what can host /dev/kvm rather than by
-  # speed (<repo> ADR-0035):
+  # The consuming project's CI has two tiers, split by what can host /dev/kvm
+  # rather than by speed:
   #
   #   Tier 0  builds, unit tests, `tofu validate`, and the kernel BUILD.
   #           Runs on fireactions, one ephemeral Firecracker microVM per job.
   #
-  #   Tier 1  boot a real Machine on the Firecracker/jailer/kernel under test
-  #           and SSH into it. This is the ONLY test that proves such a bump,
-  #           and it cannot run on fireactions.
+  #   Tier 1  boot a nested VM on the Firecracker/jailer/kernel under test and
+  #           SSH into it. This is the ONLY test that proves such a bump, and
+  #           it cannot run on fireactions.
   #
   # Why it cannot: a fireactions job runs INSIDE a Firecracker microVM, and
-  # Firecracker cannot expose VMX/SVM to its guest (<repo> ADR-0021). So a
-  # fireactions runner has no /dev/kvm and cannot start a Machine. There is no
-  # fireactions configuration that fixes this - it is a property of the VMM.
+  # Firecracker cannot expose VMX/SVM to its guest. So a fireactions runner has
+  # no /dev/kvm and cannot start a nested VM. There is no fireactions
+  # configuration that fixes this - it is a property of the VMM.
   #
   # Hence a plain, manually-installed GitHub Actions runner on a VM with
   # `cpu type = "host"`. No orchestrator, no microVM wrapper.
@@ -33,8 +33,8 @@ locals {
   # repository code as a privileged job on a box holding /dev/kvm. Putting that
   # on cantrik-01/02/03 would be a direct path from "a bot opened a PR" to root
   # beside other Users' Machines. This bounds the blast radius; it does not
-  # eliminate it, because a breakout still lands on petruk-pve0, which <repo>
-  # ADR-0026 already says the Workers share.
+  # eliminate it, because a breakout still lands on petruk-pve0, which the
+  # workload VMs already share.
   #
   # MEMORY BUDGET - petruk-pve0 is ALREADY OVERCOMMITTED on allocation. The
   # fireactions unit records 251.5 GiB physical against 274.0 GiB allocated.
@@ -70,7 +70,7 @@ locals {
     reboot_after_update = true
     scsi_hardware       = "virtio-scsi-single"
     pool_id             = "virtualmachines-pool"
-    tags                = ["ci", "cantrik-ci", "<org>"]
+    tags                = ["ci", "cantrik-ci"]
 
     # Starts after the fireactions hosts (order 4). Tier 1 is the rarer job and
     # nothing depends on this box being up first.
@@ -172,7 +172,7 @@ inputs = {
   vms = { for name, host in local.hosts : name => merge(local.vm_defaults, {
     name        = name
     vm_id       = host.vm_id
-    description = format("<repo> Tier 1 CI runner - the only runner with /dev/kvm (%s)", name)
+    description = format("Tier 1 CI runner - the only runner with /dev/kvm (%s)", name)
 
     cloud_init = {
       datastore_id = "ssd"

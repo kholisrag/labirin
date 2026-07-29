@@ -38,11 +38,13 @@ gha_cache_compose_file: "{{ gha_cache_compose_dir }}/docker-compose.yml"
 # ============================================
 # Identity
 # ============================================
-# One name, an Unbound ALIAS onto <panel-host> - there is no second
-# guest to address, the same as Athens and unlike Harbor or RustFS. Add it in
+# One name, an Unbound ALIAS onto the 1Panel host - there is no second guest to
+# address, the same as Athens and unlike Harbor or RustFS. Add it in
 # live/ansible/playbooks/opnsense/vars/vault.yaml under unbound_host_aliases or
 # the name does not resolve and the website is unreachable.
-gha_cache_host: <cache-host>
+#
+# Vaulted, like every name in this estate. See live/ansible/README.md.
+gha_cache_host: "{{ vault_gha_cache_host }}"
 
 # API_BASE_URL. THE TRIP HAZARD. This is not cosmetic and it is not the address
 # the server binds to: it is the prefix the server hands back to the runner in
@@ -142,10 +144,10 @@ gha_cache_s3_bucket: gha-cache
 # resolves the real AWS S3 endpoint for AWS_REGION and the server tries to talk
 # to Amazon.
 #
-# THE HTTPS NAME, NOT THE GUEST'S ADDRESS. rustfs_s3_endpoint is
-# https://<s3-host>, which is an Unbound alias onto
-# <panel-host> - so this container resolves it to its own host, hits
-# OpenResty, and is proxied on to rustfs-01. That hop back out through the
+# THE HTTPS NAME, NOT THE GUEST'S ADDRESS. rustfs_s3_endpoint names the S3
+# host, which is an Unbound alias onto the 1Panel host - so this container
+# resolves it to its own host, hits OpenResty, and is proxied on to the RustFS
+# guest. That hop back out through the
 # reverse proxy is deliberate rather than accidental: TLS terminates at
 # OpenResty with the wildcard, so object traffic is encrypted on the wire and
 # the S3 endpoint is the same string here as it is for every other client. Do
@@ -160,8 +162,8 @@ gha_cache_s3_bucket: gha-cache
 # Path-style addressing needs nothing configured either: `forcePathStyle: true`
 # is hardcoded in lib/storage.ts and is not exposed as an environment variable.
 # That is exactly what RustFS requires - RUSTFS_SERVER_DOMAINS is unset there,
-# so virtual-host style would address gha-cache.<s3-host>, which
-# has neither a DNS alias nor certificate coverage. Nothing to set, but it is
+# so virtual-host style would address gha-cache.<s3-host>, which has neither a
+# DNS alias nor certificate coverage. Nothing to set, but it is
 # the reason this pairing works at all.
 gha_cache_s3_endpoint: "{{ rustfs_s3_endpoint }}"
 gha_cache_s3_region: "{{ rustfs_region }}"
@@ -232,7 +234,7 @@ gha_cache_cleanup_older_than_days: 90
 # streaming the object back through this server. Left off.
 #
 # It would work: the presigned URL is built against AWS_ENDPOINT_URL, so it
-# names <s3-host>, which every runner on the LAN can already
+# names the RustFS S3 host, which every runner on the LAN can already
 # resolve and reach. What it costs is that downloads stop passing through the
 # only component that verifies the runner's token - the URL itself becomes the
 # capability - and reachability of a second hostname becomes load-bearing for

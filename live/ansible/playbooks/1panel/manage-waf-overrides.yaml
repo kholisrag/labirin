@@ -43,7 +43,7 @@
 #   config.json -> sql, xss, args -> "state": "off"
 #
 # 1pwaf scans the request BODY, not only headers and the URI. Verified by
-# sending `1' or '1'='1` as a body to <s3-host> and getting the
+# sending `1' or '1'='1` as a body to the RustFS S3 site and getting the
 # 23,682-byte block page where a clean request gets RustFS's 110-byte XML.
 #
 # On an S3 endpoint the body is a compressed object, so those heuristics run
@@ -56,7 +56,7 @@
 # It fails open all the way to the caller: the storage 403 becomes an XML
 # parse error in the AWS SDK, then a 500, then a dropped upstream connection,
 # then a 502 to the runner - which `actions/cache` prints as a WARNING and the
-# job stays green. <org>/<repo>#203.
+# job stays green.
 #
 # 1Panel rewrites these files when a site is recreated, so this is re-run after
 # any change that recreates a website - both overrides are idempotent.
@@ -67,6 +67,11 @@
 
   vars_files:
     - vars/main.yaml
+    # The two override lists name sites by domain, and those domains are
+    # vaulted in the vault of the service that owns them - not copied here.
+    # This playbook loaded no vault at all before the domains moved.
+    - ../rustfs/vars/vault.yaml
+    - ../gha-cache/vars/vault.yaml
 
   handlers:
     # 1pwaf loads its rule files at worker start (`lua_code_cache on`), so an

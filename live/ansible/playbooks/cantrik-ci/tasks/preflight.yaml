@@ -79,7 +79,7 @@
     that: cantrik_ci_cgroup_fs.stdout == "cgroup2fs"
     fail_msg: >-
       /sys/fs/cgroup is {{ cantrik_ci_cgroup_fs.stdout }}, not cgroup2fs. The
-      jailer still defaults to --cgroup-version 1, so <repo> passes 2
+      jailer still defaults to --cgroup-version 1, so the consumer passes 2
       explicitly and that requires a unified hierarchy.
   tags:
     - always

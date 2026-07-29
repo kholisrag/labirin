@@ -16,9 +16,17 @@
 # in the UI - but its proxy `location` file IS rewritten from the template on
 # every run, because that block is the part with behaviour we care about.
 #
-# A new entry here also needs a matching Unbound alias onto
-# <panel-host> in live/ansible/playbooks/opnsense/vars/vault.yaml,
-# or the name will not resolve to OpenResty at all.
+# A new entry here also needs a matching Unbound alias onto the 1Panel host in
+# live/ansible/playbooks/opnsense/vars/vault.yaml, or the name will not resolve
+# to OpenResty at all.
+#
+# EVERY DOMAIN BELOW IS VAULTED. This tree is public and a resolvable name is
+# the first half of a reachable service, so the names live in ansible-vault and
+# main.yaml carries only the reference. A name owned by another playbook is
+# read from THAT playbook's vault rather than copied here - same rule as
+# manage-databases.yaml reading ../gha-cache/vars/vault.yaml, and for the same
+# reason: a value in two files is a value that can disagree. The cross-loads
+# are in each playbook's vars_files. See live/ansible/README.md.
 
 # 1Panel's "Default" website group.
 onepanel_website_group_id: 2
@@ -30,21 +38,21 @@ onepanel_ssl_algorithm: >-
   ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:!aNULL:!eNULL:!EXPORT:!DSS:!DES:!RC4:!3DES:!MD5:!PSK:!KRB5:!SRP:!CAMELLIA:!SEED
 
 onepanel_websites:
-  - primary_domain: <registry-host>
+  - primary_domain: "{{ vault_harbor_registry_host }}"
     remark: Harbor Container Registry
     # The Harbor guest (harbor-01, 10.10.99.13). Harbor listens on plain
     # HTTP:80 because TLS is terminated here.
     #
-    # An IP, not <harbor-guest>, on purpose: nginx resolves a
-    # proxy_pass hostname once at config load and caches it forever, so a name
-    # here would make OpenResty's startup depend on Unbound being up and would
-    # not pick up a changed address anyway. The address is a static DHCP
-    # reservation keyed on the VM's MAC, so it is as stable as the name.
+    # An IP, not the guest's name, on purpose: nginx resolves a proxy_pass
+    # hostname once at config load and caches it forever, so a name here would
+    # make OpenResty's startup depend on Unbound being up and would not pick up
+    # a changed address anyway. The address is a static DHCP reservation keyed
+    # on the VM's MAC, so it is as stable as the name.
     upstream: http://10.10.99.13
     # Registry traffic is not ordinary web traffic - see the template.
     proxy_template: proxy-registry.conf.j2
     domains:
-      - domain: <registry-host>
+      - domain: "{{ vault_harbor_registry_host }}"
         port: 80
 
   # RustFS - two sites for one guest, and they cannot be merged into one.
@@ -57,23 +65,23 @@ onepanel_websites:
   # Harbor above: nginx resolves a proxy_pass hostname once at config load and
   # caches it forever. The address is a static DHCP reservation keyed on the
   # VM's MAC, so it is as stable as the name would be.
-  - primary_domain: <s3-host>
+  - primary_domain: "{{ vault_rustfs_s3_host }}"
     remark: RustFS S3 API
     upstream: http://10.10.99.14:9000
     proxy_template: proxy-rustfs-s3.conf.j2
     domains:
-      - domain: <s3-host>
+      - domain: "{{ vault_rustfs_s3_host }}"
         port: 80
 
-  - primary_domain: <console-host>
+  - primary_domain: "{{ vault_rustfs_console_host }}"
     remark: RustFS Console
     upstream: http://10.10.99.14:9001
     proxy_template: proxy-rustfs-console.conf.j2
     domains:
-      - domain: <console-host>
+      - domain: "{{ vault_rustfs_console_host }}"
         port: 80
 
-  - primary_domain: <goproxy-host>
+  - primary_domain: "{{ vault_athens_goproxy_host }}"
     remark: Athens Go Module Proxy
     # Athens runs ON this box, as the 1Panel compose stack `athens` - see
     # live/ansible/playbooks/athens/. Unlike Harbor there is no second VM.
@@ -90,7 +98,7 @@ onepanel_websites:
     # A cold cache miss is a git clone; the default timeouts cut it off.
     proxy_template: proxy-athens.conf.j2
     domains:
-      - domain: <goproxy-host>
+      - domain: "{{ vault_athens_goproxy_host }}"
         port: 80
 
   # The GitHub Actions cache server - see live/ansible/playbooks/gha-cache/.
@@ -107,13 +115,13 @@ onepanel_websites:
   # handed to runners as the upload and download endpoint - if this site's name
   # and that variable disagree, saves fail from the runner with the server
   # looking healthy.
-  - primary_domain: <cache-host>
+  - primary_domain: "{{ vault_gha_cache_host }}"
     remark: GitHub Actions Cache Server
     upstream: http://127.0.0.1:3400
     # Cache saves are large PUTs; the stock block's 1m body cap 413s them.
     proxy_template: proxy-gha-cache.conf.j2
     domains:
-      - domain: <cache-host>
+      - domain: "{{ vault_gha_cache_host }}"
         port: 80
 
   # ------------------------------------------------------------------
@@ -127,25 +135,25 @@ onepanel_websites:
   # a silent behaviour change on the next unrelated run of this playbook.
   # ------------------------------------------------------------------
 
-  - primary_domain: fizzy.<internal-domain>
+  - primary_domain: "{{ vault_fizzy_host }}"
     remark: Fizzy
     # The `fizzy` compose stack on this box, published on 127.0.0.1:8083.
     upstream: http://127.0.0.1:8083
     proxy_template: proxy-stock.conf.j2
     domains:
-      - domain: fizzy.<internal-domain>
+      - domain: "{{ vault_fizzy_host }}"
         port: 80
 
-  - primary_domain: gitea-mirror.<internal-domain>
+  - primary_domain: "{{ vault_gitea_mirror_host }}"
     remark: Gitea Mirror
     # The `gitea-mirror` compose stack on this box, published on 127.0.0.1:4321.
     upstream: http://127.0.0.1:4321
     proxy_template: proxy-stock.conf.j2
     domains:
-      - domain: gitea-mirror.<internal-domain>
+      - domain: "{{ vault_gitea_mirror_host }}"
         port: 80
 
-  - primary_domain: openclaw.<internal-domain>
+  - primary_domain: "{{ vault_openclaw_host }}"
     remark: OpenClaw
     # http, NOT the https the dashboard had. The upstream on :18789 speaks plain
     # HTTP, so the hand-made config was failing every request with
@@ -158,7 +166,7 @@ onepanel_websites:
     upstream: http://10.10.99.10:18789
     proxy_template: proxy-openclaw.conf.j2
     domains:
-      - domain: openclaw.<internal-domain>
+      - domain: "{{ vault_openclaw_host }}"
         port: 80
 
 # ============================================
@@ -209,14 +217,14 @@ onepanel_openresty_container: openresty
 # is given up (very little) and what is kept (the log4shell rule, the scanner
 # rule, and every other WAF module).
 onepanel_waf_ua_command_sites:
-  - <s3-host>
-  - <console-host>
+  - "{{ vault_rustfs_s3_host }}"
+  - "{{ vault_rustfs_console_host }}"
 
 # Sites where the request-inspection modules have to be off entirely, because
 # what they inspect is opaque signed binary and no rule edit can fix that.
 #
 # 1pwaf scans the request BODY, not just headers and the URI - verified by
-# sending `1' or '1'='1` as a body to <s3-host> and getting the
+# sending `1' or '1'='1` as a body to the RustFS S3 site and getting the
 # 23,682-byte block page instead of RustFS's 110-byte XML. On an S3 endpoint
 # the body is a compressed object, so the scan is running injection heuristics
 # over gzip output. It false-positives, and it does so on SOME parts of the
@@ -233,8 +241,8 @@ onepanel_waf_ua_command_sites:
 # What stays on for these sites: methodWhite, defaultUaBlack, defaultUrlBlack,
 # header (minus the one token above), cookie, geoRestrict and cc.
 onepanel_waf_no_body_scan_sites:
-  - <s3-host>
-  - <cache-host>
+  - "{{ vault_rustfs_s3_host }}"
+  - "{{ vault_gha_cache_host }}"
 
 # The modules to turn off on those sites. All three read attacker-controlled
 # request data through injection heuristics: `sql` and `xss` via libinjection,
@@ -263,9 +271,10 @@ panel_entrance: "{{ vault_panel_entrance }}"
 panel_host: "{{ vault_panel_host }}"
 panel_endpoint: "{{ vault_panel_endpoint }}"
 
-cert_description: "OPNSense Auto-renewed *.<public-zone> and *.<internal-domain>"
-cert_directory: "/home/ansible/.acme/certs/-.<public-zone>"
-cert_domain: "-.<public-zone>"
+# The acme wildcard, vaulted: it names the estate's apex zone.
+cert_description: "{{ vault_acme_cert_description }}"
+cert_directory: "{{ vault_acme_cert_directory }}"
+cert_domain: "{{ vault_acme_cert_domain }}"
 panel_api_base: "https://{{ panel_host }}:{{ panel_port }}"
 panel_port: 11150
 panel_upload_url: "{{ panel_api_base }}/api/v2/websites/ssl/upload"

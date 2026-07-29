@@ -9,6 +9,16 @@
   vars_files:
     - vars/main.yaml
     - vars/vault.yaml
+    # Every site domain in onepanel_websites is vaulted, and a domain owned by
+    # another service is read from THAT service's vault rather than copied into
+    # this one. Same rule as manage-databases.yaml reading the consumer's
+    # vault: a value in two files is a value that can disagree, and the failure
+    # here - a website created for a name Unbound does not alias - looks like a
+    # DNS problem rather than a drifted copy.
+    - ../harbor/vars/vault.yaml
+    - ../rustfs/vars/vault.yaml
+    - ../athens/vars/vault.yaml
+    - ../gha-cache/vars/vault.yaml
 
   module_defaults:
     ansible.builtin.uri:

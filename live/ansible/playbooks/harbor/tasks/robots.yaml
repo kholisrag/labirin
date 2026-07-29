@@ -39,6 +39,13 @@
   retries: "{{ harbor_api_ready_retries }}"
   delay: "{{ harbor_api_ready_delay }}"
   changed_when: false
+  # RUNS UNDER --check TOO. `uri` does not support check mode and SKIPS, which
+  # would leave the read below with no data and fail the "robot exists" assert
+  # on a Harbor that holds the robot perfectly well - a dry run that reports a
+  # problem it invented. Both reads here are GETs with changed_when: false, so
+  # executing them in check mode changes nothing; only the PUT is simulated,
+  # which is the whole point of running --check on this file.
+  check_mode: false
   when: harbor_system_robots_managed | length > 0
   tags:
     - robots
@@ -59,6 +66,8 @@
   register: harbor_system_robots
   changed_when: false
   no_log: true
+  # See the health check above: read-only, so it runs under --check as well.
+  check_mode: false
   when: harbor_system_robots_managed | length > 0
   tags:
     - robots
@@ -198,7 +207,9 @@
          | map(attribute='name')
          | map('extract', _harbor_robot_delta)
          | selectattr('gains')
-         | list | length }} widened this run.
+         | list | length }} with grants to add.
+  # "to add" and not "widened", because this is the delta measured BEFORE the
+  # PUT and a --check run never issues one. A steady-state run reports 0.
   when: harbor_system_robots_managed | length > 0
   tags:
     - robots

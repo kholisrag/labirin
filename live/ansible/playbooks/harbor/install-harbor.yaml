@@ -92,6 +92,17 @@
         - proxy-cache
 
     # ============================================
+    # System robot grants
+    # ============================================
+    # Only the grants. The robots are created by hand and this reconcile widens
+    # them, never narrows - tasks/robots.yaml says why. Empty by default.
+    - name: Reconcile the system robot grants
+      ansible.builtin.include_tasks:
+        file: tasks/robots.yaml
+      tags:
+        - robots
+
+    # ============================================
     # Summary
     # ============================================
     - name: Display post-install instructions

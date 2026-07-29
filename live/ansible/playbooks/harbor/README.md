@@ -209,7 +209,8 @@ ansible-galaxy role install -r requirements.yml -p .ansible/roles
 ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
   live/ansible/playbooks/harbor/install-harbor.yaml
 
-# A single component (tags: dependencies, data-volume, docker, harbor, proxy-cache)
+# A single component (tags: dependencies, data-volume, docker, harbor,
+# proxy-cache, robots)
 ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
   live/ansible/playbooks/harbor/install-harbor.yaml --tags proxy-cache
 ```
@@ -264,6 +265,58 @@ homelab ever needs to *store* an image, add an ordinary (non-proxy) project —
 and note that a project's `registry_id` cannot be changed after creation, so
 the two kinds are decided once, at creation.
 
+## System robot grants
+
+Other repositories automate against this Harbor as system-level robots. Those
+robots are **created by hand, once**; `--tags robots` reconciles only what they
+are allowed to do.
+
+```bash
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
+  live/ansible/playbooks/harbor/install-harbor.yaml --tags robots
+```
+
+### It only ever widens
+
+`PUT /robots/{id}` **replaces** a robot's permission set — Harbor has no
+add-a-grant call. So a declaration that is merely incomplete revokes whatever
+it forgot, and the owner of that robot finds out days later as a 403 inside
+their own playbook. `tasks/robots.yaml` therefore compares the live grants
+against the declared ones and **stops** if applying the declaration would
+remove any.
+
+Narrowing a robot stays a deliberate act in the UI. That is the right way
+round: narrowing is the direction that breaks other people's automation, and it
+should not happen as a side effect of running the installer.
+
+### The declaration is vaulted
+
+`harbor_system_robots_managed` defaults to `vault_harbor_system_robots_managed`
+and is empty unless the vault sets it, which skips the tasks entirely.
+
+Not because a robot's account name is a secret. This repository is public, and
+this Harbor serves private projects belonging to repositories that are not —
+the names of those accounts, and of the projects they can reach, are theirs to
+publish rather than ours. `vars/main.yaml` carries the schema and an example
+with placeholder names.
+
+### Two traps in Harbor's robot API
+
+**`GET /robots` lists system robots only.** With no `q=` it defaults to
+`Level=system, ProjectID=0`. Listing a *project* robot needs
+`?q=Level=project,ProjectID=<id>` and the numeric id — there is no
+`/projects/<name>/robots` endpoint in 2.15; that returns 404. A caller that
+forgets this gets an empty list rather than an error, and a create-if-missing
+loop built on it creates a duplicate on every run.
+
+**A robot creating a robot cannot exceed itself.** `isValidPermissionScope`
+requires the new robot's grants to be a subset of the creator's, matched on
+`(kind, namespace)` and then on `(resource, action, effect)`. So a robot with
+`robot:create` on a project still cannot mint a credential stronger than its
+own — but it also cannot mint one holding a permission it lacks, which is the
+half that surprises people: to create a pull-only robot, the creator needs
+`repository:pull` itself.
+
 ## Sizing
 
 | | |
@@ -286,9 +339,15 @@ means raising the RAM.
 
 `/data` being excluded from backups is deliberate: almost every byte is a
 cached upstream layer that re-pulls on demand, and everything else — projects,
-registry endpoints, retention, robot accounts — is declared in `vars/main.yaml`
-and re-applied by `--tags proxy-cache`. The recovery path is "re-run Ansible",
-not "restore".
+registry endpoints, retention — is declared in `vars/main.yaml` and re-applied
+by `--tags proxy-cache`. The recovery path is "re-run Ansible", not "restore".
+
+**Robot accounts are the exception, and this used to say otherwise.** Nothing
+here creates one; `--tags robots` reconciles the *grants* of robots that
+already exist, and a robot Harbor has lost is recreated by hand — see
+[System robot grants](#system-robot-grants). A robot's secret is shown once, at
+creation, and is not recoverable from the database either, so restoring one is
+a new secret and a re-distribution regardless of what Ansible knows.
 
 Paying for this disk is what shrank the Fireactions containerd disks from
 200 GiB to 100 GiB in the same change; see that playbook's README.

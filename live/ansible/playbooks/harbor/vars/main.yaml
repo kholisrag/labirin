@@ -240,3 +240,36 @@ harbor_proxy_projects:
   - name: k8s
     registry: k8s
     public: true
+
+# --------------------------------------------
+# System robot grants
+# --------------------------------------------
+# What a system-level robot on this Harbor is allowed to do. The robots are
+# created by hand, once; tasks/robots.yaml only reconciles their grants, and it
+# only ever WIDENS - see the header there for why a PUT that narrows is the
+# dangerous direction.
+#
+# VAULTED, and not because a robot's account name is a secret. This repository
+# is public and this Harbor serves private projects belonging to other
+# repositories; the names of those accounts, and of the projects they can
+# reach, are theirs to publish rather than ours. So the declaration lives in
+# vars/vault.yaml and the default here is empty, which skips the tasks
+# entirely.
+#
+# Each entry is:
+#
+#   - name: <robot name WITHOUT the `robot$` prefix>
+#     permissions:
+#       - kind: system            # namespace is always `/` for kind: system
+#         namespace: /
+#         access:
+#           - { resource: project, action: create }
+#       - kind: project           # `*` for every project, or one project name
+#         namespace: some-project
+#         access:
+#           - { resource: robot, action: list }
+#
+# `resource`/`action` pairs must exist in Harbor's own catalogue for that scope
+# (src/common/rbac/const.go); a pair that does not is a 400, not a silent
+# no-op. GET /permissions lists them, and needs admin.
+harbor_system_robots_managed: "{{ vault_harbor_system_robots_managed | default([]) }}"

@@ -1,0 +1,204 @@
+---
+# ============================================
+# System robot grants
+# ============================================
+# Harbor's RBAC lives in Postgres and is only reachable over the API, the same
+# as projects and registry endpoints. This file declares what a SYSTEM-LEVEL
+# robot may do, for the robots that other repositories authenticate as against
+# this Harbor. The robots themselves are created by hand, once; only their
+# grants are declared here, and a robot that does not exist is an error rather
+# than something to create.
+#
+# WIDEN-ONLY, and that is the whole safety property. `PUT /robots/{id}`
+# REPLACES a robot's permission set - Harbor has no add-a-grant call - so a
+# declaration missing something the robot holds today would silently revoke it,
+# and the failure would surface days later as a 403 inside someone else's
+# playbook. So the reconcile below refuses to run when the live set holds a
+# grant the declaration does not, and only ever adds.
+#
+# Narrowing therefore stays a deliberate act, done in the UI or with an
+# explicit call. That is the right way round: narrowing is the direction that
+# breaks other people's automation, and it should not happen as a side effect
+# of running the installer.
+#
+# WHAT IS DECLARED LIVES IN THE VAULT, not here. `harbor_system_robots_managed`
+# defaults to `vault_harbor_system_robots_managed`, so this repository is public
+# without publishing which accounts exist on this Harbor, what they are called,
+# or which private projects they can reach. An empty declaration is the default
+# and skips every task below.
+
+- name: Wait for the Harbor API to become healthy
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/health"
+    method: GET
+    status_code: 200
+  register: harbor_robot_health
+  until:
+    - harbor_robot_health.json is defined
+    - harbor_robot_health.json.status == 'healthy'
+  retries: "{{ harbor_api_ready_retries }}"
+  delay: "{{ harbor_api_ready_delay }}"
+  changed_when: false
+  when: harbor_system_robots_managed | length > 0
+  tags:
+    - robots
+
+# No `q=`, deliberately. GET /robots with no query defaults to Level=system and
+# ProjectID=0 (src/server/v2.0/handler/robot.go, ListRobot), which is exactly
+# the set declared here. A PROJECT-level robot is not returned by this call at
+# all - listing one needs `?q=Level=project,ProjectID=<id>` - and is not managed
+# from this playbook.
+- name: List the system-level robots
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/robots?page_size=100"
+    method: GET
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: harbor_system_robots
+  changed_when: false
+  no_log: true
+  when: harbor_system_robots_managed | length > 0
+  tags:
+    - robots
+
+# A robot's name carries `robot_name_prefix` - `robot$<name>` with the default.
+# The prefix is a system setting and can be changed, so the match is on the
+# declared name at the END of the live one rather than on a reconstructed full
+# name, which would stop matching the day the prefix moved.
+- name: Map each declared robot to what Harbor holds
+  ansible.builtin.set_fact:
+    _harbor_robots_live: >-
+      {{ _harbor_robots_live | default({}) | combine({
+           item.name: (harbor_system_robots.json | default([])
+                       | selectattr('name', 'search', '(^|[$+])' ~ (item.name | regex_escape) ~ '$')
+                       | list)
+         }) }}
+  loop: "{{ harbor_system_robots_managed }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  tags:
+    - robots
+
+- name: Assert every declared robot exists
+  ansible.builtin.assert:
+    that:
+      - (_harbor_robots_live[item.name] | default([]) | length) == 1
+    fail_msg: >-
+      Harbor holds no system robot whose name ends in the declared one, or holds
+      more than one. These robots are created by hand and only their grants are
+      declared here - this playbook will not create one. Create it in the UI, or
+      drop the entry from `vault_harbor_system_robots_managed`.
+  loop: "{{ harbor_system_robots_managed }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags:
+    - robots
+
+# Compared as a flat set of `kind:namespace:resource:action` strings, because
+# Harbor returns permissions GROUPED by (kind, namespace) and the grouping is
+# not stable - the same grants can come back split differently. Flattening
+# compares what the robot can DO, which is the only thing that matters.
+#
+# Built as JSON and parsed back rather than rendered as a Python literal: a
+# multi-statement template returns a string in ansible-core 2.19+, so only the
+# single-expression `| from_json` below reliably yields a real list.
+- name: Work out what each declared robot would gain and lose
+  ansible.builtin.set_fact:
+    _harbor_robot_delta: >-
+      {{ _harbor_robot_delta | default({}) | combine({item.name: {
+           'gains': (_wanted | difference(_held)),
+           'loses': (_held | difference(_wanted)),
+         }}) }}
+  vars:
+    _live: "{{ _harbor_robots_live[item.name] | first }}"
+    _held_json: >-
+      {%- set out = [] -%}
+      {%- for p in (_live.permissions | default([])) -%}
+      {%- for a in (p.access | default([])) -%}
+      {%- set _ = out.append(p.kind ~ ':' ~ p.namespace ~ ':' ~ a.resource ~ ':' ~ a.action) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{- out | sort | to_json -}}
+    _wanted_json: >-
+      {%- set out = [] -%}
+      {%- for p in (item.permissions | default([])) -%}
+      {%- for a in (p.access | default([])) -%}
+      {%- set _ = out.append(p.kind ~ ':' ~ p.namespace ~ ':' ~ a.resource ~ ':' ~ a.action) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{- out | sort | to_json -}}
+    _held: "{{ _held_json | from_json }}"
+    _wanted: "{{ _wanted_json | from_json }}"
+  loop: "{{ harbor_system_robots_managed }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags:
+    - robots
+
+- name: Refuse to narrow a robot
+  ansible.builtin.assert:
+    that:
+      - (_harbor_robot_delta[item.name].loses | length) == 0
+    fail_msg: >-
+      This robot holds
+      {{ _harbor_robot_delta[item.name].loses | length }} grant(s) that the
+      declaration does not. A PUT here replaces the whole permission set, so
+      applying it as it stands would REVOKE them, and the robot's owner would
+      find out as a 403 in their own automation days later. Either add them to
+      `vault_harbor_system_robots_managed`, or narrow the robot deliberately in
+      the UI and re-run.
+  loop: "{{ harbor_system_robots_managed }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags:
+    - robots
+
+# `name` and `level` go back exactly as Harbor returned them: updateV2Robot
+# rejects a PUT that changes either, and the name it compares against is the
+# PREFIXED one. `description` goes back for a quieter reason - it is not
+# optional on update, so omitting it writes an empty string over whatever was
+# there. `duration` IS optional and is omitted on purpose, which preserves the
+# robot's current expiry rather than resetting it.
+- name: Apply the declared grants
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/robots/{{ _live.id }}"
+    method: PUT
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ _live.name }}"
+      description: "{{ _live.description | default('') }}"
+      level: "{{ _live.level }}"
+      disable: "{{ _live.disable | default(false) }}"
+      permissions: "{{ item.permissions }}"
+    status_code: 200
+  vars:
+    _live: "{{ _harbor_robots_live[item.name] | first }}"
+  loop: "{{ harbor_system_robots_managed }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: (_harbor_robot_delta[item.name].gains | length) > 0
+  changed_when: true
+  no_log: true
+  tags:
+    - robots
+
+# Counts, not names. The declaration is vaulted precisely so that the account
+# names and the projects they reach do not end up in a log or a CI transcript.
+- name: Report the declared robots
+  ansible.builtin.debug:
+    msg: >-
+      {{ harbor_system_robots_managed | length }} declared system robot(s);
+      {{ harbor_system_robots_managed
+         | map(attribute='name')
+         | map('extract', _harbor_robot_delta)
+         | selectattr('gains')
+         | list | length }} widened this run.
+  when: harbor_system_robots_managed | length > 0
+  tags:
+    - robots

@@ -124,6 +124,45 @@ onepanel_websites:
       - domain: "{{ vault_gha_cache_host }}"
         port: 80
 
+  # Grafana and Prometheus - see live/ansible/playbooks/monitoring/. One compose
+  # stack on THIS box, two published ports, so 127.0.0.1 for the same reason as
+  # Athens and gha-cache above: OpenResty runs with `network_mode: host`, so the
+  # loopback publish is reachable from nginx and from nowhere else.
+  #
+  # 3500 continues the 3300 (Athens) / 3400 (gha-cache) sequence and exists
+  # because Gitea holds 3000, which is Grafana's default. Prometheus keeps its
+  # own 9090, which was free. Both are kept in step with
+  # monitoring_grafana_port / monitoring_prometheus_port in
+  # ../../monitoring/vars/main.yaml; nothing links them automatically, and
+  # install-monitoring.yaml preflights the ports but has no idea what this file
+  # says.
+  #
+  # These two names must also match monitoring_grafana_host and
+  # GF_SERVER_ROOT_URL over there - Grafana builds its redirects from that
+  # variable, so a disagreement presents as a login loop rather than a 404.
+  - primary_domain: "{{ vault_grafana_host }}"
+    remark: Grafana
+    upstream: http://127.0.0.1:3500
+    # Websockets for Grafana Live, and timeouts that outlast a range query.
+    proxy_template: proxy-grafana.conf.j2
+    domains:
+      - domain: "{{ vault_grafana_host }}"
+        port: 80
+
+  # UNAUTHENTICATED, DELIBERATELY, AND THE TEMPLATE IS WHERE THAT IS BOUNDED.
+  # Prometheus has no login of its own, so anything on the LAN that resolves
+  # this name can read every metric and run any query. Grafana next door is the
+  # authenticated view; this site exists for the expression browser and the
+  # targets page. proxy-prometheus.conf.j2 denies the destructive endpoints -
+  # read its header before changing either file.
+  - primary_domain: "{{ vault_prometheus_host }}"
+    remark: Prometheus
+    upstream: http://127.0.0.1:9090
+    proxy_template: proxy-prometheus.conf.j2
+    domains:
+      - domain: "{{ vault_prometheus_host }}"
+        port: 80
+
   # ------------------------------------------------------------------
   # Brought under management by the July 2026 drift scan. All three were
   # created by hand in the dashboard and had been serving for months with

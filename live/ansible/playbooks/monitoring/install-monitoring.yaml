@@ -1,0 +1,551 @@
+---
+- name: Install Prometheus and Grafana as a 1Panel compose stack
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+
+    # The host-side ports this stack claims, and the containers allowed to be
+    # holding them already (this stack's own, on a re-run).
+    monitoring_host_ports:
+      - "{{ monitoring_prometheus_port }}"
+      - "{{ monitoring_grafana_port }}"
+    monitoring_own_containers:
+      - "{{ monitoring_prometheus_container }}"
+      - "{{ monitoring_grafana_container }}"
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+    # panel_api_base / panel_api_key live with the other 1Panel API work rather
+    # than being duplicated here - same panel, same key. main.yaml re-exports
+    # the vault_* names the playbooks actually use, so both files are needed.
+    - ../1panel/vars/main.yaml
+    - ../1panel/vars/vault.yaml
+
+  module_defaults:
+    ansible.builtin.uri:
+      validate_certs: true
+      body_format: json
+      status_code: 200
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - panel_api_base is defined
+          - panel_api_key is defined
+          - panel_api_key | length > 0
+        fail_msg: >-
+          panel_api_base / panel_api_key are missing. Populate them with:
+          ansible-vault edit live/ansible/playbooks/1panel/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # Unlike Athens' GitHub token, an empty admin password is not a degraded
+    # mode - Grafana refuses to start without one on a fresh database, and the
+    # container then restart-loops with the reason only in `docker logs`.
+    - name: Validate the Grafana bootstrap credentials
+      ansible.builtin.assert:
+        that:
+          - monitoring_grafana_admin_user | length > 0
+          - monitoring_grafana_admin_password | length > 0
+        fail_msg: >-
+          vault_grafana_admin_user / vault_grafana_admin_password are empty.
+          Grafana will not initialise without them. Populate them with:
+          ansible-vault edit live/ansible/playbooks/monitoring/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # Same auth scheme as live/ansible/playbooks/1panel/manage-websites.yaml:
+    # md5("1panel" + <api key> + <unix timestamp>) alongside the timestamp.
+    #
+    # THE TIMESTAMP IS ITS OWN FACT ON PURPOSE - see the long comment in
+    # manage-websites.yaml. Inlining the lookup evaluates it twice and the two
+    # evaluations occasionally straddle a second boundary, producing a token
+    # signed with N sent with a header saying N+1.
+    - name: Read the 1Panel API timestamp
+      ansible.builtin.set_fact:
+        monitoring_api_timestamp: "{{ lookup('pipe', 'date +%s') }}"
+      tags:
+        - always
+
+    - name: Build the 1Panel API authentication headers
+      ansible.builtin.set_fact:
+        monitoring_api_headers:
+          1Panel-Token: "{{ ('1panel' ~ panel_api_key ~ monitoring_api_timestamp) | hash('md5') }}"
+          1Panel-Timestamp: "{{ monitoring_api_timestamp }}"
+      no_log: true
+      tags:
+        - always
+
+    # ===== DISCOVERY =====
+    - name: List the existing compose stacks
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: monitoring_composes
+      changed_when: false
+      tags:
+        - monitoring
+
+    # 1Panel answers an auth failure with HTTP 200 and a body of
+    # {"code": <non-200>, ...} - the status line says nothing. Without this the
+    # run dies several tasks later inside a Jinja expression, pointing nowhere
+    # near the real problem.
+    - name: Assert the 1Panel API accepted the request
+      ansible.builtin.assert:
+        that:
+          - monitoring_composes.json.code | default(0) == 200
+          - monitoring_composes.json.data is not none
+        fail_msg: >-
+          1Panel rejected the request
+          (code={{ monitoring_composes.json.code | default('?') }},
+          message={{ monitoring_composes.json.message | default('') | trim or 'none' }}).
+          Causes, in the order they are worth checking:
+          the API key is disabled in Panel Settings; this workstation's IP is
+          not in the API key's allowlist; the key in
+          live/ansible/playbooks/1panel/vars/vault.yaml is stale; or the signing
+          timestamp fell outside the key's validity window.
+      tags:
+        - monitoring
+
+    # ===== PREFLIGHT =====
+    # The 1Panel guest is a busy box - eighteen stacks publishing on loopback -
+    # and docker reports a port clash only once the stack is already recorded,
+    # leaving a stack that exists but will not start. Grafana's default port of
+    # 3000 was already Gitea's, which is why monitoring_grafana_port is 3500.
+    - name: List the published container ports
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/search"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          page: 1
+          pageSize: 300
+          name: ""
+          state: all
+          orderBy: name
+          order: "null"
+          filters: ""
+          excludeAppStore: false
+      register: monitoring_containers
+      changed_when: false
+      tags:
+        - monitoring
+        - preflight
+
+    # A published port reads as "127.0.0.1:3500->3000/tcp". Match on the host
+    # side only - the container side of the arrow collides constantly between
+    # unrelated images and means nothing. The leading colon is what keeps
+    # ":9090->" from matching a container published on 19090.
+    - name: Find the containers already publishing either host port
+      ansible.builtin.set_fact:
+        monitoring_port_conflicts: >-
+          {{ monitoring_port_conflicts | default([]) + [item.0.name ~ ' (port ' ~ item.1 ~ ')'] }}
+      loop: "{{ monitoring_containers.json.data['items'] | default([]) | product(monitoring_host_ports) | list }}"
+      loop_control:
+        label: "{{ item.0.name }}:{{ item.1 }}"
+      when:
+        - item.0.ports is defined
+        - item.0.ports is not none
+        # This stack's own containers are not a conflict on a re-run.
+        - item.0.name not in monitoring_own_containers
+        - item.0.ports | select('search', ':' ~ item.1 ~ '->') | list | length > 0
+      tags:
+        - monitoring
+        - preflight
+
+    - name: Assert both host ports are free
+      ansible.builtin.assert:
+        that:
+          - monitoring_port_conflicts | default([]) | length == 0
+        fail_msg: >-
+          Already published by {{ monitoring_port_conflicts | default([]) | join(', ') }}.
+          Pick another monitoring_prometheus_port / monitoring_grafana_port in
+          vars/main.yaml - the containers keep listening on 9090 and 3000
+          internally either way, so only the left-hand side of the port mapping
+          and the matching `upstream` in ../1panel/vars/main.yaml change.
+      tags:
+        - monitoring
+        - preflight
+
+    - name: Record whether the stack already exists
+      ansible.builtin.set_fact:
+        monitoring_exists: >-
+          {{ monitoring_compose_name in (monitoring_composes.json.data['items'] | default([]) | map(attribute='name') | list) }}
+      tags:
+        - monitoring
+
+    # ===== STORAGE =====
+    # Before the stack, not after: docker creates a missing bind-mount source as
+    # a root-owned directory, and neither of these images runs as root. Getting
+    # there first is the difference between a working stack and two containers
+    # restart-looping on "permission denied".
+    #
+    # On the very first run the compose directory does not exist either - 1Panel
+    # only creates it as part of the create call - so each MkdirAll here has to
+    # cover every level.
+    - name: Create the data and provisioning directories
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ item }}"
+          isDir: true
+          mode: 493 # 0755, as the decimal int the API wants
+        # The panel answers this one with HTTP 200 and a body code of 500 -
+        # "Internal server error: The file or folder already exists!" - which is
+        # the steady state on every run after the first. Listing 500 here is
+        # belt-and-braces for a version that starts using the status line.
+        status_code: [200, 500]
+      loop:
+        - "{{ monitoring_prometheus_data_dir }}"
+        - "{{ monitoring_grafana_data_dir }}"
+        - "{{ monitoring_grafana_datasource_dir }}"
+      register: monitoring_mkdir
+      changed_when: monitoring_mkdir.json.code | default(0) == 200
+      # Hence keying off the BODY code, not the status. Anything that is not a
+      # success and not the already-exists message is a real failure.
+      failed_when:
+        - monitoring_mkdir.json.code | default(0) != 200
+        - "'exist' not in (monitoring_mkdir.json.message | default(''))"
+      tags:
+        - monitoring
+        - storage
+
+    # QUOTE THE IDS. FileRoleUpdate declares User and Group as `string`, and an
+    # unquoted `{{ monitoring_grafana_uid }}` serialises to a JSON *number* -
+    # Gin then fails to bind the body and the handler never runs. It looks like
+    # it worked: HTTP 200, task green, and the directory still root-owned. The
+    # container only reveals it later, restart-looping on a permission error.
+    - name: Own the data directories as the container users
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/owner"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ item.path }}"
+          user: "{{ item.uid | string }}"
+          group: "{{ item.gid | string }}"
+          sub: true
+      loop:
+        - path: "{{ monitoring_prometheus_data_dir }}"
+          uid: "{{ monitoring_prometheus_uid }}"
+          gid: "{{ monitoring_prometheus_gid }}"
+        - path: "{{ monitoring_grafana_data_dir }}"
+          uid: "{{ monitoring_grafana_uid }}"
+          gid: "{{ monitoring_grafana_gid }}"
+      loop_control:
+        label: "{{ item.path }} -> {{ item.uid }}:{{ item.gid }}"
+      register: monitoring_chown
+      # And check the BODY, because the status line is 200 either way. Without
+      # this the bind failure above is completely invisible.
+      failed_when: monitoring_chown.json.code | default(0) != 200
+      changed_when: false
+      tags:
+        - monitoring
+        - storage
+
+    # ===== CONFIGURATION =====
+    # Neither of these files can ride along with the compose create: `from: edit`
+    # writes docker-compose.yml and a sibling .env, and nothing else. They go in
+    # through the Files API instead.
+    #
+    # /files/save REQUIRES THE PATH TO EXIST - it answers a missing file with
+    # code 500 "The target path does not exist!" rather than creating it. So
+    # every write here is create-then-save, with the create tolerating the
+    # already-exists that is the steady state after run one.
+    - name: Render the configuration files
+      ansible.builtin.set_fact:
+        monitoring_config_files:
+          - path: "{{ monitoring_prometheus_config }}"
+            content: "{{ lookup('template', 'templates/prometheus.yml.j2') }}"
+            # Which container to bounce when this file changes. Prometheus reads
+            # its config at startup, and the reload endpoint is deliberately not
+            # enabled - see the command block in the compose template.
+            restarts: "{{ monitoring_prometheus_container }}"
+          - path: "{{ monitoring_grafana_datasource_file }}"
+            content: "{{ lookup('template', 'templates/grafana-datasource.yml.j2') }}"
+            # Grafana applies provisioning at startup only. Without this a
+            # changed datasource sits on disk and the UI keeps serving the old
+            # one, which reads as the template not having been written at all.
+            restarts: "{{ monitoring_grafana_container }}"
+      tags:
+        - monitoring
+        - config
+
+    # Read-before-write, so the run can tell whether a restart is actually
+    # needed. A missing file answers 500, which is the first-run state and not
+    # an error - hence the wide status_code and the absent failed_when.
+    - name: Read the configuration files currently on the guest
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/content"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ item.path }}"
+          expand: true
+          page: 1
+          pageSize: 5000
+        status_code: [200, 500]
+      loop: "{{ monitoring_config_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: monitoring_config_current
+      changed_when: false
+      tags:
+        - monitoring
+        - config
+
+    # Compared trimmed: the template lookup and the panel disagree about the
+    # trailing newline, and an every-run "changed" would restart both containers
+    # on every run for no reason.
+    #
+    # A file the panel could not read answers with `data: null`, which is the
+    # first-run state - the `default({}, true)` is what turns that null into an
+    # empty dict rather than letting `.content` raise on it.
+    - name: Collect the configuration files that need writing
+      ansible.builtin.set_fact:
+        monitoring_config_pending: >-
+          {{ monitoring_config_pending | default([]) + [item.item] }}
+      loop: "{{ monitoring_config_current.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+      when: >-
+        (item.json.data | default({}) | default({}, true)).content | default('') | trim
+        != item.item.content | trim
+      tags:
+        - monitoring
+        - config
+
+    - name: Create the configuration files if they are missing
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ item.path }}"
+          isDir: false
+          mode: 420 # 0644
+        status_code: [200, 500]
+      loop: "{{ monitoring_config_pending | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: monitoring_touch
+      changed_when: monitoring_touch.json.code | default(0) == 200
+      failed_when:
+        - monitoring_touch.json.code | default(0) != 200
+        - "'exist' not in (monitoring_touch.json.message | default(''))"
+      tags:
+        - monitoring
+        - config
+
+    - name: Write the configuration files
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/save"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ item.path }}"
+          content: "{{ item.content }}"
+      loop: "{{ monitoring_config_pending | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: monitoring_config_written
+      failed_when: monitoring_config_written.json.code | default(0) != 200
+      tags:
+        - monitoring
+        - config
+
+    # Prometheus reads its config as `nobody`, Grafana its provisioning as 472.
+    # The Files API creates both as root, and a root-owned 0644 file is readable
+    # by either - but the directory chowns above are recursive and run BEFORE
+    # these files exist on the first run, so this is what actually gets the
+    # ownership right rather than relying on the mode.
+    - name: Own the configuration files as the container users
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/owner"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ item.path }}"
+          user: "{{ item.uid | string }}"
+          group: "{{ item.gid | string }}"
+          sub: false
+      loop:
+        - path: "{{ monitoring_prometheus_config }}"
+          uid: "{{ monitoring_prometheus_uid }}"
+          gid: "{{ monitoring_prometheus_gid }}"
+        - path: "{{ monitoring_grafana_datasource_file }}"
+          uid: "{{ monitoring_grafana_uid }}"
+          gid: "{{ monitoring_grafana_gid }}"
+      loop_control:
+        label: "{{ item.path }} -> {{ item.uid }}:{{ item.gid }}"
+      register: monitoring_config_chown
+      failed_when: monitoring_config_chown.json.code | default(0) != 200
+      changed_when: false
+      tags:
+        - monitoring
+        - config
+
+    # ===== STACK =====
+    # Create and update are different endpoints with different bodies, and
+    # neither one does the other's job: /compose 400s on a name that already has
+    # a record, and /compose/update reads the existing file before writing so it
+    # cannot bootstrap one.
+    - name: Create the monitoring compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          name: "{{ monitoring_compose_name }}"
+          # "edit" means "here is the file content" - 1Panel writes it to
+          # {DataDir}/docker/compose/{name}/docker-compose.yml itself. The
+          # alternatives are "path" (a file already on the box) and "template".
+          from: edit
+          file: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ monitoring_compose_env }}"
+          forcePull: false
+      vars:
+        monitoring_compose_env: >-
+          GF_SECURITY_ADMIN_USER={{ monitoring_grafana_admin_user }}
+
+          GF_SECURITY_ADMIN_PASSWORD={{ monitoring_grafana_admin_password }}
+      when: not monitoring_exists | bool
+      register: monitoring_created
+      # Same trap as the chown: a rejected body still answers HTTP 200.
+      failed_when:
+        - not monitoring_created.skipped | default(false)
+        - monitoring_created.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - monitoring
+
+    - name: Update the monitoring compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/update"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          name: "{{ monitoring_compose_name }}"
+          # `path` is what gets `docker compose up`; `detailPath` is the file
+          # the new content is written to. For a single-file stack they are the
+          # same, but detailPath is read before the write and an empty one fails
+          # the task with a bare "load file with path failed".
+          path: "{{ monitoring_compose_file }}"
+          detailPath: "{{ monitoring_compose_file }}"
+          content: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ monitoring_compose_env }}"
+          forcePull: false
+      vars:
+        monitoring_compose_env: >-
+          GF_SECURITY_ADMIN_USER={{ monitoring_grafana_admin_user }}
+
+          GF_SECURITY_ADMIN_PASSWORD={{ monitoring_grafana_admin_password }}
+      when: monitoring_exists | bool
+      register: monitoring_updated
+      failed_when:
+        - not monitoring_updated.skipped | default(false)
+        - monitoring_updated.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - monitoring
+
+    # ===== CONVERGENCE =====
+    # Both endpoints hand the work to a background task and return 200
+    # immediately - the response says the request was accepted, not that the
+    # containers are up. Poll until they actually are, otherwise a failed image
+    # pull or a bad env var looks like a successful run.
+    - name: Wait for both containers to be running
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: monitoring_status
+      until: >-
+        (monitoring_status.json.data['items'] | default([])
+         | selectattr('name', 'equalto', monitoring_compose_name) | list | first | default({})
+        ).runningCount | default(0) | int >= 2
+      retries: 30
+      delay: 10
+      changed_when: false
+      tags:
+        - monitoring
+
+    # A `docker compose up` on an unchanged service definition leaves the
+    # container alone, which is right - but it also means a run where ONLY
+    # prometheus.yml or the datasource changed brings nothing new into effect.
+    # Neither process re-reads its file while running. Hence an explicit bounce,
+    # and only of the containers whose file actually moved.
+    #
+    # Skipped entirely on the first run: the stack was just created, so the
+    # containers have already read the current files.
+    - name: Restart the containers whose configuration changed
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/operate"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          # `names`, plural and a list. The singular `name` is rejected with a
+          # validation error naming a field that is not in the docs.
+          names: "{{ monitoring_config_pending | map(attribute='restarts') | unique | list }}"
+          operation: restart
+      when:
+        - monitoring_exists | bool
+        - monitoring_config_pending | default([]) | length > 0
+      register: monitoring_restarted
+      # THE BODY CODE IS NOT PROOF THE CONTAINER EXISTED. This endpoint answers
+      # 200 "success" for a name docker has never heard of, so a typo in a
+      # container name fails silently here and surfaces as configuration that
+      # did not take effect. The names come from vars/main.yaml, which is also
+      # what the compose template names the containers, so they cannot drift -
+      # but do not add a hand-typed name to this list.
+      failed_when: monitoring_restarted.json.code | default(0) != 200
+      tags:
+        - monitoring
+        - config
+
+    - name: Display post-install instructions
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Prometheus {{ monitoring_prometheus_version }} + Grafana {{ monitoring_grafana_version }}"
+          - "running as 1Panel compose stack '{{ monitoring_compose_name }}'"
+          - "========================================"
+          - ""
+          - "Prometheus : {{ monitoring_bind_address }}:{{ monitoring_prometheus_port }} on the 1Panel VM (loopback only)"
+          - "Grafana    : {{ monitoring_bind_address }}:{{ monitoring_grafana_port }} on the 1Panel VM (loopback only)"
+          - "Compose    : {{ monitoring_compose_file }}"
+          - "TSDB       : {{ monitoring_prometheus_data_dir }} ({{ monitoring_prometheus_retention_time }} / {{ monitoring_prometheus_retention_size }})"
+          - "Scraping   : {{ monitoring_scrape_configs | map(attribute='job_name') | join(', ') }}"
+          - ""
+          - "Neither is reachable yet unless the websites exist. Create them with:"
+          - "  ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \\"
+          - "    live/ansible/playbooks/1panel/manage-websites.yaml"
+          - ""
+          - "and the DNS aliases, if this is the first run:"
+          - "  ansible-playbook live/ansible/playbooks/opnsense/manage-local-dns.yaml \\"
+          - "    -e opnsense_host=opnsense.<internal-domain>"
+          - ""
+          - "Then, from any box on the LAN:"
+          - "  curl -fsS https://{{ monitoring_prometheus_host }}/-/ready"
+          - "  curl -fsS https://{{ monitoring_grafana_host }}/api/health"
+          - ""
+          - "Grafana admin username and password are in:"
+          - "  ansible-vault view live/ansible/playbooks/monitoring/vars/vault.yaml"
+          - ""
+      tags:
+        - always

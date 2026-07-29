@@ -1,0 +1,35 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/monitoring/install-monitoring.yaml
+# Rewritten in full on every run - edits made on the guest are lost.
+#
+# Written to the guest with 1Panel's Files API rather than by the compose
+# create, because `from: edit` writes docker-compose.yml and .env and nothing
+# else. Targets come from monitoring_scrape_configs in vars/main.yaml.
+global:
+  scrape_interval: {{ monitoring_prometheus_scrape_interval }}
+  evaluation_interval: {{ monitoring_prometheus_evaluation_interval }}
+
+# No alerting or rule_files yet. Alertmanager is a third container and a routing
+# decision - who gets woken, on what, through which of ntfy or e-mail - and that
+# is its own playbook rather than an empty stanza here pretending to be wired up.
+
+scrape_configs:
+{% for job in monitoring_scrape_configs %}
+  - job_name: {{ job.job_name }}
+    metrics_path: {{ job.metrics_path | default('/metrics') }}
+    scheme: {{ job.scheme | default('http') }}
+{% if job.scrape_interval is defined %}
+    scrape_interval: {{ job.scrape_interval }}
+{% endif %}
+    static_configs:
+      - targets:
+{% for target in job.targets %}
+          - "{{ target }}"
+{% endfor %}
+{% if job.labels is defined %}
+        labels:
+{% for key, value in job.labels.items() %}
+          {{ key }}: "{{ value }}"
+{% endfor %}
+{% endif %}
+{% endfor %}

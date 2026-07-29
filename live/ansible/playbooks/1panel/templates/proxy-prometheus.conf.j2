@@ -1,0 +1,65 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# READ THIS BEFORE WIDENING ANYTHING HERE. Prometheus ships no authentication of
+# its own, and this vhost puts it on a name every host on the LAN can resolve.
+# That is an accepted trade - the expensive alternative is an auth proxy in
+# front of a homelab metrics UI - but it means the deny block below is the only
+# thing standing between a curious client and a destructive API call, and the
+# flags that would make those calls possible are off in the compose template.
+# The two have to stay in agreement; see the `command:` block in
+# live/ansible/playbooks/monitoring/templates/docker-compose.yml.j2.
+
+# Belt and braces against the destructive endpoints. --web.enable-admin-api and
+# --web.enable-lifecycle are BOTH unset upstream, so Prometheus already refuses
+# these itself - this block is what keeps a future "just for a moment" flag flip
+# from silently publishing delete-series and /-/quit to the whole LAN.
+#
+# `=` AND `^~`, NOT A REGEX LOCATION - AND THAT IS THE WHOLE POINT.
+# This started as `location ~ ^/(-/quit|-/reload|api/v1/admin/)` and it never
+# fired once. The catch-all below is `location ^~ /`, and `^~` means "if this
+# prefix wins, do not evaluate regex locations at all" - so a regex block here
+# is unreachable no matter what it matches. It looked like it worked, because
+# Prometheus answers /-/reload with its own 403 "Lifecycle API is not enabled."
+# and the status code is identical to the one this block would have returned.
+#
+# nginx resolves `=` first and stops; failing that it takes the LONGEST `^~`
+# prefix. Both beat `^~ /`, so these three are reachable and the regex was not.
+#
+# Exact matches for the two lifecycle paths rather than a `^~ /-/` prefix,
+# because that prefix would also swallow /-/healthy and /-/ready - which the
+# container healthcheck and anything monitoring this proxy legitimately need.
+location = /-/reload {
+    return 403;
+}
+
+location = /-/quit {
+    return 403;
+}
+
+location ^~ /api/v1/admin/ {
+    return 403;
+}
+
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_http_version 1.1;
+
+    # Same argument as the Grafana block next door: a range query across the
+    # retention window genuinely takes minutes on a box this size, and the 60s
+    # default turns that into a 504 that reads like Prometheus being down.
+    proxy_connect_timeout 30s;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    proxy_ssl_server_name off;
+    proxy_ssl_name $proxy_host;
+}

@@ -39,6 +39,7 @@ private wildcard zone served by Unbound on OPNsense, which is not a public zone.
 > | `<s3-host>` / `<console-host>` | `vault_rustfs_s3_host` / `vault_rustfs_console_host` | `rustfs` |
 > | `<goproxy-host>` | `vault_athens_goproxy_host` | `athens` |
 > | `<cache-host>` | `vault_gha_cache_host` | `gha-cache` |
+> | `<grafana-host>` / `<prometheus-host>` | `vault_grafana_host` / `vault_prometheus_host` | `monitoring` |
 >
 > **A name has exactly one home.** A playbook that needs another service's name
 > cross-loads that service's vault in its `vars_files` rather than keeping a
@@ -168,9 +169,9 @@ ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1pan
 
 Declared in this tree and reconciled by a playbook: OPNsense Unbound host
 overrides and aliases; 1Panel reverse-proxy websites, PostgreSQL databases and
-WAF rule overrides; the `athens` and `gha-cache` compose stacks; fireactions
-pools and their runner image pin; Harbor, RustFS, Talos, PVE, cloudflared and
-cantrik-ci.
+WAF rule overrides; the `athens`, `gha-cache` and `monitoring` compose stacks;
+fireactions pools and their runner image pin; Harbor, RustFS, Talos, PVE,
+cloudflared and cantrik-ci.
 
 Deliberately **not** managed, recorded so a drift scan does not re-raise them:
 

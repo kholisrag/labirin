@@ -1,0 +1,129 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/monitoring/install-monitoring.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# 1Panel stores this at /opt/1panel/docker/compose/monitoring/docker-compose.yml
+# with the .env beside it. Both are written by the panel, not by Ansible over
+# SSH, so the panel's own Compose page stays authoritative for start/stop/logs.
+services:
+  prometheus:
+    image: prom/prometheus:{{ monitoring_prometheus_version }}
+    container_name: {{ monitoring_prometheus_container }}
+    restart: always
+
+    # The image's built-in unprivileged user. Requires ./prometheus/data to be
+    # owned by it - install-monitoring.yaml chowns the directory before this
+    # stack is brought up, because 1Panel creates the compose directory as root.
+    user: "{{ monitoring_prometheus_uid }}:{{ monitoring_prometheus_gid }}"
+
+    # Loopback only - see monitoring_bind_address in vars/main.yaml.
+    ports:
+      - "{{ monitoring_bind_address }}:{{ monitoring_prometheus_port }}:9090"
+
+    # SPELLING OUT THE DEFAULTS IS LOAD-BEARING HERE. Docker replaces the
+    # image's CMD wholesale rather than appending to it, so the moment one flag
+    # is added the two the upstream image sets - --config.file and
+    # --storage.tsdb.path - have to be repeated or Prometheus comes up reading
+    # the sample config baked into the image and writing to the wrong path.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time={{ monitoring_prometheus_retention_time }}
+      - --storage.tsdb.retention.size={{ monitoring_prometheus_retention_size }}
+      # What Prometheus believes it is reachable as. Without it the console
+      # links and the alert `generatorURL` are built from the container's own
+      # hostname and point somewhere nobody can reach.
+      - --web.external-url=https://{{ monitoring_prometheus_host }}
+      # The proxy passes / straight through, so the route prefix is NOT taken
+      # from the external URL's path. Stated rather than left implicit because
+      # putting a path in the line above would silently change this one.
+      - --web.route-prefix=/
+      # NEITHER --web.enable-lifecycle NOR --web.enable-admin-api. Prometheus
+      # has no authentication of its own and this one is published on a name any
+      # host on the LAN can resolve, so /-/quit and the delete-series API would
+      # be an unauthenticated shutdown and an unauthenticated data wipe. Config
+      # changes are applied by install-monitoring.yaml restarting the container,
+      # which is why the reload endpoint is not missed.
+
+    volumes:
+      # Written by the panel's Files API from templates/prometheus.yml.j2 - see
+      # the ===== CONFIGURATION ===== block in the playbook. Read-only because
+      # Prometheus never writes it and a stray write should fail loudly.
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # The TSDB. Bounded by both retention flags above.
+      - ./prometheus/data:/prometheus
+
+    healthcheck:
+      # /-/healthy reports the process is up; /-/ready additionally reports it
+      # is willing to serve queries, which is what a proxy in front of it cares
+      # about. Busybox base, so wget is present.
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9090/-/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:{{ monitoring_grafana_version }}
+    container_name: {{ monitoring_grafana_container }}
+    restart: always
+
+    # 472:0 - the image's own GF_UID/GF_GID. See vars/main.yaml on why the
+    # group is 0 and why that is not a privilege.
+    user: "{{ monitoring_grafana_uid }}:{{ monitoring_grafana_gid }}"
+
+    # Ordering only, and it is worth being clear that it buys very little:
+    # Compose waits for the container to be created, not for Prometheus to
+    # answer. Grafana tolerates a datasource that is not up yet - the health
+    # check on the datasource page fails until Prometheus is ready and then
+    # starts passing on its own.
+    depends_on:
+      - prometheus
+
+    ports:
+      - "{{ monitoring_bind_address }}:{{ monitoring_grafana_port }}:3000"
+
+    environment:
+      # What Grafana builds its own absolute URLs from - OAuth redirects, the
+      # links in alert notifications, the share-panel dialog. Left unset it uses
+      # the container's hostname and port and every one of those points at a
+      # name that resolves nowhere.
+      GF_SERVER_ROOT_URL: "https://{{ monitoring_grafana_host }}"
+      GF_SERVER_DOMAIN: "{{ monitoring_grafana_host }}"
+
+      # From the stack's .env, which install-monitoring.yaml writes from the
+      # vault. Read ONLY while Grafana initialises an empty database - see the
+      # note on monitoring_grafana_admin_user in vars/main.yaml.
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+
+      # Already Grafana's default. Set explicitly because this instance is the
+      # authenticated front door to an unauthenticated Prometheus, so the one
+      # setting that decides whether a stranger can mint themselves an account
+      # should be visible in the file rather than inherited.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+      # A homelab behind split DNS cannot reach grafana.com for the update check
+      # anyway; without these the startup logs carry a failed-request warning on
+      # every boot and the usage-stats POST retries in the background.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+
+    volumes:
+      # Grafana's own SQLite database - dashboards, users, API keys, and the
+      # admin account created from the two variables above.
+      - ./grafana/data:/var/lib/grafana
+      # ONLY the datasources directory, not the whole provisioning tree. Binding
+      # /etc/grafana/provisioning would shadow the image's own alerting/,
+      # dashboards/ and plugins/ subdirectories with an empty host directory;
+      # mounting one level deeper leaves them intact.
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+
+    healthcheck:
+      # Alpine base, so busybox wget. /api/health needs no authentication and
+      # reports the database check, not just that the listener is up.
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

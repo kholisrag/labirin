@@ -1,0 +1,174 @@
+---
+# ============================================
+# Monitoring - Prometheus + Grafana
+# ============================================
+# One Compose stack, two services, created through 1Panel's own API rather than
+# over SSH - the same shape as ../athens and ../gha-cache. A stack created with
+# `from: edit` shows up in Containers > Compose exactly like one made in the
+# dashboard, so the panel stays the single place where the box's containers are
+# listed, logged and restarted.
+#
+# ONE STACK AND NOT TWO, ON PURPOSE. Grafana has to reach Prometheus, and the
+# only cheap way to do that is a shared Compose network where `prometheus` is a
+# resolvable name. Split into two stacks they land on different bridge networks
+# and Grafana's datasource has to go out to the host and back in through
+# `host.docker.internal` - a second path to keep working for no gain. The
+# loopback publishes below exist for the reverse proxy, not for Grafana.
+#
+# Consequence worth knowing: 1Panel decides where the files live. `from: edit`
+# writes to {DataDir}/docker/compose/{name}/docker-compose.yml and a sibling
+# .env - see loadPath()/newComposeEnv() in agent/app/service/container_compose.go.
+# The paths below mirror that decision; they are not free choices.
+
+monitoring_compose_name: monitoring
+
+# {DataDir} is /opt/1panel on this install.
+monitoring_compose_dir: /opt/1panel/docker/compose/{{ monitoring_compose_name }}
+monitoring_compose_file: "{{ monitoring_compose_dir }}/docker-compose.yml"
+
+# Loopback ONLY, for both services. OpenResty on this box runs with
+# `network_mode: host` (see its docker-compose.yml), so 127.0.0.1 from nginx
+# *is* the host's loopback and the reverse proxy reaches these fine. Anything
+# else on the LAN cannot, which is the point: the only way in is the TLS
+# website, and there is no second plaintext door on 10.10.99.10.
+monitoring_bind_address: 127.0.0.1
+
+# ============================================
+# Prometheus
+# ============================================
+# Pinned rather than floating on :latest - a TSDB is the one component here
+# where an unattended major bump is expensive. v3.13.1 is the current stable
+# (released 2026-07-10); check https://github.com/prometheus/prometheus/releases
+# before moving it.
+monitoring_prometheus_version: v3.13.1
+
+monitoring_prometheus_container: prometheus
+
+# 9090 is Prometheus' own default and it is free on this box - unlike Athens,
+# which had to move off 3000 because Gitea was already there. The preflight in
+# install-monitoring.yaml fails the run if that ever stops being true.
+monitoring_prometheus_port: 9090
+
+# The image runs as `nobody` and chowns /prometheus to it at build time (see
+# the upstream Dockerfile). A bind mount ignores that, so install-monitoring.yaml
+# chowns the host directory to the same numeric id before the stack comes up.
+monitoring_prometheus_uid: 65534
+monitoring_prometheus_gid: 65534
+
+monitoring_prometheus_dir: "{{ monitoring_compose_dir }}/prometheus"
+monitoring_prometheus_config: "{{ monitoring_prometheus_dir }}/prometheus.yml"
+monitoring_prometheus_data_dir: "{{ monitoring_prometheus_dir }}/data"
+
+# BOTH bounds, because either one alone lets the other run away. The time bound
+# is what you reason about ("a quarter of history"); the size bound is what
+# stops a scrape-target explosion filling the 1Panel guest's 50 GiB root disk,
+# which is shared with every other app on the box.
+monitoring_prometheus_retention_time: 90d
+monitoring_prometheus_retention_size: 20GB
+
+# How often every target below is scraped, and how often rules are evaluated.
+# 15s is the upstream default and is far finer than anything here needs; it is
+# left alone because the cost is trivial at this target count and lowering it
+# is the kind of change that quietly hides a short outage.
+monitoring_prometheus_scrape_interval: 15s
+monitoring_prometheus_evaluation_interval: 15s
+
+# ============================================
+# Scrape targets
+# ============================================
+# WHAT THIS SHIPS WITH IS THE TWO SERVICES IN THIS STACK, AND THAT IS THE HONEST
+# STATE OF IT. Prometheus scrapes itself, and Grafana exposes /metrics, so the
+# stack monitors its own health from the first run and nothing else.
+#
+# It is deliberately not more. Scraping the rest of the estate means installing
+# an exporter on each guest - node_exporter on the PVE hosts, cAdvisor for the
+# containers on this box, Harbor's and RustFS's own /metrics endpoints - and
+# each of those is its own playbook and its own firewall decision, not a line in
+# this list.
+#
+# Adding one once the exporter exists is a single entry here plus a re-run.
+# `scheme` and `metrics_path` default to http and /metrics; give an entry the
+# guest's IP rather than its name for the same reason ../1panel/vars/main.yaml
+# uses addresses in `upstream` - these are static DHCP reservations keyed on the
+# VM's MAC, so they are as stable as the name and do not make Prometheus depend
+# on Unbound being up.
+#
+#   - job_name: node
+#     targets:
+#       - 10.10.99.13:9100
+#       - 10.10.99.14:9100
+#
+# NOTE THE NAMES BELOW ARE CONTAINER NAMES, NOT HOSTS. Both services sit on this
+# stack's Compose network, where Docker's embedded DNS resolves the service name
+# to the container. `localhost` would be Prometheus' own container in the first
+# job and would be wrong in the second.
+monitoring_scrape_configs:
+  - job_name: prometheus
+    targets:
+      - "{{ monitoring_prometheus_container }}:9090"
+
+  - job_name: grafana
+    targets:
+      - "{{ monitoring_grafana_container }}:3000"
+
+# ============================================
+# Grafana
+# ============================================
+# Pinned for the same reason as Prometheus above. 13.1.1 is the current stable;
+# check https://github.com/grafana/grafana/releases before moving it.
+monitoring_grafana_version: 13.1.1
+
+monitoring_grafana_container: grafana
+
+# NOT 3000, which is Grafana's own default and the first thing you would reach
+# for: Gitea already publishes 127.0.0.1:3000 on this box, exactly as it did to
+# Athens. The container still listens on 3000 internally; only the host side
+# moved. 3500 continues the 3300 (Athens) / 3400 (gha-cache) sequence.
+monitoring_grafana_port: 3500
+
+# The image's built-in unprivileged user - `ARG GF_UID="472"` / `ARG GF_GID="0"`
+# in the upstream Dockerfile. Group 0 is not a typo and not a privilege: the
+# image chowns its data to 472:root so the container works under an arbitrary
+# uid on OpenShift, and the bind mount has to match what the process actually
+# runs as.
+monitoring_grafana_uid: 472
+monitoring_grafana_gid: 0
+
+monitoring_grafana_dir: "{{ monitoring_compose_dir }}/grafana"
+monitoring_grafana_data_dir: "{{ monitoring_grafana_dir }}/data"
+monitoring_grafana_datasource_dir: "{{ monitoring_grafana_dir }}/provisioning/datasources"
+monitoring_grafana_datasource_file: "{{ monitoring_grafana_datasource_dir }}/prometheus.yml"
+
+# The datasource is provisioned from a file rather than clicked in the UI, so a
+# rebuilt stack comes back with it. `isDefault` matters more than it looks -
+# every dashboard that does not name a datasource explicitly resolves to it.
+monitoring_grafana_datasource_name: Prometheus
+
+# ============================================
+# Public names
+# ============================================
+# The TLS websites in front of these two - Unbound ALIASes onto the 1Panel host,
+# not A records, because neither service has a guest of its own. Vaulted: this
+# tree is public and a resolvable name is the first half of a reachable service.
+# See live/ansible/README.md.
+#
+# Creating the websites is ../1panel/manage-websites.yaml's job, and it reads
+# these two names out of THIS playbook's vault rather than keeping a copy - a
+# value in two files is a value that can disagree.
+monitoring_grafana_host: "{{ vault_grafana_host }}"
+monitoring_prometheus_host: "{{ vault_prometheus_host }}"
+
+# ============================================
+# Secrets
+# ============================================
+# Sourced from vars/vault.yaml and written to the stack's .env, not into
+# docker-compose.yml, so the password is not sitting in the file the dashboard
+# renders on the compose detail page.
+#
+# THESE ARE BOOTSTRAP CREDENTIALS AND GRAFANA STOPS READING THEM. Both variables
+# are only consulted while Grafana creates its admin user on an empty database;
+# once ./grafana/data exists the account lives there and changing the vault does
+# nothing. Rotating it afterwards is a `grafana-cli admin reset-admin-password`
+# in the container, or the profile page - see the README.
+monitoring_grafana_admin_user: "{{ vault_grafana_admin_user }}"
+monitoring_grafana_admin_password: "{{ vault_grafana_admin_password }}"

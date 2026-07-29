@@ -1,0 +1,40 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/monitoring/install-monitoring.yaml
+# Rewritten in full on every run - edits made in the Grafana UI are lost.
+#
+# Grafana reads this at startup from /etc/grafana/provisioning/datasources. A
+# provisioned datasource is read-only in the UI, which is the point: the stack
+# can be rebuilt from nothing and comes back wired up.
+apiVersion: 1
+
+# Datasources named here are removed before the ones below are applied, so a
+# hand-made "Prometheus" from before this file existed does not collide with it.
+deleteDatasources:
+  - name: {{ monitoring_grafana_datasource_name }}
+    orgId: 1
+
+datasources:
+  - name: {{ monitoring_grafana_datasource_name }}
+    type: prometheus
+    access: proxy
+    orgId: 1
+    # THE CONTAINER NAME, NOT THE PUBLIC HOST. Both services are on this stack's
+    # Compose network, so Docker's embedded DNS resolves `prometheus` to the
+    # container and the query never leaves the box. Pointing this at
+    # https://<the public name> would send every panel refresh out to OpenResty
+    # and back, which needs the TLS website to exist before Grafana works at all
+    # and puts a WAF in the middle of a query path that has no business there.
+    #
+    # 9090 is the CONTAINER port and does not follow monitoring_prometheus_port
+    # - that variable is the host-side publish for the reverse proxy only.
+    url: http://{{ monitoring_prometheus_container }}:9090
+    # Every dashboard that does not name a datasource explicitly resolves here.
+    isDefault: true
+    # Managed by this file, so a UI edit that would silently drift from it is
+    # refused rather than accepted and overwritten on the next run.
+    editable: false
+    jsonData:
+      # Must be >= the scrape interval, or Grafana asks for a resolution
+      # Prometheus does not have and draws gaps between real samples.
+      timeInterval: {{ monitoring_prometheus_scrape_interval }}
+      httpMethod: POST

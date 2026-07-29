@@ -233,7 +233,7 @@ fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key
 # host, read from ../harbor/vars/vault.yaml rather than copied, and the image
 # path embeds the GitHub org. Only the tag is a digest and stays in the clear.
 fireactions_registry_mirror: "{{ vault_harbor_registry_host }}"
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-a1abf5a"
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-53e6324"
 
 # --------------------------------------------
 # Pools

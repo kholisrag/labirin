@@ -240,9 +240,22 @@ onepanel_waf_ua_command_sites:
 #
 # What stays on for these sites: methodWhite, defaultUaBlack, defaultUrlBlack,
 # header (minus the one token above), cookie, geoRestrict and cc.
+#
+# THE CONDITION IS THE BODY, NOT THE PROTOCOL. This started as an S3 list and
+# it is not one: the test is whether a vhost carries opaque compressed bytes in
+# a request body. A container registry does - a Docker layer PUT is a gzip or
+# zstd tarball, byte for byte the same problem as an S3 part upload, and it
+# fails the same way. Harbor was denied on 2 of 3 blob PUTs in one run
+# (oprek-sh/oprek.sh#231) while `docker login` succeeded and the robot held
+# `push:repository` on every project, with every project quota at -1.
+#
+# The partial failure is the signature, not a coincidence: injection heuristics
+# over compressed output false-positive on some layers and not others, exactly
+# as they did on some upload parts and not others.
 onepanel_waf_no_body_scan_sites:
   - "{{ vault_rustfs_s3_host }}"
   - "{{ vault_gha_cache_host }}"
+  - "{{ vault_harbor_registry_host }}"
 
 # The modules to turn off on those sites. All three read attacker-controlled
 # request data through injection heuristics: `sql` and `xss` via libinjection,

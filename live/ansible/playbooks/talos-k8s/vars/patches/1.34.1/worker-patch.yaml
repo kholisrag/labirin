@@ -10,4 +10,4 @@ cluster:
     cni:
       name: custom
       urls:
-        - https://<static-host>/talos-init/talos-cni-cilium-v1.18.4.yaml
+        - https://static.internal.khol.is/talos-init/talos-cni-cilium-v1.18.4.yaml

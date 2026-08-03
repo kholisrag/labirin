@@ -115,6 +115,24 @@ onepanel_websites:
   # handed to runners as the upload and download endpoint - if this site's name
   # and that variable disagree, saves fail from the runner with the server
   # looking healthy.
+  # DefectDojo, the security findings UI - the playbook is in oprek.sh, NOT
+  # here. Same 127.0.0.1 reasoning as Athens and gha-cache above: a compose
+  # stack on THIS box, published to loopback only, so OpenResty's
+  # `network_mode: host` is what reaches it and nothing on the LAN does.
+  #
+  # 8181 rather than continuing the 3300/3400/3500 sequence, because the port
+  # is chosen in the other repository and this entry follows it.
+  #
+  # Its domain is in THIS vault and not a `../defectdojo/vars/vault.yaml`,
+  # which is the one place the rule above cannot be followed: the owning
+  # service lives in a different repository and this one cannot read its vault.
+  - primary_domain: "{{ vault_defectdojo_host }}"
+    remark: DefectDojo Security Findings UI
+    upstream: http://127.0.0.1:8181
+    domains:
+      - domain: "{{ vault_defectdojo_host }}"
+        port: 80
+
   - primary_domain: "{{ vault_gha_cache_host }}"
     remark: GitHub Actions Cache Server
     upstream: http://127.0.0.1:3400

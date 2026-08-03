@@ -20,6 +20,18 @@ services:
     ports:
       - "{{ monitoring_bind_address }}:{{ monitoring_prometheus_port }}:9090"
 
+    # BOTH, AND LISTING `default` IS NOT REDUNDANT. Compose attaches a service
+    # to the project's default network only while the service names no networks
+    # of its own; the moment one appears here, that is the complete list. Naming
+    # only the shared bridge would take Prometheus off the network Grafana finds
+    # it on, and the datasource would break in the same run that fixed scraping.
+    #
+    # Grafana is deliberately NOT on the shared bridge - see
+    # monitoring_scrape_network in vars/main.yaml for what joining it costs.
+    networks:
+      - default
+      - {{ monitoring_scrape_network }}
+
     # SPELLING OUT THE DEFAULTS IS LOAD-BEARING HERE. Docker replaces the
     # image's CMD wholesale rather than appending to it, so the moment one flag
     # is added the two the upstream image sets - --config.file and
@@ -50,6 +62,12 @@ services:
       # the ===== CONFIGURATION ===== block in the playbook. Read-only because
       # Prometheus never writes it and a stray write should fail loudly.
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # The Grafana Cloud token, read by basic_auth's password_file. Written by
+      # the same Files API pass as the config above, and ALWAYS written even
+      # when remote write is off - docker creates a missing bind-mount source as
+      # a root-owned DIRECTORY, and Prometheus would then fail to start on a
+      # file it was told to read that is not one.
+      - ./prometheus/remote-write-password:{{ monitoring_remote_write_password_path }}:ro
       # The TSDB. Bounded by both retention flags above.
       - ./prometheus/data:/prometheus
 
@@ -127,3 +145,19 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+networks:
+  # This stack's own, carrying Prometheus and Grafana. Declared rather than left
+  # implicit because the prometheus service now names its networks explicitly
+  # and a name it references should be visible in this file.
+  default: {}
+
+  # `external: true` means "attach to the network that already exists under this
+  # name" - Compose will not create it, and refuses to start the stack if it is
+  # missing rather than inventing a project-prefixed one of its own. The
+  # playbook's preflight looks for it first so that refusal arrives as a
+  # readable failure instead of a stack that exists and will not come up. Same
+  # shape as ../gha-cache, which joins this network to reach its database.
+  {{ monitoring_scrape_network }}:
+    name: {{ monitoring_scrape_network }}
+    external: true

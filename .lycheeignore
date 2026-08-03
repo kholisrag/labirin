@@ -3,3 +3,15 @@ https://token.actions.githubusercontent.com/
 https://*.<kloia-zone>/
 http://0.0.0.0:2381/
 .*ssh:.*
+
+# Addresses that only ever resolve inside a container or on a guest - compose
+# healthcheck commands, and the proxy upstreams in playbooks/1panel/templates.
+# They are unreachable from a workstation BY DESIGN, so lychee reaching them
+# would be the surprising outcome. Same class as the 0.0.0.0 entry above.
+#
+# NO PORT AND NO ANCHOR, deliberately. These entries are unanchored regexes, and
+# lychee also scans THIS FILE when it is staged - a pattern written as
+# `http://localhost:.*` is read out of it as the link `http://localhost/`, which
+# that pattern then does not match, and the hook fails on its own ignore list.
+http://localhost
+http://127\.0\.0\.1

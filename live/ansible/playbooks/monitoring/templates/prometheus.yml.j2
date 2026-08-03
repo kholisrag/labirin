@@ -9,6 +9,13 @@ global:
   scrape_interval: {{ monitoring_prometheus_scrape_interval }}
   evaluation_interval: {{ monitoring_prometheus_evaluation_interval }}
 
+  # Attached to forwarded and federated series only - nothing in the local TSDB
+  # carries these, so adding one does not rewrite history or break a saved query.
+  external_labels:
+{% for key, value in monitoring_external_labels.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+
 # No alerting or rule_files yet. Alertmanager is a third container and a routing
 # decision - who gets woken, on what, through which of ntfy or e-mail - and that
 # is its own playbook rather than an empty stanza here pretending to be wired up.
@@ -33,3 +40,30 @@ scrape_configs:
 {% endfor %}
 {% endif %}
 {% endfor %}
+{% if monitoring_remote_write_enabled | bool %}
+
+# Forwarded to Grafana Cloud. Rendered only because all three vault values are
+# populated - see the remote-write block in vars/main.yaml for what happens, and
+# does not happen, while any of them is still a placeholder.
+remote_write:
+  - url: {{ monitoring_remote_write_url }}
+
+    basic_auth:
+      username: "{{ monitoring_remote_write_username }}"
+      # NOT `password:`. The token lives in a 0600 file of its own so that this
+      # file, which is 0644 and is what the panel's file browser renders, can be
+      # read and pasted without carrying a credential.
+      password_file: {{ monitoring_remote_write_password_path }}
+
+    # THE ALLOWLIST. Grafana Cloud bills on active series, and these three jobs
+    # export well over a hundred of them. Anything whose name is not in
+    # monitoring_remote_write_keep_metrics is dropped here, before it leaves the
+    # guest; the local TSDB still has all of it at full resolution.
+    #
+    # Prometheus anchors a relabel regex on both ends, so these are exact names
+    # rather than prefixes - `cache_requests` would match nothing.
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: "{{ monitoring_remote_write_keep_metrics | join('|') }}"
+        action: keep
+{% endif %}

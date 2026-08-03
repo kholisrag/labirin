@@ -74,34 +74,78 @@ monitoring_prometheus_scrape_interval: 15s
 monitoring_prometheus_evaluation_interval: 15s
 
 # ============================================
+# Cross-stack scraping
+# ============================================
+# 1Panel's own user-defined bridge, joined as an EXTERNAL network, exactly as
+# ../gha-cache does and for the same reason: it is the only way one stack on
+# this box can address another by name.
+#
+# THE OBVIOUS ALTERNATIVE DOES NOT WORK, and it is worth writing down because
+# it is the first thing anyone will reach for. Every other stack on this guest
+# publishes on 127.0.0.1 only (gha-cache on 3400, Athens on 3300, and this one
+# on 9090/3500). A container's 127.0.0.1 is its OWN loopback, and an
+# `extra_hosts` host-gateway mapping resolves to the bridge gateway address -
+# which a port bound to the host's loopback does not answer on. So there is no
+# route from this stack to a neighbouring one over the host at all; the shared
+# bridge is not an optimisation, it is the only door.
+#
+# What it costs, stated rather than buried: Prometheus becomes reachable from
+# everything else on that bridge, and Prometheus has no authentication (see the
+# section on that in the README). It is bounded by the two flags the compose
+# template deliberately does not set - without --web.enable-lifecycle and
+# --web.enable-admin-api there is no shutdown and no delete-series API to
+# reach - so what a neighbouring container gains is the ability to read
+# metrics, which every one of them already exposes to this Prometheus anyway.
+# Grafana deliberately does NOT join: it talks only to Prometheus, over this
+# stack's own network, and putting it here would widen the exposure of the one
+# service on the box that holds credentials.
+monitoring_scrape_network: 1panel-network
+
+# Containers named in monitoring_scrape_configs that belong to ANOTHER stack.
+# install-monitoring.yaml asserts each of these exists on the guest before it
+# writes anything.
+#
+# THIS IS THE POINT OF THE LIST. A cross-stack target is a container name
+# written here and defined somewhere else - gha-cache's is
+# gha_cache_container_name in ../gha-cache/vars/main.yaml - and the two can
+# drift with nothing linking them. Without the assert that drift presents as a
+# target permanently `down` in a UI nobody has open, which is the same
+# green-and-wrong shape the ../1panel/vars/main.yaml port comment warns about.
+monitoring_required_containers:
+  - gha-cache
+
+# ============================================
 # Scrape targets
 # ============================================
-# WHAT THIS SHIPS WITH IS THE TWO SERVICES IN THIS STACK, AND THAT IS THE HONEST
-# STATE OF IT. Prometheus scrapes itself, and Grafana exposes /metrics, so the
-# stack monitors its own health from the first run and nothing else.
-#
-# It is deliberately not more. Scraping the rest of the estate means installing
-# an exporter on each guest - node_exporter on the PVE hosts, cAdvisor for the
-# containers on this box, Harbor's and RustFS's own /metrics endpoints - and
-# each of those is its own playbook and its own firewall decision, not a line in
-# this list.
+# Three jobs: this stack's own two, and the Actions cache server next door.
+# Everything else on the estate is still unscraped, and that is still the honest
+# state of it - node_exporter on the PVE hosts and cAdvisor for this box's
+# containers do not exist yet, and each is its own playbook and its own firewall
+# decision rather than a line in this list.
 #
 # Adding one once the exporter exists is a single entry here plus a re-run.
-# `scheme` and `metrics_path` default to http and /metrics; give an entry the
-# guest's IP rather than its name for the same reason ../1panel/vars/main.yaml
-# uses addresses in `upstream` - these are static DHCP reservations keyed on the
-# VM's MAC, so they are as stable as the name and do not make Prometheus depend
-# on Unbound being up.
+# `scheme` and `metrics_path` default to http and /metrics; give an entry on
+# ANOTHER GUEST the guest's IP rather than its name, for the same reason
+# ../1panel/vars/main.yaml uses addresses in `upstream` - these are static DHCP
+# reservations keyed on the VM's MAC, so they are as stable as the name and do
+# not make Prometheus depend on Unbound being up.
 #
 #   - job_name: node
 #     targets:
 #       - 10.10.99.13:9100
 #       - 10.10.99.14:9100
 #
-# NOTE THE NAMES BELOW ARE CONTAINER NAMES, NOT HOSTS. Both services sit on this
-# stack's Compose network, where Docker's embedded DNS resolves the service name
-# to the container. `localhost` would be Prometheus' own container in the first
-# job and would be wrong in the second.
+# NOTE THE NAMES BELOW ARE CONTAINER NAMES, NOT HOSTS, and every one of them is
+# resolved by Docker's embedded DNS rather than by Unbound. The first two sit on
+# this stack's own Compose network; the third sits on monitoring_scrape_network
+# above, which is why Prometheus joins it. `localhost` would be Prometheus' own
+# container in the first job and would be wrong in the other two.
+#
+# THE PORT IS THE CONTAINER'S, NOT THE PUBLISHED ONE. gha-cache is published on
+# the host as 127.0.0.1:3400, but that mapping does not exist on the bridge -
+# over the network the container is reached on the 3000 it actually listens on.
+# Using 3400 here fails in the way that is hardest to spot: a connection refused
+# every 15 seconds, reported nowhere but the target page.
 monitoring_scrape_configs:
   - job_name: prometheus
     targets:
@@ -110,6 +154,125 @@ monitoring_scrape_configs:
   - job_name: grafana
     targets:
       - "{{ monitoring_grafana_container }}:3000"
+
+  # github-actions-cache-server. /metrics is served unauthenticated and needs
+  # NOTHING opened to be scraped - it is reached over the shared bridge, not
+  # through the TLS website, so the WAF and the token check in front of the API
+  # are untouched. That is deliberate and is the constraint this job was written
+  # under: ../gha-cache/vars/main.yaml records why SKIP_TOKEN_VALIDATION is the
+  # one variable that must never be set, and a scrape config is a read of
+  # /metrics, not a reason to loosen anything in front of the API.
+  #
+  # It exports cache_requests_total{result}, cache_uploads_total and
+  # cache_storage_bytes alongside the stock Node process and event-loop set -
+  # 134 series in total, of which the first three are the ones anything reads.
+  - job_name: gha-cache
+    targets:
+      - "gha-cache:3000"
+
+# ============================================
+# Remote write - Grafana Cloud
+# ============================================
+# Prometheus scrapes locally and forwards a SUBSET onward to a hosted stack, so
+# the estate can be alerted on from somewhere that is not the estate. Nothing
+# here changes what is scraped or what is kept locally: remote write is a copy
+# of samples as they are ingested, and the 90d/20GB TSDB above is unaffected.
+#
+# WHY FORWARD AT ALL, given there is a Grafana on this box already. Because the
+# local one is on the same guest as everything it watches, behind the same
+# OpenResty, on the same disk. It is the right place to look at metrics and the
+# wrong place to be told about them - an outage that takes the box out takes the
+# alert with it, which is the failure mode of every homelab monitor that has
+# only ever been tested while the box was up.
+#
+# OFF UNTIL CONFIGURED, AND THAT IS NOT A HALF-FINISHED STATE. The three values
+# below come from the vault and ship as placeholders; while any of them is still
+# a placeholder the remote_write block is not rendered at all, Prometheus starts
+# exactly as it did before, and the post-install output says what to populate.
+# The alternative - asserting on them - would break a re-run of a working stack
+# for the sake of a feature nobody had asked to turn on yet.
+monitoring_remote_write_placeholder: CHANGEME
+
+# The Prometheus push endpoint, the numeric instance id, and an Access Policy
+# token scoped to metrics:write. All three are read from Grafana Cloud's own
+# portal, under the stack's Prometheus "Details" / "Send Metrics" panel; the
+# token is minted under Access Policies and is the only one of the three that is
+# genuinely secret. All three are vaulted anyway - this tree is public, and the
+# push URL names the region and instance.
+#
+# metrics:write AND NOTHING ELSE. A token that can also read or delete is a
+# token that turns a compromised guest into a compromised history, and this
+# process only ever pushes.
+monitoring_remote_write_url: "{{ vault_grafana_cloud_prom_url }}"
+monitoring_remote_write_username: "{{ vault_grafana_cloud_prom_username }}"
+monitoring_remote_write_password: "{{ vault_grafana_cloud_prom_password }}"
+
+# Rendered only when all three are real. Kept as one expression rather than a
+# hand-set boolean so that populating the vault is the ONLY step - a separate
+# `enabled` flag is a second thing to remember and a second thing to get wrong.
+monitoring_remote_write_enabled: >-
+  {{ monitoring_remote_write_url | default('', true) | length > 0
+     and monitoring_remote_write_username | default('', true) | length > 0
+     and monitoring_remote_write_password | default('', true) | length > 0
+     and monitoring_remote_write_placeholder not in [
+           monitoring_remote_write_url,
+           monitoring_remote_write_username,
+           monitoring_remote_write_password,
+         ] }}
+
+# The token is written to a file of its own at 0600 rather than inlined into
+# prometheus.yml, and read with basic_auth's `password_file`. prometheus.yml is
+# 0644 and is the file that gets rendered in the panel's file browser, pasted
+# into a ticket and quoted in a diff; this one is neither. Same reasoning that
+# puts the Grafana admin password in the stack's .env instead of the compose
+# file.
+monitoring_remote_write_password_file: "{{ monitoring_prometheus_dir }}/remote-write-password"
+monitoring_remote_write_password_path: /etc/prometheus/remote-write-password
+
+# AN ALLOWLIST, NOT A DENYLIST, AND THAT DIRECTION IS THE WHOLE POINT.
+# Grafana Cloud bills on active series. The three scrape jobs above produce
+# something over 150 of them, most of it the Node runtime's event-loop
+# histograms and Go's own process gauges - none of which anyone will ever open,
+# and all of which would be paid for every month.
+#
+# So samples are dropped unless their metric name appears here, and the list is
+# short because it is meant to be: every entry should be something a dashboard
+# or an alert actually reads. Adding one is a line here plus a re-run; the cost
+# of getting it wrong in this direction is a missing series, which is visible.
+# The cost of getting it wrong in the other direction is a bill.
+#
+#   cache_*                    - the Actions cache server's own counters. The
+#                                reason this list exists at all: a flat
+#                                cache_requests_total while CI is running is how
+#                                a silently-reverted runner patch becomes
+#                                visible instead of just cheap.
+#   up                         - one series per target. Without it a target that
+#                                stops answering is indistinguishable from a
+#                                target with nothing to say.
+#   process_start_time_seconds - one series per target, and it is what tells a
+#                                counter reset apart from a genuine flatline.
+#                                A restarted container zeroes every counter it
+#                                exports; without this an alert reading those
+#                                counters cannot tell which happened.
+monitoring_remote_write_keep_metrics:
+  - cache_requests_total
+  - cache_uploads_total
+  - cache_storage_bytes
+  - process_start_time_seconds
+  - up
+
+# Attached to every forwarded series, not to anything stored locally. Two jobs:
+# it says which estate a series came from once more than one pushes to the same
+# stack, and it stops `up{job="prometheus"}` from this box colliding with the
+# identically-named series from anywhere else.
+#
+# NOT VAULTED, deliberately, unlike every hostname in this repo. These are
+# already in this tree's directory names (live/ansible/inventories/petruk-pve/
+# petruk-pve0), they resolve nowhere, and a label whose value is secret is a
+# label nobody can use in a query they paste into a ticket.
+monitoring_external_labels:
+  site: petruk-pve0
+  env: homelab
 
 # ============================================
 # Grafana

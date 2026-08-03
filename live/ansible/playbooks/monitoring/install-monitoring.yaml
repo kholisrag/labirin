@@ -177,6 +177,69 @@
         - monitoring
         - preflight
 
+    # The compose file declares monitoring_scrape_network `external: true`, so
+    # Compose refuses to create it and the stack does not come up if it is gone.
+    # Read-only, and before anything is written, for the same reason as the port
+    # check above: this failure otherwise arrives as a stack that exists and
+    # will not start.
+    - name: List the container networks
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/network/search"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          page: 1
+          pageSize: 100
+          info: ""
+          orderBy: created_at
+          order: "null"
+      register: monitoring_networks
+      changed_when: false
+      tags:
+        - monitoring
+        - preflight
+
+    - name: Assert the shared scrape network exists
+      ansible.builtin.assert:
+        that:
+          - monitoring_scrape_network in (monitoring_networks.json.data['items'] | default([]) | map(attribute='name') | list)
+        fail_msg: >-
+          Docker network '{{ monitoring_scrape_network }}' does not exist on the
+          1Panel guest. Prometheus joins it to reach the scrape targets that
+          belong to other stacks, and the compose file declares it
+          `external: true`, so Compose will refuse to create it.
+          This is 1Panel's own bridge - if a panel upgrade has renamed it,
+          update monitoring_scrape_network in vars/main.yaml to match, and
+          ../gha-cache/vars/main.yaml with it.
+      tags:
+        - monitoring
+        - preflight
+
+    # A cross-stack scrape target is a container name written in this playbook's
+    # vars and DEFINED in another playbook's, with nothing linking the two. The
+    # panel already told us every container on the box for the port check above,
+    # so confirming they still agree costs one assert.
+    #
+    # Without it the two drift silently: the target sits `down` on a page nobody
+    # has open, every query over it returns no data, and an alert written
+    # against it never fires - which reads exactly like a service that is
+    # healthy.
+    - name: Assert every cross-stack scrape target's container exists
+      ansible.builtin.assert:
+        that:
+          - item in (monitoring_containers.json.data['items'] | default([]) | map(attribute='name') | list)
+        fail_msg: >-
+          No container named '{{ item }}' on this guest, but
+          monitoring_scrape_configs in vars/main.yaml scrapes it. Either its
+          stack is not installed, or it has been renamed where it is defined -
+          gha-cache's name is gha_cache_container_name in
+          ../gha-cache/vars/main.yaml - and this playbook's copy was not updated
+          with it.
+      loop: "{{ monitoring_required_containers }}"
+      tags:
+        - monitoring
+        - preflight
+
     - name: Record whether the stack already exists
       ansible.builtin.set_fact:
         monitoring_exists: >-
@@ -397,6 +460,103 @@
         - monitoring
         - config
 
+    # ===== REMOTE WRITE CREDENTIAL =====
+    # Handled apart from the loop above rather than as a fourth entry in it, for
+    # one reason: no_log is a property of a TASK, not of a loop item. Folding
+    # this file into monitoring_config_files would mean no_log on the whole
+    # loop, which hides WHICH configuration file changed - the one thing that
+    # block's read-before-write exists to report.
+    #
+    # CREATED UNCONDITIONALLY, even with remote write off. The compose file
+    # bind-mounts it, and docker creates a missing bind-mount source as a
+    # root-owned directory - after which Prometheus exits on startup reading a
+    # directory where a password should be. An unconfigured stack writes the
+    # placeholder here and simply never renders a remote_write block.
+    - name: Create the remote-write password file if it is missing
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ monitoring_remote_write_password_file }}"
+          mode: 384 # 0600, as the decimal int the API wants
+          isDir: false
+        status_code: [200, 500]
+      register: monitoring_rw_touch
+      changed_when: monitoring_rw_touch.json.code | default(0) == 200
+      failed_when:
+        - monitoring_rw_touch.json.code | default(0) != 200
+        - "'exist' not in (monitoring_rw_touch.json.message | default(''))"
+      tags:
+        - monitoring
+        - config
+
+    # Read back for the same reason the block above does - so an unchanged token
+    # does not restart Prometheus on every run - and no_log for the obvious one.
+    - name: Read the remote-write password currently on the guest
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/content"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ monitoring_remote_write_password_file }}"
+          expand: true
+          page: 1
+          pageSize: 5000
+        status_code: [200, 500]
+      register: monitoring_rw_current
+      changed_when: false
+      no_log: true
+      tags:
+        - monitoring
+        - config
+
+    - name: Record whether the remote-write password needs writing
+      ansible.builtin.set_fact:
+        monitoring_rw_pending: >-
+          {{ (monitoring_rw_current.json.data | default({}) | default({}, true)).content | default('') | trim
+             != monitoring_remote_write_password | trim }}
+      no_log: true
+      tags:
+        - monitoring
+        - config
+
+    - name: Write the remote-write password
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/save"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ monitoring_remote_write_password_file }}"
+          content: "{{ monitoring_remote_write_password }}"
+      when: monitoring_rw_pending | bool
+      register: monitoring_rw_written
+      failed_when: monitoring_rw_written.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - monitoring
+        - config
+
+    # 0600 keeps it from every other user on the guest; the owner is what keeps
+    # it readable by the one process that needs it. The Files API creates as
+    # root, and Prometheus runs as nobody.
+    - name: Own the remote-write password file as the Prometheus user
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/owner"
+        method: POST
+        headers: "{{ monitoring_api_headers }}"
+        body:
+          path: "{{ monitoring_remote_write_password_file }}"
+          user: "{{ monitoring_prometheus_uid | string }}"
+          group: "{{ monitoring_prometheus_gid | string }}"
+          sub: false
+      register: monitoring_rw_chown
+      failed_when: monitoring_rw_chown.json.code | default(0) != 200
+      changed_when: false
+      tags:
+        - monitoring
+        - config
+
     # ===== STACK =====
     # Create and update are different endpoints with different bodies, and
     # neither one does the other's job: /compose 400s on a name that already has
@@ -493,6 +653,22 @@
     #
     # Skipped entirely on the first run: the stack was just created, so the
     # containers have already read the current files.
+    #
+    # The remote-write password is on this list too. basic_auth's password_file
+    # is read at configuration load and not per request, so a rotated token that
+    # is written and not bounced leaves Prometheus authenticating with the old
+    # one - and remote write fails in the background with 401s that reach no
+    # scrape target and redden nothing.
+    - name: Collect the containers whose configuration changed
+      ansible.builtin.set_fact:
+        monitoring_restart_names: >-
+          {{ (monitoring_config_pending | default([]) | map(attribute='restarts') | list
+              + ([monitoring_prometheus_container] if monitoring_rw_pending | default(false) | bool else []))
+             | unique | list }}
+      tags:
+        - monitoring
+        - config
+
     - name: Restart the containers whose configuration changed
       ansible.builtin.uri:
         url: "{{ panel_api_base }}/api/v2/containers/operate"
@@ -501,11 +677,11 @@
         body:
           # `names`, plural and a list. The singular `name` is rejected with a
           # validation error naming a field that is not in the docs.
-          names: "{{ monitoring_config_pending | map(attribute='restarts') | unique | list }}"
+          names: "{{ monitoring_restart_names }}"
           operation: restart
       when:
         - monitoring_exists | bool
-        - monitoring_config_pending | default([]) | length > 0
+        - monitoring_restart_names | length > 0
       register: monitoring_restarted
       # THE BODY CODE IS NOT PROOF THE CONTAINER EXISTED. This endpoint answers
       # 200 "success" for a name docker has never heard of, so a typo in a
@@ -517,6 +693,25 @@
       tags:
         - monitoring
         - config
+
+    # Its own task rather than more conditional entries in the message below:
+    # every line of that one is unconditional, and threading an `if` through a
+    # dozen of them to hide five is how a display task becomes unreadable.
+    - name: Explain how to turn remote write on
+      ansible.builtin.debug:
+        msg:
+          - "Metrics are collected locally and go NO FURTHER. To forward them,"
+          - "put the Grafana Cloud push URL, the numeric instance id, and an"
+          - "Access Policy token scoped to metrics:write and nothing else, in:"
+          - ""
+          - "  ansible-vault edit live/ansible/playbooks/monitoring/vars/vault.yaml"
+          - ""
+          - "replacing the {{ monitoring_remote_write_placeholder }} placeholders on all three, then re-run."
+          - "Until then this stack is exactly what it was: local, and only local."
+          - ""
+      when: not monitoring_remote_write_enabled | bool
+      tags:
+        - always
 
     - name: Display post-install instructions
       ansible.builtin.debug:
@@ -531,6 +726,11 @@
           - "Compose    : {{ monitoring_compose_file }}"
           - "TSDB       : {{ monitoring_prometheus_data_dir }} ({{ monitoring_prometheus_retention_time }} / {{ monitoring_prometheus_retention_size }})"
           - "Scraping   : {{ monitoring_scrape_configs | map(attribute='job_name') | join(', ') }}"
+          - >-
+            Shipping   : {{ 'Grafana Cloud, ' ~ (monitoring_remote_write_keep_metrics | length)
+                            ~ ' metric names allowlisted'
+                            if monitoring_remote_write_enabled | bool
+                            else 'NOTHING - remote write is not configured' }}
           - ""
           - "Neither is reachable yet unless the websites exist. Create them with:"
           - "  ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \\"

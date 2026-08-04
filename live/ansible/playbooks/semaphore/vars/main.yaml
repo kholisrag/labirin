@@ -89,7 +89,7 @@ semaphore_port: 3600
 # SQLite, on a bind mount. There is no second service in this stack and no
 # 1Panel PostgreSQL database to create - unlike ../gha-cache, which needed both.
 #
-# The workload is one Ansible template applied on a five-minute gate (ADR-0123
+# The workload is one Ansible template applied on a five-minute gate (ADR-0125
 # §B) plus a daily backstop; the table that grows is task history. A managed
 # Postgres beside it would be another thing to patch and back up for that.
 semaphore_db_dialect: sqlite
@@ -136,7 +136,7 @@ semaphore_tmp_dir: "{{ semaphore_data_dir }}/tmp"
 # ============================================
 # SEMAPHORE_MAX_PARALLEL_TASKS. The default is 9999.
 #
-# TWO SCHEDULES POINT AT THE SAME PLAY (ADR-0123 §B): a five-minute gate and a
+# TWO SCHEDULES POINT AT THE SAME PLAY (ADR-0125 §B): a five-minute gate and a
 # daily ungated apply. Without this they can overlap, and two `serial: 1` runs
 # interleaving across the same four hosts is exactly the concurrent apply that
 # ADR-0119 §D's one-host-at-a-time exists to prevent - it would satisfy

@@ -25,7 +25,7 @@
   # tasks/fireactions.yaml - the play's own existing health definition, not a
   # new one. It proves the host is HEALTHY and never that it is on the NEW
   # configuration; a silent no-op looks identical to a clean apply. Semaphore's
-  # task history is where that distinction lives. ADR-0119 §D, ADR-0123 §E.
+  # task history is where that distinction lives. ADR-0119 §D, ADR-0125 §E.
   serial: 1
   max_fail_percentage: 0
 

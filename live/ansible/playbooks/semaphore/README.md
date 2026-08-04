@@ -13,7 +13,7 @@ that repository is not:
   never reaches a Fireactions host"* — why a central controller instead of a
   pull timer on each host, and why the vault password lives here rather than on
   the four machines that run untrusted CI inside microVMs.
-- **ADR-0123**, *"The trigger is a poll"* — why there is no merge trigger, and
+- **ADR-0125**, *"The trigger is a poll"* — why there is no merge trigger, and
   what replaced it.
 
 **Everything the playbook cannot do is in [Configuring Semaphore](#configuring-semaphore)
@@ -153,7 +153,7 @@ compares the checked-out `HEAD` against the newest **successful**
 `fireactions-apply` task's `commit_hash` and starts an apply only when they
 differ — and refuses to start one while another is queued or running. Read its
 header before changing it; both of those guards exist for a reason the script
-states. ADR-0123 §B, §E.
+states. ADR-0125 §B, §E.
 
 ### 5. Two schedules, and they do different jobs
 
@@ -165,7 +165,7 @@ states. ADR-0123 §B, §E.
 The daily one is **ungated on purpose**. A broken gate looks exactly like a
 repository that has not changed — nothing fires, nothing goes red — so the
 second schedule bounds that at 24 hours. It costs one idempotent `changed=0`
-run a day. ADR-0123 §F.
+run a day. ADR-0125 §F.
 
 ## Verifying
 
@@ -189,7 +189,7 @@ looking.
 host is *healthy*, never that it is on the *new* configuration — a silent no-op
 is indistinguishable from a clean apply. The task log is where that difference
 lives, which is why the gate exists to keep it free of no-op runs.
-ADR-0119 §D, ADR-0123 §E.
+ADR-0119 §D, ADR-0125 §E.
 
 ## Known limits
 
@@ -205,4 +205,4 @@ ADR-0119 §D, ADR-0123 §E.
   renders every template here, with no commit in this repository in between.
   ADR-0119 §H.
 - **`curl`, `jq`, `git` and `bash` for the gate come from the same image** and
-  are pinned by nothing else. ADR-0123 §H.
+  are pinned by nothing else. ADR-0125 §H.

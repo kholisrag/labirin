@@ -21,7 +21,7 @@ jobs:
     name: yamllint + ansible-lint
     # GitHub-hosted, and there is no alternative: this repository has zero
     # self-hosted runners and is owned by a user account, so the platform
-    # organisation's runners are out of reach. ADR-0123 §C.
+    # organisation's runners are out of reach. ADR-0125 §C.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

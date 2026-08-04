@@ -55,7 +55,7 @@ services:
       SEMAPHORE_WEB_ROOT: "{{ semaphore_web_root }}"
 
       # ONE. Two schedules point at the same play and an overlap would run two
-      # `serial: 1` applies across the same four hosts at once. ADR-0123 §B.
+      # `serial: 1` applies across the same four hosts at once. ADR-0125 §B.
       SEMAPHORE_MAX_PARALLEL_TASKS: "{{ semaphore_max_parallel_tasks }}"
 
       # ===== Its own credentials, from the stack's .env =====

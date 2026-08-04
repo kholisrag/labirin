@@ -3,7 +3,7 @@
 # Start the Fireactions apply, but only when `main` has actually moved.
 #
 # Run BY SEMAPHORE, as a `bash` task template on a five-minute schedule, with
-# this repository as the working directory. ADR-0123 §B.
+# this repository as the working directory. ADR-0125 §B.
 #
 # WHY THIS EXISTS AT ALL. Semaphore's schedules are cron and nothing else -
 # there is no "run only when the repository has new commits" option - and an
@@ -11,7 +11,7 @@
 # every five minutes forever. The play is idempotent so that is harmless, but
 # ADR-0119 §D leans on Semaphore's task history as the ONLY answer to "is this
 # host on the new configuration", and a log that is 99% no-op runs destroys the
-# one signal it bought. ADR-0123 §E.
+# one signal it bought. ADR-0125 §E.
 #
 # WHAT IT COMPARES, AND WHY BOTH SIDES ARE FREE:
 #
@@ -32,7 +32,7 @@
 # deployment/docker/server/Dockerfile. They are NOT pinned by anything in this
 # repository, which is the sibling of ADR-0119 §H's unpinned-Ansible problem:
 # a Semaphore image bump can change them with no commit here in between.
-# ADR-0123 §H.
+# ADR-0125 §H.
 
 set -euo pipefail
 

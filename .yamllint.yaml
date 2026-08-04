@@ -1,0 +1,76 @@
+---
+# yamllint configuration for this repository.
+#
+# It exists because CI needed one, and CI needed one because there was no
+# `.github/` here at all until now - every change was read by a person at a
+# terminal before it was applied. ADR-0119 §G.
+#
+# THE RULES BELOW ARE RELAXED TO MATCH WHAT THIS TREE ALREADY IS, not to
+# describe an aspiration. A lint config that fails on 700 existing lines is a
+# lint config nobody can turn on, and the first thing it teaches is that red is
+# normal.
+
+extends: default
+
+ignore:
+  # Not ours, and not in git either - listed so a local run over an unclean
+  # working tree behaves like CI does.
+  - .labirin_venv/
+  - .ansible/
+  # SOPS OUTPUT, NOT SOURCE. Every finding this config produced on its first
+  # run over the tree - 26 of them, all `indentation` or `comments` - was in a
+  # *.enc.yaml under live/opentofu/. Those files are written by `sops`, so the
+  # indentation being complained about is a serialiser's and reformatting them
+  # to satisfy a linter would change ciphertext for nothing.
+  - "**/*.enc.yaml"
+  # An ansible-vault file is `$ANSIBLE_VAULT;1.1;AES256` followed by hex, which
+  # parses as one plain scalar and passes today. Excluded anyway so that a
+  # future rule change cannot make 13 unreadable files start failing CI.
+  - "**/vault.yaml"
+
+rules:
+  # OFF, and this is the repo's own existing decision rather than a new one:
+  # .ansible-lint.yaml already carries `skip_list: [yaml[line-length]]`, which
+  # is the same rule reached through ansible-lint. Turning it on here would
+  # contradict a file already in the tree and flag several hundred lines whose
+  # length is mostly explanatory comment.
+  line-length: disable
+
+  # OFF. Roughly a third of the YAML here opens without `---`, including every
+  # inventory and several vars files, and the marker changes nothing about how
+  # any of them parse.
+  document-start: disable
+
+  # THESE THREE ARE ANSIBLE-LINT'S REQUIREMENTS, NOT PREFERENCES. It reads this
+  # file, and refuses to run its own fix mode against a config that disagrees:
+  # "Found incompatible custom yamllint configuration". Changing any of them
+  # brings that warning back on every run, here and in CI.
+  comments-indentation: disable
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+
+  # WARNING, not error. Vaulted files are `$ANSIBLE_VAULT;1.1;AES256` followed
+  # by hex, which parses as one long plain scalar - legal YAML that no rule
+  # here is really inspecting. Keeping this at warning means a genuinely
+  # malformed document is still visible without the 13 vault files having to be
+  # special-cased by path.
+  key-duplicates:
+    level: warning
+
+  # Ansible convention: `on`, `off`, `yes` and `no` appear as ordinary strings
+  # in task arguments often enough that the strict truthy check is noise.
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+
+  comments:
+    # The default requires two spaces before an inline comment and this tree is
+    # consistent about one in places. The content of comments here is unusually
+    # load-bearing; the spacing is not.
+    min-spaces-from-content: 1
+
+  braces:
+    # `{{ x }}` is Ansible's own spacing and the default rejects it.
+    min-spaces-inside: 0
+    max-spaces-inside: 1

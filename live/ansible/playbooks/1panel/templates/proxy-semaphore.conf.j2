@@ -1,0 +1,52 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# Semaphore is the only site on this box that is a control plane rather than a
+# cache or a dashboard: behind this login page are SSH access to the four
+# fireactions hosts and the estate's Ansible vault password. ADR-0119 §C, §H.
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+
+    # WEBSOCKETS, AND THEY ARE NOT OPTIONAL. api/router.go registers
+    # `/api/ws` (sockets.Handler), which is how the UI streams a running task's
+    # output. Without the Upgrade pair nginx answers the handshake with a plain
+    # 200 and the task page renders a log that never advances - the task itself
+    # runs perfectly, which is what makes this look like Semaphore hanging.
+    #
+    # $http_connection, matching proxy-grafana.conf.j2 next door - it passes the
+    # client's own Connection header through. The map-based $connection_upgrade
+    # idiom found in most nginx examples needs a `map` block in the http scope,
+    # which is not ours to add here: these files are per-site `location` blocks
+    # included by 1Panel, so a directive that must live in `http` cannot go in
+    # one, and referencing an undefined variable fails the whole OpenResty
+    # config rather than this one site.
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $http_connection;
+
+    # An Ansible apply across four hosts, one at a time, runs for minutes, and
+    # the websocket carrying its output is idle between tasks. The stock 60s
+    # read timeout closes it mid-run. 3600s outlasts any roll this play can
+    # produce; the task keeps running server-side either way, so this only
+    # decides whether anyone can watch it.
+    proxy_connect_timeout 75s;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    # Buffering off so the task log arrives as it is produced rather than in
+    # bursts when a buffer fills - the whole point of the websocket.
+    proxy_buffering off;
+
+    # client_max_body_size is deliberately NOT raised. Nothing here uploads:
+    # repositories are cloned by the server from GitHub, and Key Store entries
+    # are a form field. The 1m default is a free cap.
+}

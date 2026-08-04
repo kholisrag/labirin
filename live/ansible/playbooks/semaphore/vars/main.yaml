@@ -1,0 +1,179 @@
+---
+# ============================================
+# Semaphore UI - the unattended Ansible runner
+# ============================================
+# One Compose stack, one service, created through 1Panel's own API rather than
+# over SSH - the same shape as ../athens, ../gha-cache and ../monitoring. A
+# stack created with `from: edit` shows up in Containers > Compose exactly like
+# one made in the dashboard, so the panel stays the single place where the box's
+# containers are listed, logged and restarted.
+#
+# Consequence worth knowing: 1Panel decides where the files live. `from: edit`
+# writes to {DataDir}/docker/compose/{name}/docker-compose.yml and a sibling
+# .env - see loadPath()/newComposeEnv() in agent/app/service/container_compose.go.
+# The paths below mirror that decision; they are not free choices.
+#
+# WHAT THIS BOX BECOMES BY RUNNING THIS. Semaphore holds SSH access to the four
+# fireactions hosts and the estate's Ansible vault password in its Key Store.
+# That concentration is the decision, not an oversight: the alternative put the
+# same password on four machines that run arbitrary organisation CI inside
+# Firecracker microVMs. Read ADR-0119 §C before moving any of it.
+
+# https://github.com/semaphoreui/semaphore/releases
+#
+# NOT `latest`, and not a v2.19.x - every v2.19 tag published so far is `-rc` or
+# `-beta`. v2.18.29 was the newest stable release on 2026-08-04.
+#
+# THIS TAG IS ALSO THE ANSIBLE PIN, which is not obvious and is the more
+# important half. deployment/docker/server/Dockerfile carries
+# `ARG ANSIBLE_VERSION=13.5.0` and pip-installs exactly that into the image's
+# venv, so the Ansible that renders every template in this repository is chosen
+# here and nowhere else. labirin's own requirements.txt pins no ansible at all
+# (ADR-0119 §H), which makes this line the only pin there is. Moving it moves
+# the Ansible; read the release notes for both.
+semaphore_version: v2.18.29
+
+semaphore_compose_name: semaphore
+semaphore_container_name: semaphore
+
+# {DataDir} is /opt/1panel on this install.
+semaphore_compose_dir: /opt/1panel/docker/compose/{{ semaphore_compose_name }}
+semaphore_compose_file: "{{ semaphore_compose_dir }}/docker-compose.yml"
+
+# ============================================
+# Identity
+# ============================================
+# One name, an Unbound ALIAS onto the 1Panel host - there is no second guest to
+# address, the same as Athens and gha-cache. Add it in
+# live/ansible/playbooks/opnsense/vars/vault.yaml under unbound_host_aliases or
+# the name does not resolve and the website is unreachable.
+#
+# Vaulted, like every name in this estate. See live/ansible/README.md.
+semaphore_host: "{{ vault_semaphore_host }}"
+
+# SEMAPHORE_WEB_ROOT. Not cosmetic: it is what the server builds its own
+# absolute URLs from, so a disagreement between this and the website's name
+# presents as a login that bounces rather than as a 404.
+#
+# It is also written into config.json on the FIRST RUN ONLY - see the note on
+# first-run behaviour further down - so changing it later needs the environment
+# variable to stay set, which it does, because config.go re-reads every `env:`
+# tagged field at each start and overrides the file.
+semaphore_web_root: "https://{{ semaphore_host }}"
+
+# ============================================
+# Listener
+# ============================================
+# Loopback ONLY. OpenResty on this box runs with `network_mode: host` (see its
+# docker-compose.yml), so 127.0.0.1 from nginx *is* the host's loopback and the
+# reverse proxy reaches this fine. Anything else on the LAN cannot, which is the
+# point: the only way in is the TLS website, and there is no second plaintext
+# door on 10.10.99.10:3600.
+#
+# This one carries more than the others do. Semaphore is a login page in front
+# of SSH-to-four-hosts and the vault password; a plaintext port answering on the
+# LAN would be the whole of ADR-0119 §C undone. ADR-0119 §H names it a
+# high-value target in as many words.
+semaphore_bind_address: 127.0.0.1
+
+# 3600 continues the box's sequence - Athens 3300, gha-cache 3400, Grafana 3500.
+# 3000 is the image's own listening port and is NOT available: Gitea has it, and
+# it is the reason Athens moved to 3300 in the first place. The container still
+# listens on 3000 internally; only the host side moved. The preflight task in
+# install-semaphore.yaml fails the run if this ever collides.
+semaphore_port: 3600
+
+# ============================================
+# Database
+# ============================================
+# SQLite, on a bind mount. There is no second service in this stack and no
+# 1Panel PostgreSQL database to create - unlike ../gha-cache, which needed both.
+#
+# The workload is one Ansible template applied on a five-minute gate (ADR-0123
+# §B) plus a daily backstop; the table that grows is task history. A managed
+# Postgres beside it would be another thing to patch and back up for that.
+semaphore_db_dialect: sqlite
+
+# ============================================
+# Persistence - three bind mounts, and all three matter
+# ============================================
+# THE OWNER IS 1001:0, NOT root AND NOT 1000. The image does
+# `adduser -D -u 1001 -G root semaphore` and chowns its own directories to
+# `semaphore:0` at build time; a bind mount ignores every one of those chowns.
+# Docker then creates a missing bind-mount source as root-owned, so without the
+# chown task in install-semaphore.yaml the container starts, fails to write, and
+# restarts - the same failure Athens hit at uid 1000 and for the same reason.
+#
+# Group 0 rather than a `semaphore` group is upstream's choice, not ours: it is
+# what makes the image work under an arbitrary uid on OpenShift-style runtimes.
+semaphore_uid: 1001
+semaphore_gid: 0
+
+semaphore_data_dir: "{{ semaphore_compose_dir }}/data"
+
+# SEMAPHORE_DB_PATH. A DIRECTORY, not a file - server-wrapper appends
+# `/database.sqlite` itself when the dialect is sqlite. Naming the file here
+# gets you `…/database.sqlite/database.sqlite`.
+#
+# It is also where the checked-out git repositories live, so this is the mount
+# that has size.
+semaphore_lib_dir: "{{ semaphore_data_dir }}/lib"
+
+# SEMAPHORE_CONFIG_PATH. config.json lives here and IS GENERATED ONCE - the
+# entrypoint runs `semaphore setup` only when the file is absent. Lose this
+# volume and the next start re-runs setup and re-creates the admin user; keep it
+# and the admin password variable below is inert after the first run.
+semaphore_config_dir: "{{ semaphore_data_dir }}/etc"
+
+# SEMAPHORE_TMP_PATH. Ephemeral by name and not by consequence: it is the
+# working directory for a running task, and the galaxy-requirements hash cache
+# that stops `ansible-galaxy install` re-running on every single task lives
+# under it. Losing it costs a slow first task, not correctness.
+semaphore_tmp_dir: "{{ semaphore_data_dir }}/tmp"
+
+# ============================================
+# Concurrency - ONE, deliberately
+# ============================================
+# SEMAPHORE_MAX_PARALLEL_TASKS. The default is 9999.
+#
+# TWO SCHEDULES POINT AT THE SAME PLAY (ADR-0123 §B): a five-minute gate and a
+# daily ungated apply. Without this they can overlap, and two `serial: 1` runs
+# interleaving across the same four hosts is exactly the concurrent apply that
+# ADR-0119 §D's one-host-at-a-time exists to prevent - it would satisfy
+# `serial: 1` twice over and still touch two hosts at once.
+#
+# This is the cheap half of the fix. The gate script does the other half by
+# refusing to fire while a task for the same template is unfinished; see the
+# header of files/gate-fireactions.sh for why the queue alone is not enough.
+semaphore_max_parallel_tasks: 1
+
+# ============================================
+# Its own credentials
+# ============================================
+# All four are vault material, like every other stack on this box (ADR-0119 §H).
+# Generate them with the commands in the README - none has a usable default and
+# two of them are not recoverable.
+#
+# SEMAPHORE_ACCESS_KEY_ENCRYPTION IS THE ONE THAT CANNOT BE ROTATED CASUALLY. It
+# is the key every Key Store item is encrypted with at rest - including the
+# Ansible vault password and the SSH key for the four fireactions hosts. It is
+# NOT written into config.json by the entrypoint (the setup stdin never carries
+# it), so it is read from this environment at every single start. Lose it and
+# every stored credential is undecryptable and has to be re-entered by hand.
+semaphore_access_key_encryption: "{{ vault_semaphore_access_key_encryption }}"
+semaphore_cookie_hash: "{{ vault_semaphore_cookie_hash }}"
+semaphore_cookie_encryption: "{{ vault_semaphore_cookie_encryption }}"
+
+# The bootstrap admin. Consumed on the FIRST RUN ONLY - `semaphore setup` runs
+# only when config.json is absent - so changing this afterwards does nothing and
+# the password must be changed in the UI. Kept here so a rebuild from an empty
+# volume is reproducible rather than interactive.
+semaphore_admin_user: "{{ vault_semaphore_admin_user }}"
+semaphore_admin_email: "{{ vault_semaphore_admin_email }}"
+semaphore_admin_name: Semaphore Admin
+semaphore_admin_password: "{{ vault_semaphore_admin_password }}"
+
+# What the preflight compares the vault against, so a half-configured vault
+# fails in the first seconds of a run rather than in a container log nobody is
+# tailing. Same mechanism as ../gha-cache.
+semaphore_placeholder: CHANGEME

@@ -1,0 +1,100 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/semaphore/install-semaphore.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# 1Panel stores this at /opt/1panel/docker/compose/semaphore/docker-compose.yml
+# with the .env beside it. Both are written by the panel, not by Ansible over
+# SSH, so the panel's own Compose page stays authoritative for start/stop/logs.
+#
+# Every secret is referenced as ${...} and lives in that .env, so the compose
+# detail page the dashboard renders carries no credentials.
+#
+# ONE service, no database container: SQLite on a bind mount. Three mounts, all
+# persistent - see vars/main.yaml for what is lost with each.
+services:
+  {{ semaphore_container_name }}:
+    image: semaphoreui/semaphore:{{ semaphore_version }}
+    container_name: {{ semaphore_container_name }}
+    restart: always
+
+    # Loopback only - see semaphore_bind_address in vars/main.yaml. This is what
+    # OpenResty proxies to; OpenResty runs with network_mode: host, so it
+    # reaches the published port and nothing on the LAN does.
+    ports:
+      - "{{ semaphore_bind_address }}:{{ semaphore_port }}:3000"
+
+    # NO `networks:` KEY, AND NO 1panel-network. Unlike ../gha-cache this stack
+    # talks to nothing else on this box - its database is a file and its targets
+    # are the four fireactions guests over SSH. Compose therefore gives it the
+    # project default bridge, which NATs outbound, which is all it needs: git
+    # over HTTPS to GitHub, ansible-galaxy, and SSH out to the LAN.
+    #
+    # Joining 1panel-network would make every other stack on that bridge
+    # reachable from the one container holding the estate vault password.
+
+    volumes:
+      # SEMAPHORE_DB_PATH - the SQLite file and every checked-out repository.
+      - {{ semaphore_lib_dir }}:/var/lib/semaphore
+      # SEMAPHORE_CONFIG_PATH - config.json, written once by `semaphore setup`.
+      - {{ semaphore_config_dir }}:/etc/semaphore
+      # SEMAPHORE_TMP_PATH - task working directories and the galaxy hash cache.
+      - {{ semaphore_tmp_dir }}:/tmp/semaphore
+
+    environment:
+      # ===== Database =====
+      # A DIRECTORY. server-wrapper appends /database.sqlite itself for this
+      # dialect; naming the file here nests it one level too deep.
+      SEMAPHORE_DB_DIALECT: "{{ semaphore_db_dialect }}"
+      SEMAPHORE_DB_PATH: /var/lib/semaphore
+
+      SEMAPHORE_CONFIG_PATH: /etc/semaphore
+      SEMAPHORE_TMP_PATH: /tmp/semaphore
+
+      # What the server builds its own absolute URLs from. Must agree with the
+      # 1Panel website's primary domain or logins bounce - see vars/main.yaml.
+      SEMAPHORE_WEB_ROOT: "{{ semaphore_web_root }}"
+
+      # ONE. Two schedules point at the same play and an overlap would run two
+      # `serial: 1` applies across the same four hosts at once. ADR-0123 §B.
+      SEMAPHORE_MAX_PARALLEL_TASKS: "{{ semaphore_max_parallel_tasks }}"
+
+      # ===== Its own credentials, from the stack's .env =====
+      # ACCESS_KEY_ENCRYPTION decrypts every Key Store item - the Ansible vault
+      # password and the fireactions SSH key among them. It is never written to
+      # config.json, so it is read from here at EVERY start, not just the first.
+      # Losing it means re-entering every credential by hand.
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION}
+      SEMAPHORE_COOKIE_HASH: ${SEMAPHORE_COOKIE_HASH}
+      SEMAPHORE_COOKIE_ENCRYPTION: ${SEMAPHORE_COOKIE_ENCRYPTION}
+
+      # First run only - `semaphore setup` runs only when config.json is absent.
+      # Inert on every subsequent start; change the password in the UI.
+      SEMAPHORE_ADMIN: ${SEMAPHORE_ADMIN}
+      SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD}
+      SEMAPHORE_ADMIN_NAME: "{{ semaphore_admin_name }}"
+      SEMAPHORE_ADMIN_EMAIL: ${SEMAPHORE_ADMIN_EMAIL}
+
+      # ===== Deliberately absent =====
+      # SEMAPHORE_RUNNER_* - there are no remote runners. Tasks execute in this
+      # container, which is what puts the vault password here and only here.
+      #
+      # SEMAPHORE_TLS_* - TLS terminates at OpenResty with the estate wildcard.
+      # Enabling it here would need a certificate inside the container for a
+      # connection that never leaves loopback.
+      #
+      # SEMAPHORE_LDAP_* / SEMAPHORE_TOTP_* / SEMAPHORE_OIDC_PROVIDERS - Pro
+      # features. ADR-0119 §B: Community is MIT and covers schedules, the Key
+      # Store, the REST API and git integration, which is all of what this uses.
+
+    healthcheck:
+      # /api/ping is the unauthenticated liveness route. It says the HTTP layer
+      # is serving; it does not say SQLite opened. That is still the useful
+      # probe, because a server that cannot open its database exits rather than
+      # serving unhealthily. Alpine base, so wget is present.
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Longer than the others on this box: a first start runs `semaphore setup`
+      # and the schema migrations before it answers anything.
+      start_period: 60s

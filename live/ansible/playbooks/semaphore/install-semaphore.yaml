@@ -4,7 +4,19 @@
   gather_facts: false
 
   vars:
-    ansible_python_interpreter: "{{ playbook_dir | regex_replace('(.*labirin).*', '\\1') }}/.labirin_venv/bin/python3"
+    # ANCHORED ON THE TREE'S OWN LAYOUT, NOT ON THE WORD "labirin".
+    #
+    # The other stack playbooks here write this as
+    # `regex_replace('(.*labirin).*', '\1')`, which finds the repository root by
+    # looking for its NAME in the path. That is correct only while the checkout
+    # is called `labirin`: `.*labirin` is greedy and a worktree at
+    # `.wt/labirin-665-semaphore-apply/...` makes it match the directory name
+    # instead, resolving the interpreter to `.wt/labirin/.labirin_venv/bin/python3`
+    # and failing with rc=127 on the first task that runs a module.
+    #
+    # Stripping from `/live/ansible/` instead depends on the layout the file is
+    # already sitting in, which cannot drift without moving the file.
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('/live/ansible/.*$', '') }}/.labirin_venv/bin/python3"
 
     # The stack's .env, written by 1Panel beside the compose file. Secrets go
     # here rather than into docker-compose.yml so the panel's compose detail
@@ -154,6 +166,13 @@
           pageSize: 200
       register: onepanel_composes
       changed_when: false
+      # READ-ONLY, SO IT RUNS UNDER --check TOO. `uri` is a changing module as
+      # far as check mode is concerned, and `changed_when: false` does not
+      # affect that - it would be skipped, leaving the assert below to fail on
+      # an unregistered variable with "code=?" and send the reader off to check
+      # an API key that was never the problem. ../athens and ../gha-cache have
+      # the same shape and the same blind spot.
+      check_mode: false
       tags:
         - semaphore
 
@@ -200,6 +219,8 @@
           excludeAppStore: false
       register: onepanel_containers
       changed_when: false
+      # Read-only, same reason as the compose search above.
+      check_mode: false
       tags:
         - semaphore
         - preflight

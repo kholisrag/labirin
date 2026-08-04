@@ -229,11 +229,21 @@ fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key
 # The tag is <base-image-digest>-<commit-sha7>: both inputs that can change the
 # image. No :latest is published, deliberately.
 #
+# A FOURTH THING FROM -5e5fcd3 ONWARD, and it is a cache rather than a
+# capability: /opt/toolcache carries trivy, golangci-lint and a semgrep venv,
+# addressed by the version string the consuming workflow already pins. Nothing
+# lands on PATH — a workflow that names no version gets no tool — so this is
+# bandwidth, not behaviour, and an image that lags a pin is a miss and an
+# install, never a scan at a version nobody asked for. Bumping this tag is the
+# only way a pool sees it, and nothing reddens when it is not bumped: the bake
+# shipped on 2026-08-03 and every job kept reporting `toolcache miss` until this
+# line moved.
+#
 # Both halves of the reference are vaulted - the mirror is Harbor's registry
 # host, read from ../harbor/vars/vault.yaml rather than copied, and the image
 # path embeds the GitHub org. Only the tag is a digest and stays in the clear.
 fireactions_registry_mirror: "{{ vault_harbor_registry_host }}"
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-53e6324"
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-f093da9"
 
 # --------------------------------------------
 # Pools

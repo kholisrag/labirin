@@ -19,6 +19,8 @@ and [Harbor's proxy cache docs](https://goharbor.io/docs/2.15.0/administration/c
 | [`robertdebock.harbor`](https://github.com/robertdebock/ansible-role-harbor) | Unarchives the installer and runs `install.sh` |
 | `templates/harbor.yml.j2` | Replaces the role's config — its template predates 2.15 |
 | `tasks/proxy-cache.yaml` | Registry endpoints + proxy cache projects, over the API |
+| `tasks/configurations.yaml` | Instance-wide settings over the API — not `harbor.yml` |
+| `tasks/gc.yaml` | The garbage collection schedule — what makes retention real |
 
 ## Layout
 
@@ -210,7 +212,7 @@ ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harb
   live/ansible/playbooks/harbor/install-harbor.yaml
 
 # A single component (tags: dependencies, data-volume, docker, harbor,
-# proxy-cache, robots)
+# proxy-cache, configurations, gc, robots)
 ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
   live/ansible/playbooks/harbor/install-harbor.yaml --tags proxy-cache
 ```
@@ -264,6 +266,93 @@ Every project is a proxy cache, and Harbor rejects pushes to those. If the
 homelab ever needs to *store* an image, add an ordinary (non-proxy) project —
 and note that a project's `registry_id` cannot be changed after creation, so
 the two kinds are decided once, at creation.
+
+## Who may create a project
+
+`harbor_project_creation_restriction` is **`adminonly`**. Harbor's default is
+`everyone`, and `everyone` does not mean "everyone who has the permission" — it
+means the check is **not performed at all**:
+
+```go
+if onlyAdmin && !(a.isSysAdmin(ctx, rbac.ActionCreate) || secCtx.IsSolutionUser())
+```
+
+With `everyone`, `onlyAdmin` is false and the whole condition short-circuits, so
+a robot's grants are never consulted. That is why a robot deliberately created
+*without* `project:create` created a project anyway, and got a `201`.
+
+> [!IMPORTANT]
+> `isSysAdmin` there is **not** `secCtx.IsSysAdmin()`, which is hardcoded
+> `false` for every robot — it is
+> `RequireSystemAccess(ctx, action, rbac.ResourceProject)`, an ordinary
+> permission check against `/system/project`. So a **system-level robot holding
+> `system:/:project:create` still creates projects under `adminonly`**, and the
+> repositories that provision through one are unaffected.
+
+What `adminonly` does stop is an ordinary user account, or a robot without that
+grant, creating projects on a registry whose projects are declared in
+`vars/main.yaml`.
+
+```bash
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
+  live/ansible/playbooks/harbor/install-harbor.yaml --tags configurations
+```
+
+## Garbage collection
+
+**Retention marks; garbage collection reclaims.** A retention policy deletes the
+artifact row and moves it to Harbor's artifact trash — it does not touch
+`/data`. Garbage collection is the pass that walks that trash and removes the
+blobs. Without a GC schedule the second half never runs, and every retention
+policy on the host is bookkeeping.
+
+That was this host's state until `tasks/gc.yaml`: `GET /system/gc/schedule`
+answered `200` with an empty body and `GET /system/gc` listed **zero**
+executions, while four proxy cache projects had been marking artifacts nightly
+since the day Harbor came up.
+
+```bash
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
+  live/ansible/playbooks/harbor/install-harbor.yaml --tags gc
+```
+
+| Var | Default | |
+| --- | --- | --- |
+| `harbor_gc_cron` | `0 0 3 * * *` | 03:00 daily — the proxy caches sweep at `0 0 0 * * *`, so a run reclaims what last night marked |
+| `harbor_gc_delete_untagged` | `false` | see below — the job defaults it to **true** when absent |
+| `harbor_gc_workers` | `1` | 1–10; outside that is a `400` |
+| `harbor_gc_dry_run` | `false` | worth one `true` run before changing `delete_untagged` |
+
+> [!IMPORTANT]
+> The cron is **six fields, seconds first**, and Harbor rejects any value but
+> `0` in that field. A five-field expression is accepted and means something
+> else. `tasks/gc.yaml` asserts this before the API can answer `400`.
+
+> [!NOTE]
+> `GET /system/gc/schedule` returns **`200` with an empty body** when there is
+> no schedule — not a `404`. A caller that checks only the status code concludes
+> one exists.
+
+### Why `delete_untagged` is off
+
+An untagged artifact here is one of two things, and neither wants deleting on a
+nightly timer:
+
+- **something pulled through a cache by digest.** Retention's `**` tag selector
+  never marks it — it has no tag to match — so `delete_untagged: true` is the
+  only thing that would, and it would evict it every night. Digest-pinned pulls
+  are what GitOps tooling makes.
+- **an un-tagged manifest in `oprek-sh` or `oprek-sh-internal`**, which are
+  ordinary projects rather than caches. `/data` is not backed up, and there is
+  nothing to restore from.
+
+Tagged artifacts are untouched either way — GC removes blobs belonging to
+artifacts that are already deleted, and a child manifest referenced by a
+multi-arch index is not listed as untagged at all.
+
+The cost is a leak: a digest-only cache entry is now reclaimed by nothing. That
+is bounded and visible where the alternative is not, and it is one variable to
+change once a `dry_run: true` run shows what it would take.
 
 ## System robot grants
 

@@ -1,0 +1,152 @@
+---
+# ============================================
+# Garbage collection schedule
+# ============================================
+# Harbor separates deciding an artifact should go from reclaiming its bytes.
+# A retention policy only MARKS - it deletes the artifact row and moves it to
+# the artifact trash. Garbage collection is what walks that trash and removes
+# the blobs from /data. Without a GC schedule the second half never happens, so
+# every retention policy on the host is bookkeeping: the four proxy caches'
+# 7-day rules have been marking artifacts and reclaiming nothing.
+#
+# This host had NO GC schedule and no GC run at all - `GET /system/gc/schedule`
+# answered 200 with an empty body and `GET /system/gc` listed zero executions.
+# That is what this file fixes, and it is why the 300 GiB sizing in
+# vars/main.yaml is a working set rather than a slow leak.
+#
+# RECONCILED, not create-only, unlike tasks/proxy-cache.yaml. There is exactly
+# one GC schedule per Harbor and nothing else can own it, so there is no
+# hand-tuned state here to preserve - the reason that file is create-only does
+# not apply.
+# ============================================
+
+- name: Wait for the Harbor API to become healthy
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/health"
+    method: GET
+    status_code: 200
+  register: harbor_gc_health
+  until:
+    - harbor_gc_health.json is defined
+    - harbor_gc_health.json.status == 'healthy'
+  retries: "{{ harbor_api_ready_retries }}"
+  delay: "{{ harbor_api_ready_delay }}"
+  changed_when: false
+  # RUNS UNDER --check TOO, for the same reason as tasks/robots.yaml: `uri` has
+  # no check mode and SKIPS, which would leave the read below with no data and
+  # make a dry run report a problem it invented. Both reads are GETs with
+  # changed_when: false; only the write is simulated.
+  check_mode: false
+  tags:
+    - gc
+
+# 200 with an EMPTY BODY is how Harbor says "no schedule". GetGCSchedule maps a
+# not-found from the controller onto NewGetGCScheduleOK() rather than a 404, so
+# a caller checking the status code alone concludes a schedule exists.
+- name: Read the current GC schedule
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/system/gc/schedule"
+    method: GET
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: harbor_gc_schedule
+  changed_when: false
+  no_log: true
+  check_mode: false
+  tags:
+    - gc
+
+# `job_parameters` comes back as a JSON STRING while POST and PUT take
+# `parameters` as an object, so the two cannot be compared without decoding it.
+# An absent schedule leaves it undefined, which `default('{}')` covers.
+- name: Work out whether the live schedule already matches
+  ansible.builtin.set_fact:
+    _harbor_gc_live_cron: >-
+      {{ harbor_gc_schedule.json.schedule.cron | default('') }}
+    _harbor_gc_live_type: >-
+      {{ harbor_gc_schedule.json.schedule.type | default('') }}
+    _harbor_gc_live_params: >-
+      {{ harbor_gc_schedule.json.job_parameters | default('{}') | from_json }}
+    _harbor_gc_exists: >-
+      {{ (harbor_gc_schedule.json | default({})).schedule is defined }}
+  tags:
+    - gc
+
+# EACH `default()` HERE IS THE JOB'S OWN DEFAULT, not a placeholder, and
+# getting that wrong is what made this task write on every run. Harbor stores
+# only the parameters it was given a reason to store - a `dry_run: false` goes
+# in and does not come back - so an absent key has to be compared against what
+# the jobservice will do with it (parseParams: delete_untagged true, workers 1,
+# dry_run false). Comparing an absent key against `none` instead means the
+# declaration can never match and the schedule is deleted and re-created nightly.
+#
+# `delete_tag` is deliberately absent from this comparison. Harbor writes it
+# into the stored parameters by itself and nothing here declares it, so
+# including it would be comparing our declaration against Harbor's.
+- name: Decide what to do with the GC schedule
+  ansible.builtin.set_fact:
+    _harbor_gc_matches: >-
+      {{ _harbor_gc_exists | bool
+         and _harbor_gc_live_type == harbor_gc_schedule_type
+         and _harbor_gc_live_cron == harbor_gc_cron
+         and (_harbor_gc_live_params.delete_untagged | default(true) | bool)
+             == (harbor_gc_delete_untagged | bool)
+         and (_harbor_gc_live_params.workers | default(1) | int)
+             == (harbor_gc_workers | int)
+         and (_harbor_gc_live_params.dry_run | default(false) | bool)
+             == (harbor_gc_dry_run | bool) }}
+  tags:
+    - gc
+
+# Harbor validates the cron itself and rejects a 6-field expression whose
+# seconds field is not `0` (ValidateCronString), but it does so as a 400 in the
+# middle of a play. Catching it here names the variable that is wrong.
+- name: Assert the GC cron is a form Harbor accepts
+  ansible.builtin.assert:
+    that:
+      - harbor_gc_cron | length > 0
+      - (harbor_gc_cron.split(' ') | length) != 6
+        or harbor_gc_cron.split(' ')[0] == '0'
+    fail_msg: >-
+      harbor_gc_cron is `{{ harbor_gc_cron }}`. Harbor parses a SIX-field cron
+      whose first field is seconds, and rejects any value there but `0`.
+  tags:
+    - gc
+
+# POST creates and PUT replaces; POST onto an existing schedule is a 409.
+# updateGCSchedule deletes and re-creates, so PUT is safe to send repeatedly -
+# it is guarded here only to keep a steady-state run reporting `ok`.
+- name: Declare the GC schedule
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/system/gc/schedule"
+    method: "{{ 'PUT' if _harbor_gc_exists | bool else 'POST' }}"
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      schedule:
+        type: "{{ harbor_gc_schedule_type }}"
+        cron: "{{ harbor_gc_cron }}"
+      parameters:
+        delete_untagged: "{{ harbor_gc_delete_untagged }}"
+        workers: "{{ harbor_gc_workers | int }}"
+        dry_run: "{{ harbor_gc_dry_run }}"
+    status_code: "{{ [200] if _harbor_gc_exists | bool else [201] }}"
+  when: not (_harbor_gc_matches | bool)
+  changed_when: true
+  no_log: true
+  tags:
+    - gc
+
+- name: Report the GC schedule
+  ansible.builtin.debug:
+    msg: >-
+      GC {{ 'already at' if _harbor_gc_matches | bool else 'set to' }}
+      {{ harbor_gc_schedule_type }} `{{ harbor_gc_cron }}`
+      (delete_untagged={{ harbor_gc_delete_untagged }},
+      workers={{ harbor_gc_workers }}, dry_run={{ harbor_gc_dry_run }}).
+  tags:
+    - gc

@@ -242,6 +242,63 @@ harbor_proxy_projects:
     public: true
 
 # --------------------------------------------
+# System configuration
+# --------------------------------------------
+# `everyone` or `adminonly`. Harbor's default is `everyone`, which means every
+# authenticated principal on this instance can create a project - the gate is
+# not reached at all, so a robot's permissions never enter into it.
+#
+# `adminonly` turns the gate on, and it is then satisfied by a system admin OR
+# by a system-level robot holding `system:/:project:create`. That is a
+# permission check rather than an is-an-admin one, whatever CreateProject's
+# `isSysAdmin` helper is called; tasks/configurations.yaml carries the detail.
+#
+# What this DOES stop: an ordinary user account, and any robot without that
+# grant, creating projects on a registry whose projects are declared elsewhere.
+harbor_project_creation_restriction: adminonly
+
+# --------------------------------------------
+# Garbage collection
+# --------------------------------------------
+# Retention MARKS and garbage collection RECLAIMS - two halves, and this host
+# only ever had the first. Every proxy cache project carries an auto-created
+# `nDaysSinceLastPull = 7` rule triggered at `0 0 0 * * *`, so artifacts have
+# been swept into the artifact trash nightly since the day Harbor came up and
+# not one byte has left /data. tasks/gc.yaml is the other half.
+#
+# SIX FIELDS, seconds first, and Harbor rejects any value but `0` there
+# (ValidateCronString in src/common/utils). 03:00 daily, three hours behind the
+# retention sweeps, so a run reclaims what last night marked rather than what
+# the night before did.
+harbor_gc_schedule_type: Custom
+harbor_gc_cron: "0 0 3 * * *"
+
+# UNTAGGED IS NOT THE SAME AS UNWANTED here, which is why this is false and why
+# false is the value that has to be written down: the GC job defaults it to
+# TRUE when the parameter is absent (parseParams in the jobservice gc job).
+#
+# An untagged artifact on this host is either something pulled through a cache
+# by digest - which retention's `**` tag selector never marks, since it has no
+# tag to match - or an un-tagged manifest in one of the two real projects. The
+# first would go cold every night for the digest-pinned pulls GitOps tooling
+# makes constantly; the second is a deletion nothing here can undo, on a disk
+# that is deliberately not backed up.
+#
+# The cost is a slow leak: a digest-only cache entry is now reclaimed by
+# nothing. That is a bounded, visible cost against an unbounded one, and
+# flipping this is a one-line change once a run's logs show what it would take.
+harbor_gc_delete_untagged: false
+
+# Blob-removal concurrency, 1..10 - Harbor rejects anything outside that as a
+# 400. One is the upstream default and is ample for a host whose GC input is a
+# week of cache evictions.
+harbor_gc_workers: 1
+
+# Report what a run would remove without removing it. Worth one run of `true`
+# before trusting a new `harbor_gc_delete_untagged`.
+harbor_gc_dry_run: false
+
+# --------------------------------------------
 # System robot grants
 # --------------------------------------------
 # What a system-level robot on this Harbor is allowed to do. The robots are

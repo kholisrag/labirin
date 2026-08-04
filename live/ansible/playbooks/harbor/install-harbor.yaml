@@ -92,6 +92,28 @@
         - proxy-cache
 
     # ============================================
+    # System configuration
+    # ============================================
+    # After the proxy cache tasks, because `adminonly` narrows who may create a
+    # project and those tasks create four.
+    - name: Declare the system configuration
+      ansible.builtin.include_tasks:
+        file: tasks/configurations.yaml
+      tags:
+        - configurations
+
+    # ============================================
+    # Garbage collection
+    # ============================================
+    # After the proxy cache tasks, because the projects whose retention this
+    # reclaims for are created there.
+    - name: Declare the garbage collection schedule
+      ansible.builtin.include_tasks:
+        file: tasks/gc.yaml
+      tags:
+        - gc
+
+    # ============================================
     # System robot grants
     # ============================================
     # Only the grants. The robots are created by hand and this reconcile widens

@@ -91,6 +91,12 @@
           websiteGroupId: 0
       register: onepanel_existing_sites
       changed_when: false
+      # READ-ONLY, SO IT RUNS UNDER --check TOO. `uri` is a changing module as
+      # far as check mode is concerned and `changed_when: false` does not alter
+      # that, so this was skipped and the assert below then failed on an
+      # unregistered variable with "code=?" - sending the reader to check an API
+      # key that was never the problem. --check on this playbook was unusable.
+      check_mode: false
       tags:
         - manage_websites
 
@@ -171,6 +177,9 @@
           websiteGroupId: 0
       register: onepanel_sites_after
       changed_when: false
+      # Read-only, same reason as the first search. Under --check the create
+      # above is skipped, so this re-read simply returns the same list.
+      check_mode: false
       tags:
         - manage_websites
 

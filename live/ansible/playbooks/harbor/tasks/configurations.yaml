@@ -82,11 +82,28 @@
     body:
       project_creation_restriction: "{{ harbor_project_creation_restriction }}"
     status_code: 200
+  register: harbor_configurations_write
   when: >-
     (harbor_configurations.json.project_creation_restriction.value | default(''))
     != harbor_project_creation_restriction
-  changed_when: true
+  # no_log takes Harbor's error message down with the admin password, so the
+  # failure is deferred to the assert below, which reads only status and
+  # message. Same shape as the create loop in tasks/proxy-cache.yaml.
+  failed_when: false
+  changed_when: harbor_configurations_write.status | default(0) == 200
   no_log: true
+  tags:
+    - configurations
+
+- name: Fail on a configuration Harbor refused
+  ansible.builtin.assert:
+    that:
+      - (harbor_configurations_write.status | default(200)) == 200
+    fail_msg: >-
+      Harbor refused the system configuration (HTTP
+      {{ harbor_configurations_write.status | default('no response') }}):
+      {{ harbor_configurations_write.json.errors[0].message
+         | default(harbor_configurations_write.msg) | default('') }}
   tags:
     - configurations
 

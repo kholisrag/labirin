@@ -94,8 +94,9 @@
     # ============================================
     # System configuration
     # ============================================
-    # After the proxy cache tasks, because `adminonly` narrows who may create a
-    # project and those tasks create four.
+    # Ordering is presentational, not a dependency. Everything below talks to
+    # the API as `harbor_api_user`, who is the admin - so `adminonly` does not
+    # gate the proxy cache tasks whichever side of this they run on.
     - name: Declare the system configuration
       ansible.builtin.include_tasks:
         file: tasks/configurations.yaml
@@ -105,8 +106,8 @@
     # ============================================
     # Garbage collection
     # ============================================
-    # After the proxy cache tasks, because the projects whose retention this
-    # reclaims for are created there.
+    # Also presentational. The GC schedule is instance-wide and needs no
+    # project to exist first.
     - name: Declare the garbage collection schedule
       ansible.builtin.include_tasks:
         file: tasks/gc.yaml

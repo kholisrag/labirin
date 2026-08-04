@@ -293,6 +293,12 @@ What `adminonly` does stop is an ordinary user account, or a robot without that
 grant, creating projects on a registry whose projects are declared in
 `vars/main.yaml`.
 
+**Checked against this host, not only against the source.** Two throwaway
+system robots were minted, used, and deleted in the same play: the one holding
+`system:/:project:create` created a project (`201`), the one holding only
+`system:/:project:list` was refused (`403`). So the gate is on, and a
+provisioning robot shaped like the first keeps working.
+
 ```bash
 ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
   live/ansible/playbooks/harbor/install-harbor.yaml --tags configurations
@@ -349,6 +355,23 @@ nightly timer:
 Tagged artifacts are untouched either way — GC removes blobs belonging to
 artifacts that are already deleted, and a child manifest referenced by a
 multi-arch index is not listed as untagged at all.
+
+**Checked against a real run rather than argued.** The first GC this host has
+ever had completed `Success`, purging 5 manifests and 9 blobs for 3,952,811
+bytes. The 60 artifacts in the two non-cache projects were enumerated by digest
+before and after: **none was removed**, including all 44 tagged and
+immutable-flagged ones, and including the single untagged artifact — which is
+what `delete_untagged: false` claims and the only way to see it is a run.
+
+```bash
+# what a run reports, after the fact
+curl -fsS -u "$ADMIN" http://127.0.0.1/api/v2.0/system/gc?page_size=1 \
+  | jq '.[0] | {job_status, job_parameters}'
+```
+
+`job_parameters` grows `freed_space`, `purged_blobs` and `purged_manifests`
+once the run ends — that is where "did it actually reclaim anything" is
+answered.
 
 The cost is a leak: a digest-only cache entry is now reclaimed by nothing. That
 is bounded and visible where the alternative is not, and it is one variable to

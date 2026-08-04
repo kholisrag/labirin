@@ -106,18 +106,26 @@
 - name: Assert the GC cron is a form Harbor accepts
   ansible.builtin.assert:
     that:
-      - harbor_gc_cron | length > 0
-      - (harbor_gc_cron.split(' ') | length) != 6
-        or harbor_gc_cron.split(' ')[0] == '0'
+      - (harbor_gc_cron.split(' ') | length) == 6
+      - harbor_gc_cron.split(' ')[0] == '0'
     fail_msg: >-
       harbor_gc_cron is `{{ harbor_gc_cron }}`. Harbor parses a SIX-field cron
-      whose first field is seconds, and rejects any value there but `0`.
+      whose first field is seconds, and rejects any value there but `0`. A
+      five-field expression is the trap: it is a valid cron and means a
+      different time, so nothing here would tell you.
   tags:
     - gc
 
 # POST creates and PUT replaces; POST onto an existing schedule is a 409.
 # updateGCSchedule deletes and re-creates, so PUT is safe to send repeatedly -
 # it is guarded here only to keep a steady-state run reporting `ok`.
+#
+# `| bool` AND `| int` ON EVERY PARAMETER, matching the comparison above. The
+# jobservice reads each one with a Go type assertion and falls back to its own
+# default when that fails, and for delete_untagged the default is TRUE - so a
+# `-e harbor_gc_delete_untagged=false`, which arrives as the STRING "false",
+# would ship JSON `"false"` and turn untagged deletion ON. The comparison would
+# still read `false` and report no change, so nothing would say so.
 - name: Declare the GC schedule
   ansible.builtin.uri:
     url: "{{ harbor_api_base }}/system/gc/schedule"
@@ -131,13 +139,32 @@
         type: "{{ harbor_gc_schedule_type }}"
         cron: "{{ harbor_gc_cron }}"
       parameters:
-        delete_untagged: "{{ harbor_gc_delete_untagged }}"
+        delete_untagged: "{{ harbor_gc_delete_untagged | bool }}"
         workers: "{{ harbor_gc_workers | int }}"
-        dry_run: "{{ harbor_gc_dry_run }}"
+        dry_run: "{{ harbor_gc_dry_run | bool }}"
     status_code: "{{ [200] if _harbor_gc_exists | bool else [201] }}"
+  register: harbor_gc_write
   when: not (_harbor_gc_matches | bool)
-  changed_when: true
+  # The whole task is under no_log because its args carry the admin password,
+  # which takes Harbor's own error message down with it - a 400 on a cron or a
+  # worker count would surface as a censored failure with nothing to read. So
+  # the failure is deferred to the assert below, which sees only status and
+  # message. Same shape as the create loop in tasks/proxy-cache.yaml.
+  failed_when: false
+  changed_when: harbor_gc_write.status | default(0) in [200, 201]
   no_log: true
+  tags:
+    - gc
+
+- name: Fail on a GC schedule Harbor refused
+  ansible.builtin.assert:
+    that:
+      - (harbor_gc_write.status | default(200)) in [200, 201]
+    fail_msg: >-
+      Harbor refused the GC schedule (HTTP
+      {{ harbor_gc_write.status | default('no response') }}):
+      {{ harbor_gc_write.json.errors[0].message
+         | default(harbor_gc_write.msg) | default('') }}
   tags:
     - gc
 

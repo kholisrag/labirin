@@ -229,7 +229,11 @@
           content: "{{ lookup('template', 'templates/' ~ item.proxy_template) }}"
       loop: "{{ onepanel_websites }}"
       loop_control:
-        label: "{{ item.primary_domain }} ({{ item.proxy_template }})"
+        # `default`, because a label is templated for every loop item INCLUDING
+        # the ones `when:` skips - so a site with no custom block warns
+        # `object of type 'dict' has no attribute 'proxy_template'` on every
+        # run, once any site relies on the stock block.
+        label: "{{ item.primary_domain }} ({{ item.proxy_template | default('stock') }})"
       when: item.proxy_template is defined
       tags:
         - manage_websites

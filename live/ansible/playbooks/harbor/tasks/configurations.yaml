@@ -1,0 +1,118 @@
+---
+# ============================================
+# System configuration
+# ============================================
+# Harbor's `/configurations` endpoint - the settings that belong to the whole
+# instance rather than to a project. Not to be confused with
+# tasks/harbor-config.yaml, which writes the harbor.yml the installer reads;
+# these live in Postgres and are only reachable over the API.
+#
+# RECONCILED, not create-only. There is one of each of these per Harbor and no
+# other owner, so the argument for leaving tuned state alone in
+# tasks/proxy-cache.yaml does not apply.
+# ============================================
+
+- name: Wait for the Harbor API to become healthy
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/health"
+    method: GET
+    status_code: 200
+  register: harbor_config_health
+  until:
+    - harbor_config_health.json is defined
+    - harbor_config_health.json.status == 'healthy'
+  retries: "{{ harbor_api_ready_retries }}"
+  delay: "{{ harbor_api_ready_delay }}"
+  changed_when: false
+  # See tasks/robots.yaml: `uri` has no check mode and would SKIP, leaving the
+  # read below with no data.
+  check_mode: false
+  tags:
+    - configurations
+
+# Every setting comes back wrapped as {value, editable}. `editable` is false
+# where an auth backend or an environment variable owns the setting, and a PUT
+# against one of those is accepted and silently ignored - so it is asserted
+# rather than assumed.
+- name: Read the system configuration
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/configurations"
+    method: GET
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: harbor_configurations
+  changed_when: false
+  no_log: true
+  check_mode: false
+  tags:
+    - configurations
+
+- name: Assert the project creation restriction is ours to set
+  ansible.builtin.assert:
+    that:
+      - harbor_configurations.json.project_creation_restriction.editable | default(false) | bool
+    fail_msg: >-
+      Harbor reports project_creation_restriction as not editable, which means
+      something outside this playbook owns it. A PUT would be accepted and do
+      nothing.
+  tags:
+    - configurations
+
+# ONLY A SYSTEM ADMIN OR A ROBOT HOLDING `system:/:project:create` CREATES A
+# PROJECT UNDER `adminonly`, and the second half is the part that is easy to
+# get wrong. CreateProject gates on `a.isSysAdmin(ctx, ActionCreate)`, which
+# despite the name is not secCtx.IsSysAdmin() - that is hardcoded false for
+# every robot - but RequireSystemAccess(ctx, action, ResourceProject), i.e. an
+# ordinary permission check against `/system/project`. A system-level robot
+# with that grant passes it.
+#
+# Under the previous `everyone`, `onlyAdmin` was false and the gate was skipped
+# entirely, so the grant was never consulted at all - which is why a robot
+# deliberately created WITHOUT it still created a project, and got a 201.
+- name: Declare the project creation restriction
+  ansible.builtin.uri:
+    url: "{{ harbor_api_base }}/configurations"
+    method: PUT
+    url_username: "{{ harbor_api_user }}"
+    url_password: "{{ harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      project_creation_restriction: "{{ harbor_project_creation_restriction }}"
+    status_code: 200
+  register: harbor_configurations_write
+  when: >-
+    (harbor_configurations.json.project_creation_restriction.value | default(''))
+    != harbor_project_creation_restriction
+  # no_log takes Harbor's error message down with the admin password, so the
+  # failure is deferred to the assert below, which reads only status and
+  # message. Same shape as the create loop in tasks/proxy-cache.yaml.
+  failed_when: false
+  changed_when: harbor_configurations_write.status | default(0) == 200
+  no_log: true
+  tags:
+    - configurations
+
+- name: Fail on a configuration Harbor refused
+  ansible.builtin.assert:
+    that:
+      - (harbor_configurations_write.status | default(200)) == 200
+    fail_msg: >-
+      Harbor refused the system configuration (HTTP
+      {{ harbor_configurations_write.status | default('no response') }}):
+      {{ harbor_configurations_write.json.errors[0].message
+         | default(harbor_configurations_write.msg) | default('') }}
+  tags:
+    - configurations
+
+- name: Report the system configuration
+  ansible.builtin.debug:
+    msg: >-
+      project_creation_restriction:
+      {{ harbor_configurations.json.project_creation_restriction.value
+         | default('unset') }}
+      -> {{ harbor_project_creation_restriction }}.
+  tags:
+    - configurations

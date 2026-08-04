@@ -92,6 +92,29 @@
         - proxy-cache
 
     # ============================================
+    # System configuration
+    # ============================================
+    # Ordering is presentational, not a dependency. Everything below talks to
+    # the API as `harbor_api_user`, who is the admin - so `adminonly` does not
+    # gate the proxy cache tasks whichever side of this they run on.
+    - name: Declare the system configuration
+      ansible.builtin.include_tasks:
+        file: tasks/configurations.yaml
+      tags:
+        - configurations
+
+    # ============================================
+    # Garbage collection
+    # ============================================
+    # Also presentational. The GC schedule is instance-wide and needs no
+    # project to exist first.
+    - name: Declare the garbage collection schedule
+      ansible.builtin.include_tasks:
+        file: tasks/gc.yaml
+      tags:
+        - gc
+
+    # ============================================
     # System robot grants
     # ============================================
     # Only the grants. The robots are created by hand and this reconcile widens

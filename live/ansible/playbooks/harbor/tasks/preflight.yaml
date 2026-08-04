@@ -37,15 +37,24 @@
 
 # Harbor's own guidance is 4 GiB minimum / 8 GiB recommended. Below 4 GiB the
 # stack starts but Postgres and the jobservice fight over memory under load.
+#
+# MEASURED AGAINST THE BALLOON FLOOR, NOT AGAINST IT PLUS SLACK. This read
+# `>= 3800` and failed the whole playbook - preflight is tagged `always`, so
+# every tag went with it. The VM was fine: ballooning is enabled in the
+# OpenTofu unit with `floating = 4096`, and a guest squeezed to that floor
+# reports 3789 MiB, because the balloon driver's own reservation and the
+# firmware's come off `MemTotal`. A threshold above what the declared floor can
+# ever produce is a check that only passes while the node is uncontended.
 - name: Assert the host has enough memory
   ansible.builtin.assert:
     that:
-      - ansible_facts['memtotal_mb'] >= 3800
+      - ansible_facts['memtotal_mb'] >= 3700
     fail_msg: >-
       Harbor needs at least 4 GiB of RAM, this host has
       {{ ansible_facts['memtotal_mb'] }} MiB. The OpenTofu unit gives this VM
-      8 GiB with a balloon floor of 4 GiB, so anything under that means the
-      VM is not the one that unit describes.
+      8 GiB with a balloon floor of 4 GiB; a guest at that floor reports about
+      3789 MiB, so a figure below this one means the balloon has gone under the
+      floor or the VM is not the one that unit describes.
   tags:
     - always
 

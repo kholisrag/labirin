@@ -3,6 +3,32 @@
   hosts: fireactions_all
   become: true
 
+  # ONE HOST AT A TIME, AND A BATCH OF ONE CANNOT PARTIALLY FAIL.
+  #
+  # There are FOUR hosts here, not two - fireactions_vm_01 through _04 - so a
+  # roll is a four-step operation and every one of them is a live CI runner for
+  # the platform organisation. Without `serial` Ansible applies to all four at
+  # once and a bad commit takes the whole fleet before anyone reads the first
+  # failure.
+  #
+  # max_fail_percentage is what makes serial mean anything: with a batch size of
+  # one, any failure is 100% of the batch, which is above 0, so the play stops
+  # rather than moving on to host 2. Ansible's default would continue with the
+  # remaining hosts and report a failure at the end - which is the same
+  # end state as having no serial at all.
+  #
+  # ON THE PLAY, NOT ON THE SEMAPHORE TEMPLATE, and that placement is the point:
+  # a run from an operator's laptop gets the identical protection. The safety
+  # belongs to the play, not to whatever invoked it. ADR-0119 §D.
+  #
+  # What gates host 2 is the "Assert Fireactions is running" task at the end of
+  # tasks/fireactions.yaml - the play's own existing health definition, not a
+  # new one. It proves the host is HEALTHY and never that it is on the NEW
+  # configuration; a silent no-op looks identical to a clean apply. Semaphore's
+  # task history is where that distinction lives. ADR-0119 §D, ADR-0123 §E.
+  serial: 1
+  max_fail_percentage: 0
+
   vars_files:
     - vars/main.yaml
     - vars/vault.yaml

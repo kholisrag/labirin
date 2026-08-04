@@ -20,6 +20,7 @@
     - ../athens/vars/vault.yaml
     - ../gha-cache/vars/vault.yaml
     - ../monitoring/vars/vault.yaml
+    - ../semaphore/vars/vault.yaml
 
   module_defaults:
     ansible.builtin.uri:

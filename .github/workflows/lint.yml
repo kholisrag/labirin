@@ -1,0 +1,51 @@
+---
+# This repository's first workflow. It lints and it does nothing else: no
+# apply, no vault password, no SSH, no self-hosted runner, no secret.
+# ADR-0119 §G.
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: yamllint + ansible-lint
+    # GitHub-hosted, and there is no alternative: this repository has zero
+    # self-hosted runners and is owned by a user account, so the platform
+    # organisation's runners are out of reach. ADR-0123 §C.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # Pinned exactly. An unpinned linter turns someone else's release into
+      # this repository's red build, on a morning nobody changed anything.
+      - name: Install linters
+        run: pip install --disable-pip-version-check
+          'ansible-lint==26.6.0' 'ansible-core==2.21.2' 'yamllint==1.38.0'
+
+      # Config is .yamllint.yaml. Warnings do not fail; --strict would, and is
+      # deliberately absent while one pre-existing comments-indentation warning
+      # stands.
+      - name: yamllint
+        run: git ls-files -z -- '*.yaml' '*.yml' | xargs -0 yamllint -f github
+
+      # Both flags are the scoping, not tuning. --offline stops a run-time
+      # galaxy install deciding whether the build is green. `internal-error` is
+      # ansible-lint shelling out to `ansible-playbook --syntax-check`, which
+      # hard-fails on the 13 whole-file vaults; skipping it keeps every
+      # text-based rule and gives up only that check. ADR-0119 §G.
+      - name: ansible-lint
+        run: ansible-lint --offline --skip-list internal-error

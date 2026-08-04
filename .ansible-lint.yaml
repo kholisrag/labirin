@@ -1,2 +1,17 @@
+---
 skip_list:
   - yaml[line-length]
+
+exclude_paths:
+  # SOPS output, not source - see the matching note in .yamllint.yaml. Every
+  # ansible-lint finding on this tree before this entry existed was a
+  # serialiser's indentation inside an encrypted OpenTofu file, and none of it
+  # is Ansible at all.
+  - live/opentofu/
+  - .labirin_venv/
+  # KUBERNETES MANIFESTS, NOT ANSIBLE VARS. ansible-lint decides a file is a
+  # vars file from its path, so everything under a `vars/` directory is read as
+  # one - and then var-naming[pattern] fails `apiVersion` and `stringData` for
+  # not being snake_case. They are camelCase because Kubernetes says so; the
+  # rule is right about Ansible variables and this is not one.
+  - live/ansible/playbooks/talos-k8s/vars/manifests/

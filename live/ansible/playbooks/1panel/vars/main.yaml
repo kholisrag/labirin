@@ -181,6 +181,35 @@ onepanel_websites:
       - domain: "{{ vault_prometheus_host }}"
         port: 80
 
+  # Semaphore UI - see live/ansible/playbooks/semaphore/. Same shape as Athens,
+  # gha-cache and Grafana above, and 127.0.0.1 for the same reason: it is a
+  # compose stack on THIS box and OpenResty runs with `network_mode: host`, so
+  # the loopback publish is reachable from nginx and from nowhere else.
+  #
+  # 3600 continues the 3300 / 3400 / 3500 sequence and exists because Gitea
+  # holds 3000, which is Semaphore's default. Kept in step with semaphore_port
+  # in ../../semaphore/vars/main.yaml; nothing links them automatically, and
+  # install-semaphore.yaml preflights the port but has no idea what this file
+  # says.
+  #
+  # The name must also match semaphore_web_root over there - Semaphore builds
+  # its own absolute URLs from that variable, so a disagreement presents as a
+  # login that bounces rather than as a 404.
+  #
+  # LOOPBACK IS LOAD-BEARING HERE IN A WAY IT IS NOT FOR A CACHE. This login
+  # page fronts SSH to four hosts and the estate Ansible vault password, so a
+  # second plaintext door on the LAN would undo ADR-0119 §C. ADR-0119 §H names
+  # it a high-value target.
+  - primary_domain: "{{ vault_semaphore_host }}"
+    remark: Semaphore UI
+    upstream: http://127.0.0.1:3600
+    # Websockets for the live task log, and timeouts that outlast a four-host
+    # serial apply.
+    proxy_template: proxy-semaphore.conf.j2
+    domains:
+      - domain: "{{ vault_semaphore_host }}"
+        port: 80
+
   # ------------------------------------------------------------------
   # Brought under management by the July 2026 drift scan. All three were
   # created by hand in the dashboard and had been serving for months with

@@ -1,0 +1,448 @@
+---
+- name: Install Semaphore UI as a 1Panel compose stack
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # ANCHORED ON THE TREE'S OWN LAYOUT, NOT ON THE WORD "labirin".
+    #
+    # The other stack playbooks here write this as
+    # `regex_replace('(.*labirin).*', '\1')`, which finds the repository root by
+    # looking for its NAME in the path. That is correct only while the checkout
+    # is called `labirin`: `.*labirin` is greedy and a worktree at
+    # `.wt/labirin-665-semaphore-apply/...` makes it match the directory name
+    # instead, resolving the interpreter to `.wt/labirin/.labirin_venv/bin/python3`
+    # and failing with rc=127 on the first task that runs a module.
+    #
+    # Stripping from `/live/ansible/` instead depends on the layout the file is
+    # already sitting in, which cannot drift without moving the file.
+    ansible_python_interpreter: "{{ playbook_dir | regex_replace('/live/ansible/.*$', '') }}/.labirin_venv/bin/python3"
+
+    # The stack's .env, written by 1Panel beside the compose file. Secrets go
+    # here rather than into docker-compose.yml so the panel's compose detail
+    # page renders no credentials.
+    #
+    # Docker Compose parses this file itself and expands ${...} inside it, so
+    # every value has to be free of `$`, quotes and leading/trailing space. The
+    # base64 the README's generator commands emit is safe on all three; a
+    # hand-chosen admin password is the one that can break this, which is what
+    # the assertion below is for.
+    semaphore_compose_env: |
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION={{ semaphore_access_key_encryption }}
+      SEMAPHORE_COOKIE_HASH={{ semaphore_cookie_hash }}
+      SEMAPHORE_COOKIE_ENCRYPTION={{ semaphore_cookie_encryption }}
+      SEMAPHORE_ADMIN={{ semaphore_admin_user }}
+      SEMAPHORE_ADMIN_PASSWORD={{ semaphore_admin_password }}
+      SEMAPHORE_ADMIN_EMAIL={{ semaphore_admin_email }}
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+    # panel_api_base / panel_api_key live with the other 1Panel API work rather
+    # than being duplicated here - same panel, same key. main.yaml re-exports
+    # the vault_* names the playbooks actually use, so both files are needed.
+    - ../1panel/vars/main.yaml
+    - ../1panel/vars/vault.yaml
+
+  module_defaults:
+    ansible.builtin.uri:
+      validate_certs: true
+      body_format: json
+      status_code: 200
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - panel_api_base is defined
+          - panel_api_key is defined
+          - panel_api_key | length > 0
+        fail_msg: >-
+          panel_api_base / panel_api_key are missing. Populate them with:
+          ansible-vault edit live/ansible/playbooks/1panel/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # None of these has a working empty state, and two of them are worse than
+    # that: SEMAPHORE_ACCESS_KEY_ENCRYPTION is what every Key Store item is
+    # encrypted with, so an empty or changed value does not fail loudly - it
+    # makes the stored Ansible vault password and the fireactions SSH key
+    # undecryptable, which surfaces as a task that cannot authenticate rather
+    # than as a startup error.
+    #
+    # The vault SHIPS with placeholders, so "unset" is the expected first state
+    # and catching it here is the whole point rather than a formality.
+    - name: Validate the stack's own secrets
+      ansible.builtin.assert:
+        that:
+          - semaphore_access_key_encryption | length > 0
+          - semaphore_cookie_hash | length > 0
+          - semaphore_cookie_encryption | length > 0
+          - semaphore_admin_user | length > 0
+          - semaphore_admin_email | length > 0
+          - semaphore_admin_password | length > 0
+          - semaphore_access_key_encryption != semaphore_placeholder
+          - semaphore_cookie_hash != semaphore_placeholder
+          - semaphore_cookie_encryption != semaphore_placeholder
+          - semaphore_admin_password != semaphore_placeholder
+        fail_msg: >-
+          Semaphore's own credentials are missing or still at their placeholder.
+          Generate them with the commands in the README and put them in
+          live/ansible/playbooks/semaphore/vars/vault.yaml:
+          ansible-vault edit live/ansible/playbooks/semaphore/vars/vault.yaml
+      no_log: true
+      tags:
+        - always
+
+    # Compose parses the .env itself, so a value carrying `$`, a quote or an
+    # edge space is expanded or truncated rather than rejected - and the way
+    # that presents is a login that fails against a container which started
+    # perfectly. The generated three cannot trip this; a hand-typed admin
+    # password can.
+    - name: Assert the secrets survive a Compose .env round trip
+      ansible.builtin.assert:
+        that:
+          - semaphore_env_unsafe | length == 0
+        fail_msg: >-
+          {{ semaphore_env_unsafe | join(', ') }} contains a `$`, a quote, or
+          whitespace. Docker Compose parses the stack's .env itself and expands
+          or strips all three, so the value reaching the container would not be
+          the value in the vault - and it presents as a login failing against a
+          container that started perfectly. Whitespace is refused outright
+          rather than only at the ends: it is never needed here, and the three
+          generated keys cannot contain any. Pick another.
+      vars:
+        # The pattern is a plain YAML single-quoted scalar - '' is one literal
+        # quote - so nothing escapes it twice. An earlier version wrote the
+        # class with backslash escapes inside a folded block and silently
+        # matched the wrong set: it passed a value containing `'` and failed a
+        # correct base64 key. Verified against both.
+        semaphore_env_unsafe_pattern: '[$"''\s]'
+        semaphore_env_unsafe: >-
+          {{ {'vault_semaphore_access_key_encryption': semaphore_access_key_encryption,
+              'vault_semaphore_cookie_hash': semaphore_cookie_hash,
+              'vault_semaphore_cookie_encryption': semaphore_cookie_encryption,
+              'vault_semaphore_admin_user': semaphore_admin_user,
+              'vault_semaphore_admin_password': semaphore_admin_password,
+              'vault_semaphore_admin_email': semaphore_admin_email}
+             | dict2items
+             | selectattr('value', 'search', semaphore_env_unsafe_pattern)
+             | map(attribute='key') | list }}
+      no_log: true
+      tags:
+        - always
+
+    # Same auth scheme as live/ansible/playbooks/1panel/manage-websites.yaml:
+    # md5("1panel" + <api key> + <unix timestamp>) alongside the timestamp.
+    #
+    # THE TIMESTAMP IS ITS OWN FACT ON PURPOSE - see the long comment in
+    # manage-websites.yaml. Inlining the lookup evaluates it twice and the two
+    # evaluations occasionally straddle a second boundary, producing a token
+    # signed with N sent with a header saying N+1.
+    - name: Read the 1Panel API timestamp
+      ansible.builtin.set_fact:
+        onepanel_api_timestamp: "{{ lookup('pipe', 'date +%s') }}"
+      tags:
+        - always
+
+    - name: Build the 1Panel API authentication headers
+      ansible.builtin.set_fact:
+        onepanel_api_headers:
+          1Panel-Token: "{{ ('1panel' ~ panel_api_key ~ onepanel_api_timestamp) | hash('md5') }}"
+          1Panel-Timestamp: "{{ onepanel_api_timestamp }}"
+      no_log: true
+      tags:
+        - always
+
+    # ===== DISCOVERY =====
+    - name: List the existing compose stacks
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: onepanel_composes
+      changed_when: false
+      # READ-ONLY, SO IT RUNS UNDER --check TOO. `uri` is a changing module as
+      # far as check mode is concerned, and `changed_when: false` does not
+      # affect that - it would be skipped, leaving the assert below to fail on
+      # an unregistered variable with "code=?" and send the reader off to check
+      # an API key that was never the problem. ../athens and ../gha-cache have
+      # the same shape and the same blind spot.
+      check_mode: false
+      tags:
+        - semaphore
+
+    # 1Panel answers an auth failure with HTTP 200 and a body of
+    # {"code": <non-200>, ...} - the status line says nothing. Without this the
+    # run dies several tasks later inside a Jinja expression, pointing nowhere
+    # near the real problem.
+    - name: Assert the 1Panel API accepted the request
+      ansible.builtin.assert:
+        that:
+          - onepanel_composes.json.code | default(0) == 200
+          - onepanel_composes.json.data is not none
+        fail_msg: >-
+          1Panel rejected the request
+          (code={{ onepanel_composes.json.code | default('?') }},
+          message={{ onepanel_composes.json.message | default('') | trim or 'none' }}).
+          Causes, in the order they are worth checking:
+          the API key is disabled in Panel Settings; this workstation's IP is
+          not in the API key's allowlist; the key in
+          live/ansible/playbooks/1panel/vars/vault.yaml is stale; or the signing
+          timestamp fell outside the key's validity window.
+      tags:
+        - semaphore
+
+    # ===== PREFLIGHT =====
+    # The 1Panel guest is a busy box - sixteen stacks publishing on loopback -
+    # and docker reports a port clash only once the stack is already recorded,
+    # leaving a stack that exists but will not start. 3000 is Gitea's, 3300
+    # Athens', 3400 gha-cache's and 3500 Grafana's, which is how this check
+    # earned its place next door.
+    - name: List the published container ports
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 300
+          name: ""
+          state: all
+          orderBy: name
+          order: "null"
+          filters: ""
+          excludeAppStore: false
+      register: onepanel_containers
+      changed_when: false
+      # Read-only, same reason as the compose search above.
+      check_mode: false
+      tags:
+        - semaphore
+        - preflight
+
+    # A published port reads as "127.0.0.1:3600->3000/tcp". Match on the host
+    # side only - the container side of the arrow collides constantly between
+    # unrelated images and means nothing.
+    - name: Find the containers already publishing the host port
+      ansible.builtin.set_fact:
+        onepanel_port_owners: "{{ onepanel_port_owners | default([]) + [item.name] }}"
+      loop: "{{ onepanel_containers.json.data['items'] | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.ports is defined
+        - item.ports is not none
+        - item.ports | select('search', ':' ~ semaphore_port ~ '->') | list | length > 0
+      tags:
+        - semaphore
+        - preflight
+
+    - name: Assert the host port is free
+      ansible.builtin.assert:
+        that:
+          - onepanel_port_conflicts | length == 0
+        fail_msg: >-
+          Host port {{ semaphore_port }} is already published by
+          {{ onepanel_port_conflicts | join(', ') }}.
+          Pick another semaphore_port in vars/main.yaml - the container keeps
+          listening on 3000 internally either way, so only the left-hand side of
+          the port mapping and the `upstream` in ../1panel/vars/main.yaml need
+          to change.
+      vars:
+        # This stack is not a conflict with itself on a re-run.
+        onepanel_port_conflicts: >-
+          {{ onepanel_port_owners | default([]) | reject('equalto', semaphore_container_name) | list }}
+      tags:
+        - semaphore
+        - preflight
+
+    - name: Record whether the stack already exists
+      ansible.builtin.set_fact:
+        semaphore_exists: >-
+          {{ semaphore_compose_name in (onepanel_composes.json.data['items'] | default([]) | map(attribute='name') | list) }}
+      tags:
+        - semaphore
+
+    # ===== STORAGE =====
+    # Before the stack, not after: docker creates a missing bind-mount source as
+    # a root-owned directory, and Semaphore runs as uid 1001. Getting there
+    # first is the difference between a working install and a container that
+    # restarts on "Can't create Semaphore config path".
+    #
+    # On the very first run the compose directory does not exist yet either -
+    # 1Panel only creates it as part of the create call - so this MkdirAll has
+    # to cover every level.
+    - name: Create the persistent directories
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          path: "{{ item }}"
+          isDir: true
+          mode: 493 # 0755, as the decimal int the API wants
+        # The panel answers this one with HTTP 200 and a body code of 500 -
+        # "Internal server error: The file or folder already exists!" - which is
+        # the steady state on every run after the first. Listing 500 here is
+        # belt-and-braces for a version that starts using the status line.
+        status_code: [200, 500]
+      loop:
+        - "{{ semaphore_lib_dir }}"
+        - "{{ semaphore_config_dir }}"
+        - "{{ semaphore_tmp_dir }}"
+      register: semaphore_mkdir
+      changed_when: semaphore_mkdir.json.code | default(0) == 200
+      # Hence keying off the BODY code, not the status. Anything that is not a
+      # success and not the already-exists message is a real failure.
+      failed_when:
+        - semaphore_mkdir.json.code | default(0) != 200
+        - "'exist' not in (semaphore_mkdir.json.message | default(''))"
+      tags:
+        - semaphore
+        - storage
+
+    # QUOTE THE IDS. FileRoleUpdate declares User and Group as `string`, and an
+    # unquoted {{ semaphore_uid }} serialises to a JSON *number* - Gin then
+    # fails to bind the body and the handler never runs. It looks like it
+    # worked: HTTP 200, task green, and the directory still root-owned. The
+    # container only reveals it later, with "Can't create Semaphore data path".
+    #
+    # 1001:0, not 1000:1000. The image adds its user with `-u 1001 -G root` and
+    # chowns to `semaphore:0`; a bind mount ignores that, so the host directory
+    # has to carry the same numeric pair. Group 0 is upstream's own choice - it
+    # is what lets the image run under an arbitrary uid.
+    - name: Own the persistent directories as the semaphore user
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/files/owner"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          path: "{{ item }}"
+          user: "{{ semaphore_uid | string }}"
+          group: "{{ semaphore_gid | string }}"
+          sub: true
+      loop:
+        - "{{ semaphore_lib_dir }}"
+        - "{{ semaphore_config_dir }}"
+        - "{{ semaphore_tmp_dir }}"
+      register: semaphore_chown
+      # And check the BODY, because the status line is 200 either way. Without
+      # this the bind failure above is completely invisible.
+      failed_when: semaphore_chown.json.code | default(0) != 200
+      changed_when: false
+      tags:
+        - semaphore
+        - storage
+
+    # ===== STACK =====
+    # Create and update are different endpoints with different bodies, and
+    # neither one does the other's job: /compose 400s on a name that already
+    # has a record, and /compose/update reads the existing file before writing
+    # so it cannot bootstrap one.
+    - name: Create the Semaphore compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          name: "{{ semaphore_compose_name }}"
+          # "edit" means "here is the file content" - 1Panel writes it to
+          # {DataDir}/docker/compose/{name}/docker-compose.yml itself. The
+          # alternatives are "path" (a file already on the box) and "template".
+          from: edit
+          file: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ semaphore_compose_env }}"
+          forcePull: false
+      when: not semaphore_exists | bool
+      register: semaphore_created
+      # Same trap as the chown: a rejected body still answers HTTP 200.
+      failed_when:
+        - not semaphore_created.skipped | default(false)
+        - semaphore_created.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - semaphore
+
+    - name: Update the Semaphore compose stack
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/update"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          name: "{{ semaphore_compose_name }}"
+          # `path` is what gets `docker compose up`; `detailPath` is the file
+          # the new content is written to. For a single-file stack they are the
+          # same, but detailPath is read before the write and an empty one
+          # fails the task with a bare "load file with path failed".
+          path: "{{ semaphore_compose_file }}"
+          detailPath: "{{ semaphore_compose_file }}"
+          content: "{{ lookup('template', 'templates/docker-compose.yml.j2') }}"
+          env: "{{ semaphore_compose_env }}"
+          forcePull: false
+      when: semaphore_exists | bool
+      register: semaphore_updated
+      failed_when:
+        - not semaphore_updated.skipped | default(false)
+        - semaphore_updated.json.code | default(0) != 200
+      no_log: true
+      tags:
+        - semaphore
+
+    # ===== CONVERGENCE =====
+    # Both endpoints hand the work to a background task and return 200
+    # immediately - the response says the request was accepted, not that the
+    # container is up. Poll until it actually is, otherwise a failed image pull
+    # or a bad env var looks like a successful run.
+    #
+    # A first start is slower than the others on this box: it runs
+    # `semaphore setup` and the schema migrations before it serves anything.
+    - name: Wait for the Semaphore container to be running
+      ansible.builtin.uri:
+        url: "{{ panel_api_base }}/api/v2/containers/compose/search"
+        method: POST
+        headers: "{{ onepanel_api_headers }}"
+        body:
+          page: 1
+          pageSize: 200
+      register: semaphore_status
+      until: >-
+        (semaphore_status.json.data['items'] | default([])
+         | selectattr('name', 'equalto', semaphore_compose_name) | list | first | default({})
+        ).runningCount | default(0) | int >= 1
+      retries: 30
+      delay: 10
+      changed_when: false
+      tags:
+        - semaphore
+
+    - name: Display post-install instructions
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Semaphore UI {{ semaphore_version }} running as 1Panel compose stack '{{ semaphore_compose_name }}'"
+          - "========================================"
+          - ""
+          - "Listening : {{ semaphore_bind_address }}:{{ semaphore_port }} on the 1Panel VM (loopback only)"
+          - "Compose   : {{ semaphore_compose_file }}"
+          - "Data      : {{ semaphore_data_dir }} (lib, etc, tmp - all three persistent)"
+          - "Database  : {{ semaphore_db_dialect }}, at {{ semaphore_lib_dir }}/database.sqlite"
+          - "Ansible   : pinned by the image tag, not by requirements.txt - see vars/main.yaml"
+          - "Parallel  : {{ semaphore_max_parallel_tasks }} task at a time"
+          - ""
+          - "It is not reachable yet unless the website exists. Create it with:"
+          - "  ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1panel \\"
+          - "    live/ansible/playbooks/1panel/manage-websites.yaml"
+          - ""
+          - "NOTHING IS CONFIGURED INSIDE SEMAPHORE YET. The project, the Key Store"
+          - "entries, the two templates and the two schedules are hand steps - the"
+          - "API needs a session this playbook does not have. The README has the"
+          - "order, and it matters: the vault password and the SSH key have to"
+          - "exist before the Ansible template can reference them."
+          - ""
+      tags:
+        - always

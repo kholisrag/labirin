@@ -1,0 +1,32 @@
+# Managed by Ansible - live/ansible/playbooks/monitoring/
+[Unit]
+Description=Prometheus node_exporter
+Documentation=https://github.com/prometheus/node_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ monitoring_node_exporter_user }}
+Group={{ monitoring_node_exporter_user }}
+Type=simple
+# ALL INTERFACES, DELIBERATELY. Prometheus is on another guest, so a loopback
+# bind would leave this exporter reachable only from the host it is measuring.
+# What that costs is an unauthenticated read of this host's metrics from
+# anywhere on the LAN - the same trade Fireactions' own :8081 already makes, and
+# the same one Prometheus itself makes on the 1Panel guest.
+ExecStart={{ monitoring_node_exporter_bin }} --web.listen-address=:{{ monitoring_node_exporter_port }}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# This process reads /proc and /sys and writes nothing. The three below say so
+# to systemd, so a future collector that wants more fails loudly here rather
+# than quietly acquiring it.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

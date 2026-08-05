@@ -115,31 +115,105 @@ monitoring_required_containers:
   - gha-cache
 
 # ============================================
+# node_exporter on the Fireactions hosts
+# ============================================
+# WHAT THIS IS FOR, because it decides what may be trimmed out of it later.
+# Guests on the Fireactions pool have been seen going quiet on the network while
+# still running - transmitting at a fraction of what they receive, and on two
+# occasions transmitting nothing at all for ten minutes until the job they were
+# running was declared lost. The candidates left standing are all host-side and
+# all on the transmit path: the tap/veth pair, offload (GSO/TSO/GRO) on the tap
+# or on the uplink, and a path-MTU problem that only bites full-size segments.
+#
+# Two of those three fail by BLACK-HOLING rather than by slowing, and both show
+# up the same way - as transmit errors, drops or carrier losses on an interface
+# of the host. Nothing on this estate exports those counters today, so every
+# event so far has been read from GitHub's side, where a mute guest and a dead
+# guest look identical. This is the instrument that tells them apart, and it is
+# useless retroactively: it has to be standing before the next event.
+#
+# THE FOUR HOSTS ARE NOT NAMED HERE AT ALL. install-monitoring.yaml's first play
+# applies to the same inventory group install-fireactions.yaml does, and derives
+# the scrape targets from its own host list on the way out - so a fifth host is
+# added to the inventory and to nowhere else. A list in this file would be the
+# drift that monitoring_required_containers further up exists to catch, with no
+# equivalent check available for it.
+
+# Pinned, like Prometheus and Grafana above. v1.12.1 is the current stable
+# (released 2026-07-14); check
+# https://github.com/prometheus/node_exporter/releases before moving it.
+monitoring_node_exporter_version: "1.12.1"
+
+# 9100 is node_exporter's own default and nothing on those hosts claims it -
+# Fireactions itself is on 8081 and Containerd has no TCP listener at all.
+monitoring_node_exporter_port: 9100
+
+monitoring_node_exporter_bin_dir: /usr/local/bin
+monitoring_node_exporter_bin: "{{ monitoring_node_exporter_bin_dir }}/node_exporter"
+monitoring_node_exporter_unit: /etc/systemd/system/node_exporter.service
+
+# A system account with no shell and no home. node_exporter needs none of root's
+# privileges for the counters this exists to collect - netdev and netclass both
+# read /proc and /sys, which are world-readable - and the unit is written with
+# NoNewPrivileges and a read-only filesystem on top of that. Collectors that DO
+# want root are the ones nobody here reads.
+monitoring_node_exporter_user: node_exporter
+
+# {{ monitoring_node_exporter_arch }} is set as a fact by the play, from the
+# host's own architecture: this release names its assets Go-style (amd64/arm64),
+# where Firecracker's next door use `uname -m`.
+monitoring_node_exporter_release_base_url: >-
+  https://github.com/prometheus/node_exporter/releases/download/v{{ monitoring_node_exporter_version }}
+monitoring_node_exporter_url: >-
+  {{ monitoring_node_exporter_release_base_url }}/node_exporter-{{ monitoring_node_exporter_version }}.linux-{{ monitoring_node_exporter_arch }}.tar.gz
+monitoring_node_exporter_checksums_url: >-
+  {{ monitoring_node_exporter_release_base_url }}/sha256sums.txt
+
+# monitoring_node_exporter_targets is `<ansible_host>:9100` per host and is set
+# as a fact by the first play, not defined here - see the comment on that task.
+#
+# THOSE ARE NAMES AND NOT ADDRESSES, which is the opposite of what the note in
+# the scrape section below asks for, and the reason is that the addresses are
+# not knowable from here. The Fireactions hosts are the one group in this tree
+# with no IP recorded anywhere - the inventory carries A records
+# (unbound_hosts in ../opnsense/vars/vault.yaml) precisely so that it resolves
+# from somewhere other than one laptop, and hard-coding four addresses to satisfy
+# the preference would put the host list in a second place and make it wrong the
+# first time a reservation moves.
+#
+# What it costs, stated rather than buried: these four targets go down when
+# Unbound does. A scrape failure is visible as `up == 0`, which is forwarded,
+# so that failure is loud rather than silent - and Unbound being down is not a
+# state in which the rest of this estate is fine.
+
+# ============================================
 # Scrape targets
 # ============================================
-# Three jobs: this stack's own two, and the Actions cache server next door.
-# Everything else on the estate is still unscraped, and that is still the honest
-# state of it - node_exporter on the PVE hosts and cAdvisor for this box's
-# containers do not exist yet, and each is its own playbook and its own firewall
-# decision rather than a line in this list.
+# Four jobs: this stack's own two, the Actions cache server next door, and
+# node_exporter on the Fireactions hosts. Everything else on the estate is still
+# unscraped, and that is still the honest state of it - node_exporter on the PVE
+# hosts and cAdvisor for this box's containers do not exist yet, and each is its
+# own playbook and its own firewall decision rather than a line in this list.
 #
 # Adding one once the exporter exists is a single entry here plus a re-run.
 # `scheme` and `metrics_path` default to http and /metrics; give an entry on
 # ANOTHER GUEST the guest's IP rather than its name, for the same reason
 # ../1panel/vars/main.yaml uses addresses in `upstream` - these are static DHCP
 # reservations keyed on the VM's MAC, so they are as stable as the name and do
-# not make Prometheus depend on Unbound being up.
+# not make Prometheus depend on Unbound being up. The `node` job below is the
+# documented exception and says why it is one.
 #
-#   - job_name: node
+#   - job_name: pve
 #     targets:
 #       - 10.10.99.13:9100
 #       - 10.10.99.14:9100
 #
-# NOTE THE NAMES BELOW ARE CONTAINER NAMES, NOT HOSTS, and every one of them is
-# resolved by Docker's embedded DNS rather than by Unbound. The first two sit on
-# this stack's own Compose network; the third sits on monitoring_scrape_network
-# above, which is why Prometheus joins it. `localhost` would be Prometheus' own
-# container in the first job and would be wrong in the other two.
+# NOTE THE FIRST THREE NAMES BELOW ARE CONTAINER NAMES, NOT HOSTS, and every one
+# of them is resolved by Docker's embedded DNS rather than by Unbound. The first
+# two sit on this stack's own Compose network; the third sits on
+# monitoring_scrape_network above, which is why Prometheus joins it. `localhost`
+# would be Prometheus' own container in the first job and would be wrong in the
+# other two.
 #
 # THE PORT IS THE CONTAINER'S, NOT THE PUBLISHED ONE. gha-cache is published on
 # the host as 127.0.0.1:3400, but that mapping does not exist on the bridge -
@@ -169,6 +243,18 @@ monitoring_scrape_configs:
   - job_name: gha-cache
     targets:
       - "gha-cache:3000"
+
+  # The Fireactions hosts. Reached over the LAN rather than over a bridge - this
+  # is the first job here whose targets are not on this box at all - and the
+  # exporter is installed by the first play of install-monitoring.yaml, so the
+  # thing that scrapes and the thing that installs cannot get out of step.
+  #
+  # An undefined fact here means the playbook was run without the Fireactions
+  # inventory; the second play asserts on that rather than rendering a job with
+  # no targets, which would sit in Prometheus looking configured and collect
+  # nothing.
+  - job_name: node
+    targets: "{{ monitoring_node_exporter_targets }}"
 
 # ============================================
 # Remote write - Grafana Cloud
@@ -254,12 +340,36 @@ monitoring_remote_write_password_path: /etc/prometheus/remote-write-password
 #                                A restarted container zeroes every counter it
 #                                exports; without this an alert reading those
 #                                counters cannot tell which happened.
+#   node_network_transmit_*    - THE THREE TRANSMIT COUNTERS, and the only
+#                                metric names out of node_exporter's several
+#                                hundred that leave the box. See the
+#                                node_exporter section above for what they are
+#                                being asked. Everything else that exporter
+#                                produces - filesystem, CPU, the whole of
+#                                netdev's receive side - stays in the local
+#                                TSDB, at full resolution, for 90d.
+#
+# THESE THREE ARE PER INTERFACE, WHICH IS WHERE THE COST IS. The uplink, `lo`
+# and the CNI bridge are stable, and there are three of them on each of four
+# hosts. The per-microVM veth is not: `shutdown_on_exit: true` in
+# ../fireactions/vars/main.yaml means a guest is destroyed after each job and
+# the next one comes back under a new interface name. So the count at any
+# instant is bounded by the pool replicas - ten guests a host, forty across the
+# fleet - while the count over a month is however many jobs ran.
+#
+# That is accepted rather than overlooked, and the churn is the point: the
+# per-guest interface is exactly where a black hole would be, and a counter
+# aggregated away from it answers nothing. If the Cloud bill ever argues about
+# it, the lever is a device filter on the exporter, not dropping these three.
 monitoring_remote_write_keep_metrics:
   - cache_requests_total
   - cache_uploads_total
   - cache_storage_bytes
   - process_start_time_seconds
   - up
+  - node_network_transmit_errs_total
+  - node_network_transmit_drop_total
+  - node_network_transmit_carrier_total
 
 # Attached to every forwarded series, not to anything stored locally. Two jobs:
 # it says which estate a series came from once more than one pushes to the same

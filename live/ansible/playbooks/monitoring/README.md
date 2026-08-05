@@ -1,10 +1,17 @@
 # monitoring — Prometheus + Grafana
 
-One 1Panel Compose stack on the 1Panel guest, two services, two TLS websites.
+One 1Panel Compose stack on the 1Panel guest, two services, two TLS websites —
+plus `node_exporter` on the four [Fireactions](../fireactions/README.md) hosts,
+which is the one part of this playbook that touches a machine other than the
+1Panel guest.
+
+**The Fireactions inventory is now required**, and the run fails without it
+rather than quietly installing no exporter and scraping no host:
 
 ```bash
-# 1. the stack
-ansible-playbook live/ansible/playbooks/monitoring/install-monitoring.yaml
+# 1. the stack, and node_exporter on the Fireactions hosts
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/fireactions \
+  live/ansible/playbooks/monitoring/install-monitoring.yaml
 
 # 2. the DNS aliases (first run only)
 ansible-playbook live/ansible/playbooks/opnsense/manage-local-dns.yaml \
@@ -98,27 +105,37 @@ containers have just started against current files.
 
 ## What it scrapes
 
-Three jobs: this stack's own two, and the
-[Actions cache server](../gha-cache/README.md) next door.
+Four jobs: this stack's own two, the
+[Actions cache server](../gha-cache/README.md) next door, and `node_exporter` on
+the [Fireactions](../fireactions/README.md) hosts.
 
 | Job | Target | Why |
 | --- | --- | --- |
 | `prometheus` | `prometheus:9090` | the stack's own health, from the first run |
 | `grafana` | `grafana:3000` | the same |
 | `gha-cache` | `gha-cache:3000` | `cache_requests_total`, `cache_uploads_total`, `cache_storage_bytes` |
+| `node` | each Fireactions host on `:9100` | the transmit counters — see [below](#node_exporter-on-the-fireactions-hosts) |
 
 Everything else on the estate is still unscraped, and that is still the honest
 state of it. `node_exporter` on the PVE hosts and cAdvisor for this box's
 containers do not exist yet, and each is its own playbook and its own firewall
-decision. Adding one once the exporter exists is an entry in
-`monitoring_scrape_configs` plus a re-run; the format and a worked example are
-in the comment above that variable.
+decision. Adding one is an entry in `monitoring_scrape_configs` plus a re-run;
+the format and a worked example are in the comment above that variable.
 
 A target on **another guest** takes that guest's **IP**, for the same reason
 `upstream` does in `../1panel/vars/main.yaml`: the addresses are static DHCP
 reservations keyed on the VM's MAC, so they are as stable as the name and do not
 make scraping depend on Unbound being up. A target in **another stack on this
 box** takes its container name, and is reached over the bridge below.
+
+**The `node` job is the exception, and it is one because the addresses are not
+knowable from here.** The Fireactions hosts are the only group in this tree with
+no IP written down anywhere: their inventory carries A records so that it
+resolves from something other than one operator's laptop, and the four targets
+are read straight out of it. Writing four addresses here to satisfy the
+preference would put the host list in a second place and make it wrong the first
+time a reservation moved. The cost is that those four targets go down with
+Unbound — visibly, as `up == 0`, which is forwarded.
 
 Alertmanager is not here either. It is a third container plus a routing decision
 — who gets woken, on what, through ntfy or e-mail — which is a playbook, not an
@@ -167,6 +184,95 @@ the list the playbook asserts against the panel's live container list before it
 writes anything, so that drift arrives as a failed run rather than as a target
 sitting `down` behind a query that returns no data.
 
+## `node_exporter` on the Fireactions hosts
+
+The first play of `install-monitoring.yaml` installs `node_exporter` on every
+host in the `fireactions_all` inventory group, as a systemd unit under an
+unprivileged system account, listening on `:9100`. It is in this playbook rather
+than in a playbook of its own because the thing that installs the exporter and
+the thing that scrapes it have to agree on a port and a host list, and two
+playbooks are two places for those to drift.
+
+### What it is for
+
+Guests on this pool have been seen going quiet on the network while still
+running — transmitting at a fraction of what they receive, and on two occasions
+transmitting nothing at all for ten minutes, until the job they were running was
+declared lost from the other end.
+
+Every candidate still standing is host-side and on the transmit path: the
+tap/veth pair, offload (GSO/TSO/GRO) on the tap or on the uplink, and a path-MTU
+problem that only bites full-size segments. Two of the three fail by
+**black-holing** rather than by slowing, and both surface the same way — as
+transmit errors, drops or carrier losses on an interface of the *host*.
+
+Nothing on this estate exported those counters, so every event so far has been
+read from the far side, where a mute guest and a dead guest look identical.
+**This is useless retroactively**: metrics that do not exist during an event
+cannot be consulted after it, and there is no backfill. It has to be standing
+before the next one.
+
+### What leaves the box, and what does not
+
+Three metric names are added to the remote-write allowlist:
+
+| | |
+| --- | --- |
+| `node_network_transmit_errs_total` | the driver refused or failed the frame |
+| `node_network_transmit_drop_total` | the frame was dropped on the way out |
+| `node_network_transmit_carrier_total` | the link went away underneath it |
+
+Everything else `node_exporter` produces — filesystem, CPU, memory, the whole of
+netdev's receive side — stays in the local TSDB at full resolution for 90 days,
+and is queryable from the Grafana on this box.
+
+Those three are **per interface**, which is where the cost sits. The uplink,
+`lo` and the CNI bridge are stable; the per-microVM veth is not, because a guest
+is destroyed after each job and the next one comes back under a new name. At any
+instant that is bounded by the pool replicas — ten guests a host — while over a
+month it is however many jobs ran. The churn is the point: the per-guest
+interface is exactly where a black hole would be, and a counter aggregated away
+from it answers nothing.
+
+### It is unauthenticated, on purpose
+
+Prometheus lives on another guest, so `:9100` is bound on all interfaces and any
+host on the LAN that can reach a Fireactions host can read its metrics. That is
+the same trade Fireactions' own `:8081` already makes on those hosts and the
+same one Prometheus makes on this one. The unit runs with `NoNewPrivileges`,
+`ProtectSystem=strict` and `ProtectHome`, and the account has no shell — this
+process reads `/proc` and `/sys` and writes nothing.
+
+### Failure modes worth knowing
+
+- **A run without the Fireactions inventory installs nothing.** Ansible answers
+  an unmatched host pattern with `skipping: no hosts matched` and carries on, so
+  the stack would come up with a `node` job that has no targets and looks
+  configured. The second play asserts on the targets the first one recorded, and
+  fails the run instead.
+- **An unreachable Fireactions host does not block the stack.** The first play
+  carries `ignore_unreachable: true`, and without it a play whose every host is
+  unreachable ends the whole run — so Grafana could not be deployed or updated
+  during exactly the outage you would want it for. The skipped host keeps its
+  scrape target and shows up as `up == 0`.
+- **The host list has one home.** The first play's `hosts:` is the only place it
+  is named; the scrape targets are derived from that play's own host list on the
+  way out. `hosts:` cannot itself be a variable — it is resolved before any
+  `vars_files` are read — which is why the derivation runs at the end of the
+  play rather than in `vars/main.yaml`.
+- **The version check is the whole idempotency story.** `node_exporter
+  --version` is compared against the pin in `vars/main.yaml`; a matching version
+  skips the download entirely, and a bump reinstalls and restarts. Editing the
+  unit template also restarts, through the handler. **Both streams are
+  searched**, because kingpin has printed the version banner to stderr in some
+  releases and reading only stdout there would reinstall on every single run.
+- **The archive is pinned by checksum, not by tag.** `get_url` is given the
+  release's `sha256sums.txt` and matches this asset by name, the same as
+  `../fireactions/tasks/fireactions.yaml` — GitHub release assets are mutable.
+- **The last task scrapes the exporter from the host itself.** That proves the
+  process is up and listening, and *not* that Prometheus can reach it — that
+  half is the `up` series, which is in the allowlist for exactly this reason.
+
 ## Shipping metrics to Grafana Cloud
 
 Prometheus scrapes locally and forwards a **subset** onward. Nothing about what
@@ -199,7 +305,8 @@ of a working stack for a feature nobody had asked to turn on.
 ```bash
 sops -d .vault_pass.enc > .vault_pass && chmod 600 .vault_pass
 ansible-vault edit live/ansible/playbooks/monitoring/vars/vault.yaml
-ansible-playbook live/ansible/playbooks/monitoring/install-monitoring.yaml
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/fireactions \
+  live/ansible/playbooks/monitoring/install-monitoring.yaml
 ```
 
 All three come from the Cloud portal's Prometheus *Send Metrics* panel; the
@@ -232,12 +339,13 @@ reason — otherwise every run would see a difference and bounce Prometheus.
 Anything else is dropped by a `write_relabel_configs` `keep` before it goes,
 while the local TSDB still holds all of it at full resolution.
 
-**Grafana Cloud bills on active series**, and the three jobs above export well
-over a hundred — most of it the cache server's Node event-loop histograms and
-Go's own process gauges, which nobody will open and all of which would be paid
-for every month. So the list is an allowlist and is short on purpose. Getting it
-wrong in this direction costs a missing series, which is visible; getting it
-wrong in the other direction costs a bill.
+**Grafana Cloud bills on active series**, and the jobs above export well over a
+hundred each — most of it the cache server's Node event-loop histograms, Go's
+own process gauges and `node_exporter`'s several hundred defaults, which nobody
+will open and all of which would be paid for every month. So the list is an
+allowlist and is short on purpose. Getting it wrong in this direction costs a
+missing series, which is visible; getting it wrong in the other direction costs
+a bill.
 
 `up` and `process_start_time_seconds` are on it for a reason that is easy to
 trim by mistake. `up` is what distinguishes a target that stopped answering from
@@ -312,9 +420,11 @@ with every other app on the box.
 
 | Path | What it is |
 | --- | --- |
-| `install-monitoring.yaml` | the whole thing — stack, config, websites' prerequisites |
+| `install-monitoring.yaml` | the whole thing — the exporters, the stack, config, websites' prerequisites |
 | `vars/main.yaml` | versions, ports, retention, scrape targets, the remote-write allowlist |
 | `vars/vault.yaml` | the two hostnames, the Grafana bootstrap credentials, the Grafana Cloud coordinates |
+| `tasks/node-exporter.yaml` | `node_exporter` on the Fireactions hosts |
+| `templates/node-exporter.service.j2` | its systemd unit |
 | `templates/docker-compose.yml.j2` | the stack |
 | `templates/prometheus.yml.j2` | rendered from `monitoring_scrape_configs` |
 | `templates/grafana-datasource.yml.j2` | the provisioned Prometheus datasource |

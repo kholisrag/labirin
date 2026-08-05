@@ -1,4 +1,83 @@
 ---
+# FIRST, AND ON OTHER HOSTS. The stack below is configured to scrape these four
+# exporters, so installing them second would leave a window - however short - in
+# which prometheus.yml names four targets that do not answer. Ordered this way
+# the only failure a fresh run can produce is the honest one: the exporters
+# exist and the scrape config has not caught up yet.
+#
+# It is a play in THIS playbook rather than a playbook of its own because the
+# two halves have to agree about a port and a host list, and a second playbook
+# is a second place for those to drift - the same argument
+# monitoring_required_containers makes about container names.
+#
+# `hosts:` BELOW IS THE ONLY PLACE THE HOST SET IS NAMED. It cannot be a
+# variable - `hosts:` is resolved when the play is parsed, before any vars_files
+# have been read, so a variable there matches no host and the play skips in
+# silence. So the scrape targets are derived from this play's own host list at
+# the end of it, rather than from a group name repeated in vars/main.yaml, and a
+# fifth host is added to the inventory and nowhere else.
+#
+# NOT `serial: 1`, unlike ../fireactions/install-fireactions.yaml on the same
+# four hosts, and the difference is deliberate. That play rolls the runner
+# service itself, so a bad apply across all four takes the CI fleet; this one
+# adds an independent process that never touches Fireactions, Containerd or the
+# CNI configuration. A failure here costs a blind host, not a stopped one.
+#
+# `ignore_unreachable` IS WHAT KEEPS A DEAD RUNNER HOST FROM BLOCKING GRAFANA.
+# Without it, a play whose every host is unreachable ends the whole run - so
+# the stack below, which is the thing you would want during an outage, could not
+# be deployed or updated while the Fireactions hosts were down. Checked against
+# ansible-core 2.21: the second play simply never runs. A host skipped this way
+# is not lost quietly; it keeps its scrape target, and Prometheus reports it as
+# `up == 0`, which is in the remote-write allowlist.
+- name: Install node_exporter on the Fireactions hosts
+  hosts: fireactions_all
+  become: true
+  ignore_unreachable: true
+
+  vars_files:
+    - vars/main.yaml
+
+  handlers:
+    - name: Restart node_exporter
+      ansible.builtin.systemd_service:
+        name: node_exporter
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Install node_exporter
+      ansible.builtin.include_tasks:
+        file: tasks/node-exporter.yaml
+      tags:
+        - node-exporter
+
+    # THE SCRAPE TARGETS, DERIVED FROM THE PLAY RATHER THAN WRITTEN DOWN. This
+    # is the whole reason the exporter install and the stack share a playbook:
+    # the host list exists once, in the inventory, and the `node` job in
+    # vars/main.yaml reads this fact.
+    #
+    # `ansible_play_hosts_all` and NOT `ansible_play_hosts` - it is deliberately
+    # every host the play targeted, including one that was unreachable. A host
+    # with no exporter still gets a scrape target, because a target reporting
+    # `up == 0` is the report; dropping it would make an unreachable host look
+    # exactly like a host nobody asked for.
+    #
+    # Delegated to localhost so the next play, which runs there, reads it as an
+    # ordinary variable. `run_once` because it is one list, not one per host.
+    - name: Record the node_exporter scrape targets
+      ansible.builtin.set_fact:
+        monitoring_node_exporter_targets: >-
+          {{ ansible_play_hosts_all
+             | map('extract', hostvars, 'ansible_host')
+             | map('regex_replace', '^(.+)$', '\1:' ~ monitoring_node_exporter_port)
+             | list }}
+      run_once: true
+      delegate_to: localhost
+      delegate_facts: true
+      tags:
+        - node-exporter
+
 - name: Install Prometheus and Grafana as a 1Panel compose stack
   hosts: localhost
   gather_facts: false
@@ -57,6 +136,28 @@
           Grafana will not initialise without them. Populate them with:
           ansible-vault edit live/ansible/playbooks/monitoring/vars/vault.yaml
       no_log: true
+      tags:
+        - always
+
+    # NO TARGETS IS NOT AN EMPTY JOB, it is a run that was launched without the
+    # Fireactions inventory - Ansible answers an unmatched host pattern with
+    # "skipping: no hosts matched" and carries on, so the play above did not run
+    # at all and never set the fact. Left alone, the `node` job renders with no
+    # targets and Prometheus comes up looking configured with four hosts
+    # unwatched. That is the same green-and-wrong shape
+    # monitoring_required_containers exists to catch, so it gets the same
+    # treatment.
+    - name: Assert node_exporter was applied to the Fireactions hosts
+      ansible.builtin.assert:
+        that:
+          - monitoring_node_exporter_targets | default([]) | length > 0
+        fail_msg: >-
+          No Fireactions host was matched, so no node_exporter was installed and
+          the `node` scrape job would be written with no targets. Pass the
+          Fireactions inventory:
+          ansible-playbook -i
+          live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/fireactions
+          live/ansible/playbooks/monitoring/install-monitoring.yaml
       tags:
         - always
 
@@ -726,6 +827,10 @@
           - "Compose    : {{ monitoring_compose_file }}"
           - "TSDB       : {{ monitoring_prometheus_data_dir }} ({{ monitoring_prometheus_retention_time }} / {{ monitoring_prometheus_retention_size }})"
           - "Scraping   : {{ monitoring_scrape_configs | map(attribute='job_name') | join(', ') }}"
+          - >-
+            Exporters  : node_exporter {{ monitoring_node_exporter_version }} on
+            {{ monitoring_node_exporter_targets | length }} Fireactions host(s),
+            port {{ monitoring_node_exporter_port }}
           - >-
             Shipping   : {{ 'Grafana Cloud, ' ~ (monitoring_remote_write_keep_metrics | length)
                             ~ ' metric names allowlisted'

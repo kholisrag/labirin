@@ -1,0 +1,182 @@
+---
+# ============================================
+# node_exporter
+# ============================================
+# Runs on the Fireactions hosts, not on the box the rest of this playbook talks
+# to - install-monitoring.yaml's first play is where they are named, and it is
+# the only place they are. Same shape as the component installs in
+# ../fireactions/tasks/ - version check, download, unpack, install, unit - so
+# there is one idiom on these hosts rather than two.
+# ============================================
+
+# A NEAR-COPY OF ../fireactions/tasks/preflight.yaml, AND DELIBERATELY SO. The
+# alternative is including another playbook's tasks file across directories,
+# which drags in that playbook's vars and couples two playbooks that only happen
+# to share a host list. Four lines duplicated is the cheaper of the two.
+- name: Assert a supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+    fail_msg: >-
+      node_exporter ships amd64/arm64 builds, this host reports
+      '{{ ansible_facts['architecture'] }}'.
+  tags:
+    - always
+
+# Go-style, unlike Firecracker's assets next door which use `uname -m`. Named
+# here rather than in vars/main.yaml because it is a property of the host being
+# applied to, and vars/main.yaml is also read by the localhost play.
+- name: Set the release asset architecture
+  ansible.builtin.set_fact:
+    monitoring_node_exporter_arch: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+  tags:
+    - always
+
+# The scrape target for this host is `{{ ansible_host }}:9100`, and ansible_host
+# is NOT auto-populated from the inventory hostname - checked against
+# ansible-core 2.21, where reading it on a host that lacks it raises "object of
+# type 'HostVarsVars' has no attribute 'ansible_host'" from inside a Jinja
+# expression, several tasks away from the inventory entry that caused it.
+- name: Assert this host has an address to be scraped at
+  ansible.builtin.assert:
+    that:
+      - ansible_host is defined
+      - ansible_host | length > 0
+    fail_msg: >-
+      '{{ inventory_hostname }}' has no ansible_host. The `node` scrape job is
+      built from it, so give the host a resolvable name or address in the
+      inventory - the DNS records are unbound_hosts in
+      ../opnsense/vars/vault.yaml.
+  tags:
+    - always
+
+- name: Create the node_exporter system user
+  ansible.builtin.user:
+    name: "{{ monitoring_node_exporter_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    home: /nonexistent
+  tags:
+    - node-exporter
+
+- name: Check the installed node_exporter version
+  ansible.builtin.command:
+    cmd: "{{ monitoring_node_exporter_bin }} --version"
+  register: monitoring_node_exporter_installed
+  changed_when: false
+  failed_when: false
+  tags:
+    - node-exporter
+
+# `--version` prints "node_exporter, version 1.12.1 (branch: ...)". BOTH STREAMS
+# ARE SEARCHED and that is not belt-and-braces: kingpin has printed it to stderr
+# in some versions, and reading only stdout there would leave the guard always
+# true - every run re-downloading, reinstalling and restarting an exporter that
+# was already correct. Matching the bare number is enough to make a re-run a
+# no-op and a bump a reinstall; `not in` rather than an equality so that a first
+# run, where the command failed and both streams are empty, installs.
+- name: Install node_exporter
+  when: >-
+    monitoring_node_exporter_version not in
+    ((monitoring_node_exporter_installed.stdout | default(''))
+     ~ (monitoring_node_exporter_installed.stderr | default('')))
+  tags:
+    - node-exporter
+  block:
+    - name: Create a temporary directory for the node_exporter download
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: node-exporter
+      register: monitoring_node_exporter_tmp
+
+    - name: Download the node_exporter release archive
+      ansible.builtin.get_url:
+        url: "{{ monitoring_node_exporter_url }}"
+        dest: "{{ monitoring_node_exporter_tmp.path }}/node_exporter.tar.gz"
+        mode: "0600"
+        # Ansible fetches the checksum file and matches our archive by the
+        # basename of the URL, so this pins the exact artefact rather than
+        # "whatever is behind that tag today". Release assets are mutable on
+        # GitHub. Same idiom as ../fireactions/tasks/fireactions.yaml.
+        checksum: "sha256:{{ monitoring_node_exporter_checksums_url }}"
+
+    - name: Unpack the node_exporter release archive
+      ansible.builtin.unarchive:
+        src: "{{ monitoring_node_exporter_tmp.path }}/node_exporter.tar.gz"
+        dest: "{{ monitoring_node_exporter_tmp.path }}"
+        remote_src: true
+        extra_opts:
+          - --strip-components=1
+
+    - name: Install the node_exporter binary
+      ansible.builtin.copy:
+        src: "{{ monitoring_node_exporter_tmp.path }}/node_exporter"
+        dest: "{{ monitoring_node_exporter_bin }}"
+        mode: "0755"
+        owner: root
+        group: root
+        remote_src: true
+      notify: Restart node_exporter
+
+  always:
+    - name: Remove the temporary node_exporter directory
+      ansible.builtin.file:
+        path: "{{ monitoring_node_exporter_tmp.path }}"
+        state: absent
+      when: monitoring_node_exporter_tmp.path is defined
+
+- name: Install the node_exporter systemd unit
+  ansible.builtin.template:
+    src: node-exporter.service.j2
+    dest: "{{ monitoring_node_exporter_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart node_exporter
+  tags:
+    - node-exporter
+
+# BEFORE the start below, not after it. Flushed the other way round a first run
+# starts the service and the handler then immediately restarts the process it
+# just started. Here the handler's restart is what brings a changed binary or
+# unit into effect, and the start that follows finds it already running.
+- name: Flush the node_exporter handlers
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - node-exporter
+
+# Not left to the handler: on a first run nothing has been notified in a way
+# that would enable the unit, and on a re-run where nothing changed this is what
+# proves the service did not quietly die since the last apply.
+- name: Start node_exporter
+  ansible.builtin.systemd_service:
+    name: node_exporter
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - node-exporter
+
+# The play's own health definition, and the reason it is a scrape rather than a
+# `systemctl is-active`: a unit can be running with its listener bound to the
+# wrong address, and the failure this playbook exists to prevent is a target
+# that answers nothing. Retried because systemd returns as soon as the process
+# is forked, before it has a socket.
+#
+# From the host to its OWN listener, so this proves the exporter is up and NOT
+# that Prometheus can reach it - the 1Panel guest is a different box. That half
+# is Prometheus' `up` series, which is in the remote-write allowlist for exactly
+# this reason.
+- name: Assert node_exporter answers on its metrics port
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ monitoring_node_exporter_port }}/metrics"
+    return_content: false
+    status_code: 200
+  register: monitoring_node_exporter_probe
+  retries: 6
+  delay: 5
+  until: monitoring_node_exporter_probe is succeeded
+  changed_when: false
+  tags:
+    - node-exporter

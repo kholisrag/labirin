@@ -6,15 +6,28 @@ fireactions_all:
     # from vars/main.yaml, which is what makes them one logical pool as far as
     # GitHub is concerned - so this file is the only place host count is
     # expressed on the Ansible side.
+    #
+    # RESOLVABLE NAMES, NOT ~/.ssh/config ALIASES. These used to read
+    # `petruk-pve0-fireactions-0N`, which is a Host stanza in one operator's
+    # ~/.ssh/config and resolves nowhere else - so this inventory only ever
+    # worked from that laptop. It is DNS now: unbound_hosts in
+    # ../../../../../playbooks/opnsense/vars/vault.yaml carries an A record for
+    # each of the four, and the same names answer from anywhere on the LAN.
+    #
+    # That is a requirement rather than a tidy-up. The unattended apply runs
+    # from a container on the 1Panel box (ADR-0119, ADR-0125), which has no
+    # ssh_config and never had one; every host in this file was UNREACHABLE on
+    # its first run. Adding a stanza to the container would put the host list in
+    # a second place, and this file is meant to be the only one.
     fireactions_vm_01:
-      ansible_host: petruk-pve0-fireactions-01
+      ansible_host: fireactions-01.internal.khol.is
       ansible_user: ansible
     fireactions_vm_02:
-      ansible_host: petruk-pve0-fireactions-02
+      ansible_host: fireactions-02.internal.khol.is
       ansible_user: ansible
     fireactions_vm_03:
-      ansible_host: petruk-pve0-fireactions-03
+      ansible_host: fireactions-03.internal.khol.is
       ansible_user: ansible
     fireactions_vm_04:
-      ansible_host: petruk-pve0-fireactions-04
+      ansible_host: fireactions-04.internal.khol.is
       ansible_user: ansible

@@ -170,8 +170,8 @@ ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/1pan
 Declared in this tree and reconciled by a playbook: OPNsense Unbound host
 overrides and aliases; 1Panel reverse-proxy websites, PostgreSQL databases and
 WAF rule overrides; the `athens`, `gha-cache` and `monitoring` compose stacks;
-fireactions pools and their runner image pin; Harbor, RustFS, Talos, PVE,
-cloudflared and cantrik-ci.
+`node_exporter` on the fireactions hosts; fireactions pools and their runner
+image pin; Harbor, RustFS, Talos, PVE, cloudflared and cantrik-ci.
 
 Deliberately **not** managed, recorded so a drift scan does not re-raise them:
 

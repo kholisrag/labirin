@@ -10,14 +10,28 @@
 # :9001 listener is the same S3-style handler as :9000 and answers an
 # unauthenticated request with <Error><Code>AccessDenied</Code></Error> - which
 # looks exactly like a broken reverse proxy and is not.
-#
-# `location = /` is an exact match, which nginx evaluates before the `^~ /`
-# prefix below, so this redirects the bare hostname and nothing else.
-location = / {
-    return 302 /rustfs/console/;
-}
-
 location ^~ / {
+    # THE CONVENIENCE REDIRECT THAT BREAKS LOGIN. This was a `location = /`
+    # block, on the reasoning that an exact match "redirects the bare hostname
+    # and nothing else". It does not: `GET /` with no query string is also
+    # ListBuckets, which is the first call the console signs after you press
+    # Login. nginx answered it with a 302, the browser followed it and re-sent
+    # an Authorization header signed for `/` against `/rustfs/console/`, and
+    # RustFS rejected it - so the console reported "Login Failed" and the tab's
+    # network log showed SignatureDoesNotMatch on a request nobody made.
+    #
+    # Two things separate a browser typing the hostname from a signed call, and
+    # both are needed. No Authorization header rules out header auth; an exactly
+    # `/` $request_uri rules out presigned auth, which carries X-Amz-Signature
+    # in the query string. nginx `if` has no `&&`, hence the concatenation.
+    #
+    # `if` with nothing but `return` inside it is one of the two uses nginx
+    # documents as safe in a location context. Do not add anything else to it.
+    set $rustfs_bare_root "$request_uri$http_authorization";
+    if ($rustfs_bare_root = "/") {
+        return 302 /rustfs/console/;
+    }
+
     proxy_pass {{ item.upstream }};
 
     proxy_set_header Host $http_host;

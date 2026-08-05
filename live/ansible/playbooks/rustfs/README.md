@@ -66,8 +66,16 @@ Three names, and mixing them up is the most likely thing to go wrong:
 > `:9001` listener is the same S3-style handler as `:9000` and answers an
 > unauthenticated request with `<Error><Code>AccessDenied</Code></Error>` — which
 > reads like a broken reverse proxy and is not. The console site's proxy block
-> carries a `location = /` that 302s to the real path, so the bare hostname
-> works in a browser.
+> 302s the bare hostname to the real path, so typing it in a browser works.
+>
+> That redirect is **guarded, and the guard is the whole point**. `GET /` with
+> no query string is not only the bare hostname — it is also **ListBuckets**,
+> the first call the console signs after you press Login. Redirecting it sends
+> the browser to `/rustfs/console/` carrying an `Authorization` header signed
+> for `/`, and RustFS answers `SignatureDoesNotMatch`. The guard fires only when
+> there is no `Authorization` header **and** `$request_uri` is exactly `/`,
+> which is the pair that rules out header auth and presigned auth respectively.
+> See `live/ansible/playbooks/1panel/templates/proxy-rustfs-console.conf.j2`.
 
 ### Why the API and the console are separate hostnames
 
@@ -372,6 +380,16 @@ aws --endpoint-url https://<s3-host> s3 ls
 - **`SignatureDoesNotMatch` on every request** — the proxy is rewriting `Host`.
   The template sets `proxy_set_header Host $http_host`; `$host` strips the port
   and falls back to `server_name`, and the client signed the header it sent.
+- **`SignatureDoesNotMatch` at the console login, on a request nobody made** —
+  the credentials are fine and the failing URI is `/rustfs/console/`, which is a
+  page, not an API. The console signs **ListBuckets** on login, and ListBuckets
+  is `GET /` — so a bare `location = /` redirect on that site catches it, the
+  browser follows the 302 and re-sends an `Authorization` header signed for `/`.
+  Nothing in the error names the redirect. Confirm with a hand-signed request
+  that does not follow redirects: a `302` to `/rustfs/console/` is the bug, a
+  `200 ListAllMyBucketsResult` is the fix. The guard is described above and
+  lives in `proxy-rustfs-console.conf.j2`; re-run `manage-websites.yaml` if the
+  site still carries the old block.
 - **`413 Request Entity Too Large` on an upload** — OpenResty, not RustFS.
   `client_max_body_size` must be `0` on that site (1Panel's global default is
   50m).

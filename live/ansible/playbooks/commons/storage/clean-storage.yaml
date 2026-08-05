@@ -1,0 +1,557 @@
+---
+# ============================================
+# Reclaim disk space on a Debian-family guest
+# ============================================
+# Host-agnostic on purpose - point it at any inventory in this tree:
+#
+#   ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/cloudflared \
+#     live/ansible/playbooks/commons/storage/clean-storage.yaml
+#
+# Everything it removes is either regenerable (the apt cache and package lists)
+# or already rotated (journal segments, *.gz logs). It never deletes a live log
+# file, the running kernel, or anything under a service's data directory.
+#
+# See README.md for what each knob does and what it will not do.
+# ============================================
+
+# ============================================
+# 1. Emergency headroom
+# ============================================
+# THIS PLAY EXISTS BECAUSE A FULL DISK BREAKS ANSIBLE ITSELF. Every ordinary
+# module - including the implicit `setup` - is copied to remote_tmp (/tmp, per
+# ansible.cfg) before it can run, so at 100% the play dies before task one with
+#
+#   mkdir: cannot create directory '/tmp/ansible-tmp-...': No space left on device
+#   fatal: [host]: UNREACHABLE!
+#
+# which reads like a connectivity problem and is not. `raw` runs the command
+# straight down the SSH channel and needs neither a temp directory nor Python
+# on the target, so it is the only thing that works from here. Hence a separate
+# play with `gather_facts: false` and nothing but `raw` in it.
+#
+# `set_fact`, `debug` and `assert` are safe alongside it: they are action
+# plugins that execute on the controller and ship nothing to the target.
+- name: Reclaim emergency headroom
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    # Below this, the emergency step runs. Above it, this play is a no-op and
+    # the reclaim below does the work with ordinary modules.
+    clean_storage_min_free_mb: 512
+    # What the next play needs to exist at all: somewhere to unpack a module
+    # payload. Below this it cannot start, so stop here with the reason.
+    clean_storage_required_free_mb: 64
+    # Only the journal and the apt cache here. Both are pure deletes - they
+    # need no scratch space of their own, which is the whole point at 0 bytes
+    # free. Everything that needs dpkg to think waits for the next play.
+    clean_storage_journal_max_size: 100M
+
+  tasks:
+    - name: Measure free space on the root filesystem
+      ansible.builtin.raw: df -Pk / | awk 'NR==2 {print $4}'
+      register: clean_storage_free_before_raw
+      changed_when: false
+
+    # `stdout_lines | last`, NOT `stdout`, everywhere a number is read out of a
+    # raw task in this play. apt writes its errors to STDOUT rather than
+    # stderr, so a lock held by unattended-upgrades prepends three lines of
+    # `E: Could not get lock ...` to the output and `stdout | int` silently
+    # becomes 0 - which reads as "the emergency step freed nothing" and aborts
+    # a run that in fact worked. df is the last command in each of these, so
+    # its line is the last one.
+    - name: Record free space before
+      ansible.builtin.set_fact:
+        clean_storage_free_before_kb: >-
+          {{ clean_storage_free_before_raw.stdout_lines | last | trim | int }}
+
+    - name: Convert free space before to MiB
+      ansible.builtin.set_fact:
+        clean_storage_free_before_mb: "{{ clean_storage_free_before_kb | int // 1024 }}"
+
+    - name: Report the starting state
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ clean_storage_free_before_mb }} MiB free on /
+          {{
+            '- below the ' ~ clean_storage_min_free_mb ~ ' MiB floor, freeing the journal and apt cache first'
+            if clean_storage_free_before_mb | int < clean_storage_min_free_mb | int
+            else '- above the floor, skipping the emergency step'
+          }}
+
+    # journalctl --vacuum-size and apt-get clean only ever unlink files, so
+    # both work with a completely full filesystem. `|| true` on the vacuum
+    # because a guest with no persistent journal exits non-zero and that is not
+    # a failure worth stopping on.
+    - name: Free the journal and the apt cache
+      ansible.builtin.raw: >-
+        journalctl --vacuum-size={{ clean_storage_journal_max_size }} >/dev/null 2>&1 || true;
+        apt-get clean;
+        df -Pk / | awk 'NR==2 {print $4}'
+      register: clean_storage_free_after_raw
+      when: clean_storage_free_before_mb | int < clean_storage_min_free_mb | int
+      changed_when: >-
+        (clean_storage_free_after_raw.stdout_lines | last | trim | int)
+        > (clean_storage_free_before_kb | int)
+
+    - name: Record free space after the emergency step
+      ansible.builtin.set_fact:
+        clean_storage_free_after_kb: >-
+          {{ clean_storage_free_after_raw.stdout_lines | last | trim | int
+             if clean_storage_free_after_raw is not skipped
+             else clean_storage_free_before_kb }}
+
+    - name: Report the headroom reclaimed
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: emergency step freed
+          {{ (clean_storage_free_after_kb | int - clean_storage_free_before_kb | int) // 1024 }} MiB;
+          {{ clean_storage_free_after_kb | int // 1024 }} MiB free on /
+      when: clean_storage_free_after_raw is not skipped
+
+    # A guest whose root is full of things this playbook will not touch cannot
+    # be rescued from here, and the next play would fail on the same mkdir. Say
+    # so with the reason rather than letting it surface as UNREACHABLE again.
+    - name: Fail when there is still no room to run ordinary modules
+      ansible.builtin.fail:
+        msg:
+          - >-
+            {{ inventory_hostname }}: still
+            {{ clean_storage_free_after_kb | int // 1024 }} MiB free after the emergency
+            step, under the {{ clean_storage_required_free_mb }} MiB this needs.
+          - ""
+          - "Nothing further in this playbook can run - every remaining task"
+          - "needs a writable {{ '/tmp' }} on the target. Log in and look at what is"
+          - "actually holding the space:"
+          - ""
+          - "  sudo du -xh --max-depth=1 / | sort -rh | head"
+          - "  sudo lsof -nP +L1        # space held open by deleted files"
+          - ""
+          - "If the answer is the base install rather than accumulated rubbish,"
+          - "the disk is too small and the fix is in the OpenTofu unit, not here."
+      when: clean_storage_free_after_kb | int // 1024 < clean_storage_required_free_mb | int
+
+# ============================================
+# 2. Reclaim
+# ============================================
+# Ordinary modules from here on. The play above has guaranteed there is room
+# for them.
+- name: Reclaim disk space
+  hosts: all
+  become: true
+
+  vars:
+    # --------------------------------------------
+    # Journal
+    # --------------------------------------------
+    # Both are applied - whichever bites first wins. systemd's own default is
+    # 10% of the filesystem, which on a 3 GiB root is 300 MiB of logs nobody
+    # reads on a box that has 300 MiB to spare.
+    clean_storage_journal_max_size: 100M
+    clean_storage_journal_max_age: 14d
+
+    # --------------------------------------------
+    # apt
+    # --------------------------------------------
+    # `clean` empties /var/cache/apt/archives - every .deb is re-downloadable.
+    # `autoremove` is what takes superseded kernels and their headers, which is
+    # usually the single biggest win on a long-lived guest. It will not remove
+    # the running kernel; the assertion below re-checks that rather than
+    # trusting it.
+    clean_storage_apt_clean: true
+    clean_storage_apt_autoremove: true
+
+    # --------------------------------------------
+    # Superseded kernels
+    # --------------------------------------------
+    # AUTOREMOVE ONLY TAKES PACKAGES MARKED `auto`, AND A KERNEL IS NOT ALWAYS
+    # ONE - anything installed by an explicit `apt install linux-image-...`, or
+    # marked manual by a half-finished upgrade, is invisible to the one tool
+    # whose job is to find it. `autoremove` then reports nothing to do on a
+    # guest that is full of kernels, which is the most expensive way this can
+    # be wrong: it looks like the disk is genuinely needed.
+    #
+    # Releasing them to `auto` hands the decision back to apt's own retention
+    # rules rather than removing anything here. The running kernel and the
+    # newest installed one are excluded from the release, and asserted after.
+    #
+    # WHEN THIS FINDS NOTHING, BELIEVE IT. `dpkg-query -W` lists `rc` packages
+    # - removed, config files still present - alongside installed ones, with a
+    # plausible `Installed-Size` each. Counting those is how a guest with two
+    # kernels reads as a guest with fourteen. The `apt-mark showmanual`
+    # intersection below is what excludes them; `dpkg-query -f
+    # '${db:Status-Abbrev}'` is how to check by hand.
+    clean_storage_kernel_reclaim: true
+
+    # --------------------------------------------
+    # Rotated logs
+    # --------------------------------------------
+    # ROTATED ONLY. The patterns match what logrotate and friends leave behind
+    # and nothing a daemon currently holds open - deleting a live log frees no
+    # space anyway until the writer is restarted, which is the trap this avoids.
+    clean_storage_log_dirs:
+      - /var/log
+    clean_storage_log_patterns:
+      - "*.gz"
+      - "*.xz"
+      - "*.bz2"
+      - "*.zst"
+      - "*.old"
+      - "*.[0-9]"
+      - "*.[0-9].*"
+    clean_storage_log_age: 14d
+
+    # --------------------------------------------
+    # /tmp
+    # --------------------------------------------
+    # Conservative by default: a week is long enough that nothing in flight is
+    # caught, including an ansible run that is currently using this directory.
+    clean_storage_tmp_dirs:
+      - /tmp
+      - /var/tmp
+    clean_storage_tmp_age: 7d
+
+    # --------------------------------------------
+    # Docker
+    # --------------------------------------------
+    # OFF, deliberately. `docker system prune` removes stopped containers,
+    # unused networks and dangling images, and on a 1Panel box some of those
+    # are one `docker compose up` away from being wanted again. Turn it on per
+    # run with -e when you have decided that for a specific host.
+    clean_storage_docker_prune: false
+
+  tasks:
+    # ---------------------------------------------------------------
+    # Before
+    # ---------------------------------------------------------------
+    - name: Measure free space before the reclaim
+      ansible.builtin.command: df -Pk /
+      register: clean_storage_df_before
+      changed_when: false
+
+    - name: Record free space before the reclaim
+      ansible.builtin.set_fact:
+        clean_storage_before_mb: >-
+          {{ (clean_storage_df_before.stdout_lines[1].split()[3] | int) // 1024 }}
+
+    # ---------------------------------------------------------------
+    # Journal
+    # ---------------------------------------------------------------
+    - name: Vacuum the systemd journal
+      ansible.builtin.command:
+        cmd: >-
+          journalctl
+          --vacuum-size={{ clean_storage_journal_max_size }}
+          --vacuum-time={{ clean_storage_journal_max_age }}
+      register: clean_storage_journal
+      # journalctl reports what it deleted on stderr and says "vacuuming done,
+      # freed 0B" when there was nothing to take.
+      changed_when: >-
+        'freed 0B' not in (clean_storage_journal.stderr | default(''))
+      failed_when: false
+      tags:
+        - journal
+
+    # ---------------------------------------------------------------
+    # apt
+    # ---------------------------------------------------------------
+    # CHECK THE LOCK BEFORE TOUCHING APT. `ansible.builtin.apt` waits
+    # lock_timeout seconds and then fails with "Failed to lock apt for
+    # exclusive operation", which names neither the holder nor how long it has
+    # been there - and it aborts the play, so the log and scratch reclaim below
+    # never runs on the host that needed it most.
+    #
+    # cloudflared_vm on 2026-08-05 is why this is here: an `apt-get -qq -y
+    # update` from apt.systemd.daily had held the lists lock for 61 days,
+    # wedged on the filesystem that was already full. Skip apt, say so, and
+    # reclaim everything else.
+    - name: Look for a process holding an apt or dpkg lock
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          command -v fuser >/dev/null 2>&1 || { echo UNKNOWN; exit 0; }
+          pids=$(fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>/dev/null \
+                 | tr -s ' ' '\n' | grep -E '^[0-9]+$' | sort -u)
+          if [ -z "$pids" ]; then echo FREE; exit 0; fi
+          echo HELD
+          ps -o pid=,etime=,args= -p "$(echo "$pids" | paste -sd, -)"
+        executable: /bin/bash
+      register: clean_storage_apt_lock
+      changed_when: false
+      tags:
+        - apt
+
+    - name: Record whether apt is usable
+      ansible.builtin.set_fact:
+        clean_storage_apt_locked: >-
+          {{ (clean_storage_apt_lock.stdout_lines | first | default('')) == 'HELD' }}
+      tags:
+        - apt
+
+    - name: Report a held apt lock
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }}: apt is locked - SKIPPING the apt reclaim."
+          - "The holder, with elapsed run time:"
+          - "{{ clean_storage_apt_lock.stdout_lines[1:] }}"
+          - ""
+          - "An apt-get that has been running for days is wedged, not busy - a"
+          - "full disk is the usual cause and it does not recover on its own."
+          - "Superseded kernels and their headers stay until it is cleared,"
+          - "and they are normally the largest thing on a guest this size."
+      when: clean_storage_apt_locked | bool
+      tags:
+        - apt
+
+    - name: Empty the apt package cache
+      ansible.builtin.apt:
+        clean: true
+      when:
+        - clean_storage_apt_clean | bool
+        - not clean_storage_apt_locked | bool
+      tags:
+        - apt
+
+    # Runs BEFORE autoremove, because it is what gives autoremove anything to
+    # take. The version match is the numeric part only (6.8.0-106), so the
+    # `-generic` package and the version-common `linux-headers-6.8.0-106`
+    # beside it are both protected by one comparison. The leading filter keeps
+    # this to packages whose name ends in a real kernel version - a stray
+    # `linux-headers-3.0` transitional package is not one and is left alone.
+    - name: Find superseded kernel packages still marked manual
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          running=$(uname -r | sed 's/-generic$//')
+          newest=$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null \
+                   | sed 's/^linux-image-//; s/-generic$//' | sort -V | tail -1)
+          dpkg-query -W -f='${Package}\n' \
+              'linux-image-[0-9]*' 'linux-modules-[0-9]*' \
+              'linux-headers-[0-9]*' 'linux-tools-[0-9]*' 2>/dev/null \
+            | grep -E '^linux-[a-z]+-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' \
+            | grep -Ev "^linux-[a-z]+-(${running}|${newest})(-generic)?$" \
+            | sort -u \
+            | comm -12 - <(apt-mark showmanual 2>/dev/null | sort -u)
+        executable: /bin/bash
+      register: clean_storage_superseded_kernels
+      changed_when: false
+      when:
+        - clean_storage_kernel_reclaim | bool
+        - not clean_storage_apt_locked | bool
+      tags:
+        - apt
+        - kernels
+
+    # The shell above must never emit a package belonging to the running
+    # kernel. This is the second pair of eyes on that, because the cost of the
+    # regex being wrong is a guest that does not come back from the reboot
+    # this playbook recommends.
+    - name: Assert no running-kernel package is about to be released
+      ansible.builtin.assert:
+        that:
+          - clean_storage_superseded_kernels.stdout_lines
+            | select('search', ansible_facts['kernel'] | regex_replace('-generic$', '') | regex_escape)
+            | list | length == 0
+        fail_msg: >-
+          The superseded-kernel filter selected a package for the RUNNING
+          kernel ({{ ansible_facts['kernel'] }}):
+          {{ clean_storage_superseded_kernels.stdout_lines }}.
+          Nothing was changed. Fix the filter before re-running.
+      when: clean_storage_superseded_kernels is not skipped
+      tags:
+        - apt
+        - kernels
+
+    - name: Release superseded kernel packages to apt
+      ansible.builtin.command:
+        argv: "{{ ['apt-mark', 'auto'] + clean_storage_superseded_kernels.stdout_lines }}"
+      register: clean_storage_kernels_released
+      when:
+        - clean_storage_superseded_kernels is not skipped
+        - clean_storage_superseded_kernels.stdout_lines | length > 0
+      changed_when: clean_storage_kernels_released.rc == 0
+      tags:
+        - apt
+        - kernels
+
+    - name: Report the kernel packages released
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: released
+          {{ clean_storage_superseded_kernels.stdout_lines | length }} superseded
+          kernel packages to apt - autoremove takes them below. Running
+          {{ ansible_facts['kernel'] }} and the newest installed are untouched.
+      when:
+        - clean_storage_superseded_kernels is not skipped
+        - clean_storage_superseded_kernels.stdout_lines | length > 0
+      tags:
+        - apt
+        - kernels
+
+    - name: Remove orphaned packages and superseded kernels
+      ansible.builtin.apt:
+        autoremove: true
+        purge: true
+      when:
+        - clean_storage_apt_autoremove | bool
+        - not clean_storage_apt_locked | bool
+      tags:
+        - apt
+
+    # apt-get autoremove protects the running kernel and the newest installed
+    # one. This is here because that is a claim about somebody else's
+    # dependency solver, and the failure mode if it were ever wrong is a guest
+    # that does not come back from its next reboot.
+    - name: Assert the running kernel is still installed
+      ansible.builtin.stat:
+        path: "/boot/vmlinuz-{{ ansible_facts['kernel'] }}"
+      register: clean_storage_running_kernel
+      changed_when: false
+      tags:
+        - apt
+
+    - name: Fail when the running kernel was removed
+      ansible.builtin.fail:
+        msg: >-
+          /boot/vmlinuz-{{ ansible_facts['kernel'] }} is gone after autoremove.
+          Do NOT reboot this guest. Reinstall it with
+          `apt-get install --reinstall linux-image-{{ ansible_facts['kernel'] }}`
+          before anything else.
+      when: not clean_storage_running_kernel.stat.exists
+      tags:
+        - apt
+
+    # ---------------------------------------------------------------
+    # Rotated logs
+    # ---------------------------------------------------------------
+    - name: Find rotated log files
+      ansible.builtin.find:
+        paths: "{{ clean_storage_log_dirs }}"
+        patterns: "{{ clean_storage_log_patterns }}"
+        age: "{{ clean_storage_log_age }}"
+        age_stamp: mtime
+        recurse: true
+        file_type: file
+      register: clean_storage_old_logs
+      tags:
+        - logs
+
+    - name: Remove rotated log files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ clean_storage_old_logs.files }}"
+      loop_control:
+        label: "{{ item.path }} ({{ (item.size / 1048576) | round(1) }} MiB)"
+      tags:
+        - logs
+
+    # ---------------------------------------------------------------
+    # Scratch directories
+    # ---------------------------------------------------------------
+    # atime, not mtime: a file written once and read every day is in use, and
+    # its mtime does not say so.
+    - name: Find stale files in the scratch directories
+      ansible.builtin.find:
+        paths: "{{ clean_storage_tmp_dirs }}"
+        age: "{{ clean_storage_tmp_age }}"
+        age_stamp: atime
+        recurse: true
+        file_type: file
+        # This playbook's own control directory, and systemd's private-tmp
+        # mounts for running units.
+        excludes:
+          - "ansible-tmp-*"
+      register: clean_storage_stale_tmp
+      tags:
+        - tmp
+
+    - name: Remove stale files from the scratch directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ clean_storage_stale_tmp.files }}"
+      loop_control:
+        label: "{{ item.path }} ({{ (item.size / 1048576) | round(1) }} MiB)"
+      tags:
+        - tmp
+
+    # ---------------------------------------------------------------
+    # Docker
+    # ---------------------------------------------------------------
+    - name: Check for docker
+      ansible.builtin.stat:
+        path: /usr/bin/docker
+      register: clean_storage_docker
+      changed_when: false
+      tags:
+        - docker
+
+    - name: Prune unused docker data
+      ansible.builtin.command: docker system prune --force
+      register: clean_storage_docker_pruned
+      when:
+        - clean_storage_docker_prune | bool
+        - clean_storage_docker.stat.exists
+      changed_when: >-
+        'Total reclaimed space: 0B' not in (clean_storage_docker_pruned.stdout | default(''))
+      tags:
+        - docker
+
+    # ---------------------------------------------------------------
+    # After
+    # ---------------------------------------------------------------
+    - name: Measure free space after the reclaim
+      ansible.builtin.command: df -Pk /
+      register: clean_storage_df_after
+      changed_when: false
+
+    - name: Record free space after the reclaim
+      ansible.builtin.set_fact:
+        clean_storage_after_mb: >-
+          {{ (clean_storage_df_after.stdout_lines[1].split()[3] | int) // 1024 }}
+        clean_storage_used_pct: >-
+          {{ clean_storage_df_after.stdout_lines[1].split()[4] }}
+
+    # A guest that has taken kernel updates without rebooting keeps every one
+    # of them: autoremove holds the running kernel AND the newest installed, so
+    # the pile only collapses on the reboot that makes them the same package.
+    # Worth saying out loud - it is the difference between "this playbook found
+    # nothing" and "this playbook cannot help until you reboot".
+    - name: Find the newest installed kernel
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*'
+          | sed 's/^linux-image-//' | sort -V | tail -1
+        executable: /bin/bash
+      register: clean_storage_newest_kernel
+      changed_when: false
+
+    - name: Report the result
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            [
+              inventory_hostname ~ ': ' ~ clean_storage_before_mb ~ ' MiB free -> '
+                ~ clean_storage_after_mb ~ ' MiB free ('
+                ~ (clean_storage_after_mb | int - clean_storage_before_mb | int)
+                ~ ' MiB reclaimed, / now ' ~ clean_storage_used_pct ~ ' used)',
+            ]
+            + (
+              ['APT SKIPPED: the lock was held, so no cache, orphan or kernel'
+               ~ ' reclaim happened. See the report above.']
+              if clean_storage_apt_locked | default(false) | bool
+              else []
+            )
+            + (
+              [
+                'REBOOT PENDING: running ' ~ ansible_facts['kernel'] ~ ', newest installed '
+                  ~ clean_storage_newest_kernel.stdout ~ '. Superseded kernels cannot be'
+                  ~ ' autoremoved until the running one is the newest one.'
+              ]
+              if clean_storage_newest_kernel.stdout | trim != ansible_facts['kernel']
+              else []
+            )
+          }}

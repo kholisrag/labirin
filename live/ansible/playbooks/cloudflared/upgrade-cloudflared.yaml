@@ -3,7 +3,7 @@
   hosts: all
   become: true
   vars:
-    cloudflared_version_target: "2026.2.0"
+    cloudflared_version_target: "2026.7.3"
 
   tasks:
     - name: Update apt cache

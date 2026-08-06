@@ -7,6 +7,15 @@ fireactions_all:
     # GitHub is concerned - so this file is the only place host count is
     # expressed on the Ansible side.
     #
+    # ONE EXCEPTION, AND IT IS DELIBERATELY VISIBLE: a host with a file in a
+    # host_vars/ directory beside this one setting `fireactions_canary`
+    # resolves those same definitions to a different label set, which takes it
+    # out of the shared pool for the length of a rollout window. The pool
+    # definitions are still identical; what differs is what GitHub will
+    # dispatch to them. There is no host_vars/ here outside a window - its
+    # absence is the off state - so `ls` answers whether one is open. See
+    # ../../../../../playbooks/fireactions/README.md § "The canary".
+    #
     # RESOLVABLE NAMES, NOT ~/.ssh/config ALIASES. These used to read
     # `petruk-pve0-fireactions-0N`, which is a Host stanza in one operator's
     # ~/.ssh/config and resolves nowhere else - so this inventory only ever

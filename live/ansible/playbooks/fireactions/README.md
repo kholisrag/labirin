@@ -208,7 +208,9 @@ Four tiers are defined in `vars/main.yaml`. Pick one with `runs-on`:
 | | | | | | **10 per host** | **~6.3 GiB** | **40 GiB** |
 
 `replicas` is per-host, so with four hosts deployed the concurrency is 4×: **32
-`small` runners org-wide**, plus 4 each of `medium` and `large`.
+`small` runners org-wide**, plus 4 each of `medium` and `large` — with every
+host on the shared labels. A host held as a canary is not, and § *The canary*
+below has the figures for that.
 
 `small` carries the entire org: **12 `runs-on` declarations** across
 `security.yml` (7), `release.yml` (3), `ci.yml` and `pr-title-lint.yml` — and
@@ -222,6 +224,58 @@ repositories can see these runners.
 
 Each tier also carries an explicit spec label (`fireactions-2vcpu-4gb` etc.) if
 you prefer to pin by shape rather than by name.
+
+### The canary
+
+A host can be taken out of the shared pool for the length of a rollout window,
+so a kernel or VMM change can be proven on one host before the other three get
+it. The switch is a single file beside the fireactions inventory — create the
+`host_vars/` directory, which does not exist while no window is open:
+
+```yaml
+# inventories/petruk-pve/petruk-pve0/pve-vms/fireactions/host_vars/fireactions_vm_01.yaml
+fireactions_canary: true
+```
+
+**Creating it is the on switch and deleting it is the off switch.** There is no
+`false` variant — `vars/main.yaml` defaults the name, so an absent file is a
+host that is not a canary. Neither direction needs an edit to `vars/main.yaml`
+and neither needs a manual step on a box: the label lives inside the unattended
+`--tags fireactions` apply, so **merging the file is the operation** — which is
+also why it is not committed ahead of a window.
+
+It must go beside *that* inventory. `fireactions_vm_01` also appears in
+`pve-vms/all/inventory.yaml`, but that file's only group is `all_vms`, and this
+play runs against `fireactions_all` — so `host_vars/` next to `all/` would be
+read by nothing and the apply would go green having changed no label.
+
+All three of that host's pools drop their shared labels for one flat set,
+`self-hosted` + `fireactions-canary`:
+
+| `runs-on` | Outside a window | With one canary |
+| --- | --- | --- |
+| `fireactions-small` | 32 | 24 |
+| `fireactions-medium` | 4 | 3 |
+| `fireactions-large` | 4 | 3 |
+| `fireactions-canary` | 0 | 10 |
+
+> [!WARNING]
+> **On a canary host the three tiers are indistinguishable.** They carry the
+> same labels, so `runs-on: fireactions-canary` cannot pick a shape — a job
+> needing 12 GiB may land on a 4 GiB `small` and be OOM-killed. Size canary
+> work for the *small* tier, not for the tier you think you asked for.
+
+> [!IMPORTANT]
+> **The flip restarts fireactions on that host**, because rendering the config
+> notifies the restart handler. Both directions therefore destroy that host's
+> microVMs and kill whatever jobs they hold — up to 10, and only those actually
+> running something. Check nothing is mid-CI before flipping, and re-run what
+> died; nothing retries it for you.
+
+Leaving a canary on costs 8 of the org's 32 `small` runners and strands 10
+microVMs on a label nothing dispatches to, so no `host_vars/` directory exists
+outside a window — its absence is the off state, and `ls` answers whether one
+is open.
 
 > [!NOTE]
 > A repository-scoped tier (`fireactions-repo-small`, registered with

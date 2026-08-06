@@ -321,6 +321,35 @@ fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireaction
 # these runners. Should a repository-scoped pool ever be added back, note that
 # the two scopes are never interchangeable - GitHub does not offer an org runner
 # to a repo-scoped workflow, or vice versa, even with identical labels.
+#
+# THE CANARY. A host carrying `fireactions_canary: true` in the fireactions
+# inventory's host_vars drops the shared labels on ALL THREE of its pools for
+# the flat set below, so ten microVMs answer to one name nothing else
+# dispatches. Turning it on is merging that file; turning it off is deleting it.
+# Neither needs an edit here and neither needs a manual step on a box - the
+# label lives inside the unattended `--tags fireactions` apply, so the merge is
+# the operation. README.md § "The canary" has the capacity figures and the one
+# behavioural surprise. ADR-0156 §B, §C.
+#
+# ALL THREE POOLS, NOT JUST small: leaving medium and large on the shared set
+# would keep the host serving ordinary org traffic on the unproven
+# configuration for the whole window, and the runner-image build targets
+# `fireactions-medium`. `self-hosted` is kept in the canary set because GitHub
+# applies it (with `Linux` and `X64`) to every runner regardless - dropping it
+# removes nothing, and keeping it makes the rendered config say what the runner
+# will actually carry.
+#
+# Defined once rather than inline three times: the three pools must differ on
+# their shared label list and must NOT differ on the condition. A host with no
+# `fireactions_canary` at all is not a canary, which is what makes deleting the
+# file the off switch. `| bool` is what makes a quoted "false" or "no" mean
+# false rather than merely non-empty.
+fireactions_canary_on: "{{ fireactions_canary | default(false) | bool }}"
+
+fireactions_canary_labels:
+  - self-hosted
+  - fireactions-canary
+
 fireactions_pools:
   - name: fireactions-small
     # 8 per host = 32 org-wide across four hosts. Every ordinary job targets this;
@@ -336,11 +365,13 @@ fireactions_pools:
       # yaml.v3 will not coerce a quoted string.
       group_id: "{{ fireactions_github_runner_group_id | int }}"
       organization: "{{ fireactions_github_organization }}"
-      labels:
-        - self-hosted
-        - fireactions
-        - fireactions-small
-        - fireactions-2vcpu-4gb
+      # Derived - see the canary note above `fireactions_canary_on`. The second
+      # list is what all four hosts carry outside a window; only a host whose
+      # host_vars sets the flag resolves to the first.
+      labels: >-
+        {{ fireactions_canary_on | ternary(fireactions_canary_labels,
+        ['self-hosted', 'fireactions', 'fireactions-small',
+        'fireactions-2vcpu-4gb']) }}
     firecracker:
       binary_path: firecracker
       kernel_image_path: "{{ fireactions_kernel_image_path }}"
@@ -362,11 +393,10 @@ fireactions_pools:
       image_pull_policy: IfNotPresent
       group_id: "{{ fireactions_github_runner_group_id | int }}"
       organization: "{{ fireactions_github_organization }}"
-      labels:
-        - self-hosted
-        - fireactions
-        - fireactions-medium
-        - fireactions-4vcpu-8gb
+      labels: >-
+        {{ fireactions_canary_on | ternary(fireactions_canary_labels,
+        ['self-hosted', 'fireactions', 'fireactions-medium',
+        'fireactions-4vcpu-8gb']) }}
     firecracker:
       binary_path: firecracker
       kernel_image_path: "{{ fireactions_kernel_image_path }}"
@@ -388,11 +418,10 @@ fireactions_pools:
       image_pull_policy: IfNotPresent
       group_id: "{{ fireactions_github_runner_group_id | int }}"
       organization: "{{ fireactions_github_organization }}"
-      labels:
-        - self-hosted
-        - fireactions
-        - fireactions-large
-        - fireactions-8vcpu-12gb
+      labels: >-
+        {{ fireactions_canary_on | ternary(fireactions_canary_labels,
+        ['self-hosted', 'fireactions', 'fireactions-large',
+        'fireactions-8vcpu-12gb']) }}
     firecracker:
       binary_path: firecracker
       kernel_image_path: "{{ fireactions_kernel_image_path }}"

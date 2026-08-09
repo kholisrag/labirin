@@ -1,0 +1,75 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/1panel/manage-websites.yaml
+# Rewritten in full on every run - edits made in the 1Panel dashboard are lost.
+#
+# READ THIS BEFORE WIDENING THE ALLOW BLOCK. The service behind this proxy
+# mounts a catalogue endpoint that takes no credential, so this vhost is not one
+# control among several - it is the only thing standing between that endpoint
+# and every host on the LAN that can reach this box on 443 with the right SNI.
+#
+# The allow-list is what makes the name safe, NOT the DNS record. nginx picks a
+# site by SNI, so an alias removed from Unbound is removed as a convenience and
+# not as a door: `curl --resolve` and a hosts entry both still arrive here.
+#
+# Its one legitimate client is the tunnel connector VM. Nothing else on the LAN
+# has a reason to reach this name, and the public path does not come through
+# the LAN at all - it arrives from the connector, which is what the allow below
+# names.
+
+# SERVER SCOPE, NOT INSIDE THE location BELOW - AND THAT IS THE WHOLE POINT.
+# 1Panel includes this file in the site's `server` block, which is how every
+# template in this directory can open with a bare `location`. So an allow/deny
+# pair at this level is inherited by EVERY location in the vhost, including the
+# ones 1Panel generates and this file never sees. Inside `location ^~ /` it
+# would only cover the requests that block wins - and proxy-prometheus.conf.j2
+# next door records what decides that: an `=` or a longer `^~` is resolved
+# first. A deny that a future generated location silently steps around is the
+# kind of control that reads correct and is not.
+#
+# Nothing here needs an exemption. The certificate is renewed on OPNsense and
+# pushed into this panel rather than answered for over HTTP, so there is no ACME
+# challenge path to keep open - see acme-cert-updater.yaml.
+#
+# THE ADDRESS IS MEASURED, NOT DERIVED, AND NOTHING RE-MEASURES IT.
+# The connector sits on the WAN bridge and this origin on the VLAN, so the
+# request crosses OPNsense before nginx sees it, and whether $remote_addr
+# survives that crossing was settled by observation rather than by reasoning
+# about NAT: two probes issued from the connector in August 2026 were logged
+# here with the connector's own address. No real_ip_header, set_real_ip_from or
+# real_ip_recursive exists anywhere on this host, so $remote_addr is the TCP
+# peer and no client-supplied header can forge it.
+#
+# THE TELL, because the failure is a confusing one. If that stops being true - a
+# manual outbound NAT on the VLAN interface, or the connector moved onto vmbr1 -
+# this pair starts denying the only client that should get through, and it
+# surfaces as a 403 AFTER a successful sign-in at the edge. That reads like an
+# access-control misconfiguration and it is not. Re-take the measurement; do not
+# go looking in the edge configuration. ADR-0177 §D.
+#
+# The value is read at run time from the connector's own cloud-init payload,
+# never transcribed - see manage-websites.yaml. It is stored there as a /24 and
+# arrives here already stripped; an unstripped prefix would allow the whole home
+# LAN and would look correct in the diff.
+allow {{ dalang_connector_address }};
+deny all;
+
+location ^~ / {
+    proxy_pass {{ item.upstream }};
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header REMOTE-HOST $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_http_version 1.1;
+
+    # Nothing here uploads and nothing here streams, so the stock body cap and
+    # the stock buffering both stand. The timeouts are raised only enough to
+    # outlast a cold start of the upstream, which is a compose stack on this
+    # box rather than a remote guest.
+    proxy_connect_timeout 30s;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+}

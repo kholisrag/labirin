@@ -12,3 +12,11 @@ collections:
     version: ">=2.1.0,<3.0.0"
   - name: oxlorg.opnsense
     version: ">=25.7.7,<26.0.0"
+  # Reads a value out of an OpenTofu SOPS blob instead of copying it into a
+  # vault - see the connector address in 1panel/manage-websites.yaml. This is a
+  # declaration catching up with a tool that is already present: the `sops`
+  # binary is on the control node and the blobs it opens are already in this
+  # tree. The floor is current-latest and the ceiling is the major, as with the
+  # four above; the feature floor is lower - `extract` arrived in 1.9.0.
+  - name: community.sops
+    version: ">=2.4.0,<3.0.0"

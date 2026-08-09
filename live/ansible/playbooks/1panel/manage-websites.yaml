@@ -46,6 +46,48 @@
       tags:
         - always
 
+    # The dalang site's proxy block allows exactly one client - the tunnel
+    # connector VM - and this is where that address comes from. It is read out
+    # of the connector's own cloud-init payload rather than copied into a
+    # vault, because a value in two files is a value that can disagree, and
+    # here the disagreement presents as a 403 AFTER a successful sign-in at the
+    # edge - which reads as an access-control problem and is not one. Same rule
+    # as every domain in vars/main.yaml, applied to a value whose home happens
+    # to be the OpenTofu layer rather than another playbook's vault.
+    #
+    # THE /24 IS STRIPPED HERE AND ONLY HERE. `addresses[0]` is CIDR, and an
+    # `allow` carrying the prefix would open the whole home LAN while looking
+    # perfectly correct in the diff. `.split('/')[0]` rather than an ipaddr
+    # filter: that would buy a second collection for a string operation.
+    #
+    # UNCONDITIONAL, so `sops` and the age key that opens the blob are needed
+    # by every run of this playbook and not only by dalang's entry. That is the
+    # cost of the read; the alternative was the second copy above.
+    - name: Read the tunnel connector's address from its cloud-init payload
+      ansible.builtin.set_fact:
+        dalang_connector_address: >-
+          {{ lookup('community.sops.sops', onepanel_connector_network_config,
+                    extract='["ethernets"]["id0"]["addresses"][0]').split('/')[0] }}
+      no_log: true
+      tags:
+        - always
+
+    # Cheap, and it catches the two ways the read above goes wrong quietly: the
+    # blob's shape changing under `extract`, and the strip silently not
+    # happening. Either would reach nginx as a malformed `allow`. The value is
+    # deliberately absent from the message - it is not printed anywhere.
+    - name: Assert the connector address is a bare address
+      ansible.builtin.assert:
+        that:
+          - dalang_connector_address is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+        fail_msg: >-
+          The address read from
+          {{ onepanel_connector_network_config }}
+          is not a bare IPv4 address. Check that .ethernets.id0.addresses[0]
+          still exists and still holds one.
+      tags:
+        - always
+
     # 1Panel's API key auth is md5("1panel" + <api key> + <unix timestamp>),
     # sent alongside the timestamp it was computed from. The panel rejects a
     # timestamp too far from its own clock, so this is derived per run rather

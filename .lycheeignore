@@ -15,3 +15,10 @@ http://0.0.0.0:2381/
 # that pattern then does not match, and the hook fails on its own ignore list.
 http://localhost
 http://127\.0\.0\.1
+
+# The same class one layer out: the proxy upstreams in playbooks/1panel that
+# are a guest on the VLAN rather than this box's loopback. They were missed
+# when the block above was written, because vars/main.yaml had not been staged
+# since - so the hook failed on entries nobody had touched, from a workstation
+# that is off that segment by design.
+http://10\.10\.99\.

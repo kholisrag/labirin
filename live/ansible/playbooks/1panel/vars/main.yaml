@@ -37,6 +37,21 @@ onepanel_website_group_id: 2
 onepanel_ssl_algorithm: >-
   ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:!aNULL:!eNULL:!EXPORT:!DSS:!DES:!RC4:!3DES:!MD5:!PSK:!KRB5:!SRP:!CAMELLIA:!SEED
 
+# The tunnel connector VM's cloud-init payload, and the one place that guest's
+# address is declared. manage-websites.yaml reads `.ethernets.id0.addresses[0]`
+# out of it at run time for the dalang site's allow-list, so the value nginx
+# allows is literally the field the machine boots with.
+#
+# It is NOT in dnsmasq_hosts and does not want to be: that list reserves
+# addresses for DHCP clients keyed on a MAC, and this guest carries
+# `dhcp4: false` and an address of its own. A reservation there would be a
+# declaration with nothing serving it, and it would pass every check this
+# repository has.
+#
+# Relative to playbook_dir so it survives being checked out anywhere.
+onepanel_connector_network_config: >-
+  {{ playbook_dir }}/../../../opentofu/proxmox/petruk-pve/petruk-pve0/vms/cloudflared/network-config.enc.yaml
+
 onepanel_websites:
   - primary_domain: "{{ vault_harbor_registry_host }}"
     remark: Harbor Container Registry
@@ -131,6 +146,38 @@ onepanel_websites:
     upstream: http://127.0.0.1:8181
     domains:
       - domain: "{{ vault_defectdojo_host }}"
+        port: 80
+
+  # dalang - the second service on this box whose playbook lives in the other
+  # repository, and handled the same way DefectDojo above is: a compose stack
+  # here, published to loopback, with its name and its port both chosen over
+  # there. Same 127.0.0.1 reasoning as Athens and gha-cache - OpenResty runs
+  # with `network_mode: host`, so the loopback publish is what nginx reaches and
+  # nothing on the LAN does.
+  #
+  # 8185 rather than continuing the 3300/3400/3500/3600 sequence, for the same
+  # reason DefectDojo is on 8181: the port is chosen in the other repository and
+  # this entry follows it.
+  #
+  # Its domain is in THIS vault for the reason given above DefectDojo - the
+  # owning service is in a different repository and this one cannot read its
+  # vault - so name and port are both second copies and both can drift. The
+  # symptom of the first is the one this file already names: a website created
+  # for a name Unbound does not alias, which looks like a DNS problem rather
+  # than a drifted copy. The other repository asserts that this origin answers
+  # dalang when reached by this name, which is what makes the copies checked.
+  #
+  # THIS ENTRY IS NOT LIKE THE OTHERS AND ITS TEMPLATE IS WHY. The service
+  # behind it serves a catalogue that takes no credential, so the proxy block
+  # allows the tunnel connector and denies the rest of the LAN. Read the header
+  # of proxy-dalang.conf.j2 before touching either file; dropping the Unbound
+  # alias is NOT a substitute, because nginx picks the site by SNI.
+  - primary_domain: "{{ vault_dalang_internal_host }}"
+    remark: dalang (development)
+    upstream: http://127.0.0.1:8185
+    proxy_template: proxy-dalang.conf.j2
+    domains:
+      - domain: "{{ vault_dalang_internal_host }}"
         port: 80
 
   - primary_domain: "{{ vault_gha_cache_host }}"

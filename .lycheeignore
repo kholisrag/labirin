@@ -13,12 +13,10 @@ http://0.0.0.0:2381/
 # lychee also scans THIS FILE when it is staged - a pattern written as
 # `http://localhost:.*` is read out of it as the link `http://localhost/`, which
 # that pattern then does not match, and the hook fails on its own ignore list.
+# The third is the same class one layer out - a proxy upstream that is a guest
+# on the VLAN rather than this box's loopback. It was missed when this block
+# was written, because vars/main.yaml had not been staged since, so the hook
+# failed on entries nobody had touched.
 http://localhost
 http://127\.0\.0\.1
-
-# The same class one layer out: the proxy upstreams in playbooks/1panel that
-# are a guest on the VLAN rather than this box's loopback. They were missed
-# when the block above was written, because vars/main.yaml had not been staged
-# since - so the hook failed on entries nobody had touched, from a workstation
-# that is off that segment by design.
 http://10\.10\.99\.

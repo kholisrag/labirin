@@ -15,31 +15,45 @@
 # has a reason to reach this name, and the public path does not come through
 # the LAN at all - it arrives from the connector, which is what the allow below
 # names.
-location ^~ / {
-    # THE ADDRESS IS MEASURED, NOT DERIVED, AND NOTHING RE-MEASURES IT.
-    # The connector sits on the WAN bridge and this origin on the VLAN, so the
-    # request crosses OPNsense before nginx sees it, and whether $remote_addr
-    # survives that crossing was settled by observation rather than by
-    # reasoning about NAT: two probes issued from the connector in August 2026
-    # were logged here with the connector's own address. No real_ip_header,
-    # set_real_ip_from or real_ip_recursive exists anywhere on this host, so
-    # $remote_addr is the TCP peer and no client-supplied header can forge it.
-    #
-    # THE TELL, because the failure is a confusing one. If that stops being
-    # true - a manual outbound NAT on the VLAN interface, or the connector
-    # moved onto vmbr1 - this block starts denying the only client that should
-    # get through, and it surfaces as a 403 AFTER a successful sign-in at the
-    # edge. That reads like an access-control misconfiguration and it is not.
-    # Re-take the measurement; do not go looking in the edge configuration.
-    # ADR-0177 §D.
-    #
-    # The value is read at run time from the connector's own cloud-init
-    # payload, never transcribed - see manage-websites.yaml. It is stored there
-    # as a /24 and arrives here already stripped; an unstripped prefix would
-    # allow the whole home LAN and would look correct in the diff.
-    allow {{ dalang_connector_address }};
-    deny all;
 
+# SERVER SCOPE, NOT INSIDE THE location BELOW - AND THAT IS THE WHOLE POINT.
+# 1Panel includes this file in the site's `server` block, which is how every
+# template in this directory can open with a bare `location`. So an allow/deny
+# pair at this level is inherited by EVERY location in the vhost, including the
+# ones 1Panel generates and this file never sees. Inside `location ^~ /` it
+# would only cover the requests that block wins - and proxy-prometheus.conf.j2
+# next door records what decides that: an `=` or a longer `^~` is resolved
+# first. A deny that a future generated location silently steps around is the
+# kind of control that reads correct and is not.
+#
+# Nothing here needs an exemption. The certificate is renewed on OPNsense and
+# pushed into this panel rather than answered for over HTTP, so there is no ACME
+# challenge path to keep open - see acme-cert-updater.yaml.
+#
+# THE ADDRESS IS MEASURED, NOT DERIVED, AND NOTHING RE-MEASURES IT.
+# The connector sits on the WAN bridge and this origin on the VLAN, so the
+# request crosses OPNsense before nginx sees it, and whether $remote_addr
+# survives that crossing was settled by observation rather than by reasoning
+# about NAT: two probes issued from the connector in August 2026 were logged
+# here with the connector's own address. No real_ip_header, set_real_ip_from or
+# real_ip_recursive exists anywhere on this host, so $remote_addr is the TCP
+# peer and no client-supplied header can forge it.
+#
+# THE TELL, because the failure is a confusing one. If that stops being true - a
+# manual outbound NAT on the VLAN interface, or the connector moved onto vmbr1 -
+# this pair starts denying the only client that should get through, and it
+# surfaces as a 403 AFTER a successful sign-in at the edge. That reads like an
+# access-control misconfiguration and it is not. Re-take the measurement; do not
+# go looking in the edge configuration. ADR-0177 §D.
+#
+# The value is read at run time from the connector's own cloud-init payload,
+# never transcribed - see manage-websites.yaml. It is stored there as a /24 and
+# arrives here already stripped; an unstripped prefix would allow the whole home
+# LAN and would look correct in the diff.
+allow {{ dalang_connector_address }};
+deny all;
+
+location ^~ / {
     proxy_pass {{ item.upstream }};
 
     proxy_set_header Host $host;

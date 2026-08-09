@@ -60,33 +60,50 @@
     # perfectly correct in the diff. `.split('/')[0]` rather than an ipaddr
     # filter: that would buy a second collection for a string operation.
     #
-    # UNCONDITIONAL, so `sops` and the age key that opens the blob are needed
-    # by every run of this playbook and not only by dalang's entry. That is the
-    # cost of the read; the alternative was the second copy above.
+    # TAGGED WITH ITS CONSUMER AND NOT `always`. The only task that needs this
+    # is the proxy location block below, so `--tags manage_https` and the two
+    # searches stay runnable on a workstation that has neither `sops` nor the
+    # age key. Under manage_websites or manage_proxy it is unconditional, which
+    # is the cost of the read: the alternative was the second copy above.
+    #
+    # NO `no_log`. It would buy nothing - this is an RFC1918 address, the class
+    # this file publishes in the clear three entries up - and it costs the one
+    # thing that matters here: a missing age key, an absent `sops` or a moved
+    # blob would otherwise fail as "output has been hidden", with the reason
+    # censored and the assert below never reached.
     - name: Read the tunnel connector's address from its cloud-init payload
       ansible.builtin.set_fact:
         dalang_connector_address: >-
           {{ lookup('community.sops.sops', onepanel_connector_network_config,
                     extract='["ethernets"]["id0"]["addresses"][0]').split('/')[0] }}
-      no_log: true
       tags:
-        - always
+        - manage_websites
+        - manage_proxy
 
     # Cheap, and it catches the two ways the read above goes wrong quietly: the
     # blob's shape changing under `extract`, and the strip silently not
-    # happening. Either would reach nginx as a malformed `allow`. The value is
-    # deliberately absent from the message - it is not printed anywhere.
+    # happening. Either would reach nginx as a malformed `allow`, which fails
+    # the reload for every site on the box rather than for this one.
+    #
+    # `\Z` AND NOT `$`, which matches before a trailing newline - so `$` would
+    # accept a value that reaches the template as `allow <addr>\n;`. The lookup
+    # rstrips by default and this does not rely on it.
+    #
+    # It does not range-check the octets, deliberately: the value comes from a
+    # declaration in this tree rather than from anything a client sends, and the
+    # failure being guarded is a shape change, not a hostile one.
     - name: Assert the connector address is a bare address
       ansible.builtin.assert:
         that:
-          - dalang_connector_address is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+          - dalang_connector_address is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}\Z')
         fail_msg: >-
           The address read from
           {{ onepanel_connector_network_config }}
           is not a bare IPv4 address. Check that .ethernets.id0.addresses[0]
           still exists and still holds one.
       tags:
-        - always
+        - manage_websites
+        - manage_proxy
 
     # 1Panel's API key auth is md5("1panel" + <api key> + <unix timestamp>),
     # sent alongside the timestamp it was computed from. The panel rejects a

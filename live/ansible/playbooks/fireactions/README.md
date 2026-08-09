@@ -242,7 +242,9 @@ fireactions_canary: true
 host that is not a canary. Neither direction needs an edit to `vars/main.yaml`
 and neither needs a manual step on a box: the label lives inside the unattended
 `--tags fireactions` apply, so **merging the file is the operation** — which is
-also why it is not committed ahead of a window.
+also why it never reaches `main` ahead of a window. Both of the pull requests
+that carry it in and back out are *written* ahead of one, which is a different
+act; see [Opening and closing a window](#opening-and-closing-a-window) below.
 
 It must go beside *that* inventory. `fireactions_vm_01` also appears in
 `pve-vms/all/inventory.yaml`, but that file's only group is `all_vms`, and this
@@ -286,6 +288,47 @@ is open.
 > and the two scopes are mutually exclusive per pool. The scopes are never
 > interchangeable — GitHub does not offer an org runner to a repo-scoped
 > workflow, or the reverse, even with identical labels.
+
+#### Opening and closing a window
+
+**Two pull requests bound a window, and both are open before either one
+merges.** They are stacked, and the stacking is forced rather than stylistic:
+the off switch is a deletion, and a deletion needs its target present in the
+base it is opened against. A branch cut from `main` that removes a `host_vars/`
+file `main` does not have leaves nothing to compare, and GitHub will not open a
+pull request for it — so the second one is based on the first.
+
+| | Base | Head | Diff |
+| --- | --- | --- | --- |
+| **A — on** | `main` | `canary-on` | creates `host_vars/fireactions_vm_01.yaml` |
+| **B — off** | `canary-on` | `canary-off` | deletes it |
+
+**Write B first — before A merges, and so before any canary exists.** These
+labels are organisation-scoped, and the gap between adding one and taking it
+away again is precisely where somebody forgets: nothing outside this repository
+announces that a window is open, the cost above is paid for every hour of the
+forgetting, and the person who would notice is the one who opened it. The
+cheapest guard is having already written the way back — as a pull request
+other people can see and merge, not a local branch and not an intention.
+
+**Writing both ahead of a window is not committing the flag file to `main`.**
+Merging is still the operation: until A lands, the file exists only on
+`canary-on` and B's deletion of it only on `canary-off`, so `main` stays in the
+off state the whole time the two sit open. That is what lets the way back be
+written while there is still nothing to switch off.
+
+**Merging A retargets B.** This repository sets `delete_branch_on_merge: true`,
+so squashing A deletes the `canary-on` branch and GitHub moves B's base to
+`main`, where its diff becomes the deletion against a `main` that now carries
+the file. If that retarget does not fire it is one command, not a broken
+procedure:
+
+```bash
+gh pr edit <B> --base main
+```
+
+Merging B is what closes the window, carried out by the same unattended apply
+that carried out A.
 
 ### There is no autoscaler
 

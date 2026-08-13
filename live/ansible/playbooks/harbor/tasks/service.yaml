@@ -1,0 +1,125 @@
+---
+# ============================================
+# harbor.service - the unit that owns "the stack should be running"
+# ============================================
+# Harbor ships no service unit. `install.sh` runs `docker compose up -d` once
+# and the containers' own `restart: always` is expected to carry them across a
+# reboot. It does not, for a reason specific to Harbor's Compose file and
+# described in full in templates/harbor.service.j2: eight of the nine
+# containers log to the ninth over tcp://localhost:1514, Docker restores them
+# all in parallel without reading `depends_on`, and the eight that lose the
+# race fail at TASK CREATION - which is not an exit, so the restart policy has
+# nothing to retry. They stay Exited(128) until somebody notices the 502.
+#
+# So the unit is the boot half, and the reconcile below is the running half.
+# Neither replaces `restart: always`, which still covers a crash mid-life.
+# ============================================
+
+- name: Install the Harbor service unit
+  ansible.builtin.template:
+    src: harbor.service.j2
+    dest: "{{ harbor_service_unit_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - service
+
+# Enabled, not started - `daemon_reload` here is what picks up the template
+# above, so this task has to run whether or not the unit changed.
+#
+# Starting it is the one thing this task must not also do: the unit's ExecStart
+# is `compose up -d`, and on a oneshot that is already active systemd would run
+# nothing anyway. The reconcile below decides that, on evidence.
+- name: Enable Harbor at boot
+  ansible.builtin.systemd_service:
+    name: "{{ harbor_service_name }}"
+    enabled: true
+    daemon_reload: true
+  tags:
+    - service
+
+# ---------------------------------------------------------------
+# Reconcile: is the stack actually up?
+# ---------------------------------------------------------------
+# NOT MEASURED BY THE HEALTH ENDPOINT, and not by `systemctl is-active` either.
+#
+# The API is the wrong probe because Harbor takes 60-90s from install.sh
+# returning to /api/v2.0/health answering, so a run that just installed would
+# read as down and bounce the stack it had only now brought up. `is-active` is
+# the wrong probe because the unit is a oneshot with RemainAfterExit - it stays
+# active for as long as the boot-time `compose up` exited 0, which says nothing
+# about what the containers did afterwards. That is exactly the state this file
+# exists to repair, so a probe that cannot see it is no probe at all.
+#
+# Compose's own view is true in both cases.
+- name: List the services the Compose file declares
+  ansible.builtin.command:
+    cmd: "{{ harbor_compose_bin }} compose config --services"
+    chdir: "{{ harbor_install_dir }}"
+  register: harbor_declared_services
+  changed_when: false
+  tags:
+    - service
+
+- name: List the Compose services that are running
+  ansible.builtin.command:
+    cmd: "{{ harbor_compose_bin }} compose ps --services --status running"
+    chdir: "{{ harbor_install_dir }}"
+  register: harbor_running_services
+  changed_when: false
+  tags:
+    - service
+
+- name: Determine which Harbor services are not running
+  ansible.builtin.set_fact:
+    harbor_stopped_services: >-
+      {{ harbor_declared_services.stdout_lines
+         | difference(harbor_running_services.stdout_lines) }}
+  tags:
+    - service
+
+- name: Report the stack state
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        'Harbor stack is up - all '
+          ~ (harbor_declared_services.stdout_lines | length) ~ ' services running'
+        if harbor_stopped_services | length == 0
+        else 'Harbor stack is degraded - not running: '
+          ~ (harbor_stopped_services | join(', ')) ~ ' - bringing it up'
+      }}
+  tags:
+    - service
+
+# `restarted`, not `started`. A oneshot that is already active is what a host
+# booted into this failure looks like, and `started` is a no-op against it -
+# systemd sees an active unit and has nothing to do. `restarted` runs ExecStop
+# (`compose stop`, which stops the one container that did come up) and then
+# ExecStart (`compose up -d`, which starts all nine IN DEPENDENCY ORDER). That
+# ordering is the whole repair: `harbor-log` is listening before anything tries
+# to open a syslog socket at it.
+- name: Bring the Harbor stack up
+  ansible.builtin.systemd_service:
+    name: "{{ harbor_service_name }}"
+    state: restarted
+  when: harbor_stopped_services | length > 0
+  tags:
+    - service
+
+# The unit is `enabled` from the moment it is installed, so a reboot is already
+# covered - but on a host where the stack was up before it existed, it is also
+# `inactive`, and `systemctl status harbor` then reads "inactive (dead)" beside
+# nine running containers. That is only cosmetic until somebody believes it.
+#
+# `started` on an inactive oneshot runs ExecStart, and `compose up -d` against a
+# stack that is already up and already matches its config is a no-op - it is the
+# same command the reconcile above would have run, reaching a state it is
+# already in. On an active unit it does nothing at all.
+- name: Mark the unit active where the stack was already up
+  ansible.builtin.systemd_service:
+    name: "{{ harbor_service_name }}"
+    state: started
+  when: harbor_stopped_services | length == 0
+  tags:
+    - service

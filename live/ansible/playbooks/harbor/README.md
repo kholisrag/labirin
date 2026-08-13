@@ -212,7 +212,7 @@ ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harb
   live/ansible/playbooks/harbor/install-harbor.yaml
 
 # A single component (tags: dependencies, data-volume, docker, harbor,
-# proxy-cache, configurations, gc, robots)
+# service, proxy-cache, configurations, gc, robots)
 ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/harbor \
   live/ansible/playbooks/harbor/install-harbor.yaml --tags proxy-cache
 ```
@@ -520,10 +520,103 @@ A `quay` endpoint is accepted; the *project* then fails with
 `bad request: unsupported registry type quay`. quay.io is a plain OCI registry
 for public pulls, so the generic adapter is all it needs.
 
+## Surviving a reboot
+
+**Harbor does not come back on its own, and `restart: always` is why it looks
+like it should.** Every container in the generated `docker-compose.yml` carries
+that policy, so the obvious reading is that a reboot is handled. It is not, and
+the failure is silent until something pulls an image.
+
+Eight of the nine services log through Docker's **`syslog` driver at
+`tcp://localhost:1514`**, and the thing listening on that port is the ninth
+container, `harbor-log`. It is the only one on `json-file`:
+
+| container | log driver |
+| --- | --- |
+| `harbor-log` | `json-file` |
+| `registry`, `registryctl`, `postgresql`, `redis`, `core`, `portal`, `jobservice`, `proxy` | `syslog` → `tcp://localhost:1514` |
+
+On boot Docker restores every restart-policy container **in parallel**.
+`depends_on` orders `docker compose up`; it is not recorded in the container and
+Docker's restart-on-boot never reads it. So the eight race `harbor-log` and the
+ones that lose die before their first instruction:
+
+```console
+$ docker inspect harbor-core --format '{{.State.Error}}'
+failed to create task for container: failed to initialize logging driver:
+dial tcp 127.0.0.1:1514: connect: connection refused
+```
+
+**And nothing retries them.** Docker's restart manager restarts containers that
+ran and *exited*; these failed at task creation, so from its point of view there
+is no run to restart. They stay `Exited (128)` indefinitely — the observed state
+was eight containers dead for four days behind a healthy `harbor-log`, and the
+symptom is a **502 from OpenResty**, because `proxy` is one of the eight and the
+1Panel vhost has nothing to reach.
+
+### What fixes it
+
+`harbor.service`, templated by `tasks/service.yaml`:
+
+```ini
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/harbor
+ExecStart=/usr/bin/docker compose up -d
+```
+
+`compose up` **is** ordered, so one run of it after the engine is up puts
+`harbor-log` in place before anything opens a syslog socket at it. Two details
+in the unit are load-bearing:
+
+- **`RequiresMountsFor=/data`.** The data disk is mounted `nofail`, and `nofail`
+  means systemd does not order the mount before `local-fs.target` — it is
+  *wanted*, not required, and boot continues without waiting. Without this line
+  the stack can come up against an empty `/data` on the root disk, which is a
+  worse outcome than being down.
+- **`ExecStop` is `compose stop`, not `compose down`.** `down` removes the
+  containers; there is nothing to gain, since all the state is in `/data`.
+
+The generated `docker-compose.yml` is **not** edited to drop the restart
+policies, even though they now do nothing useful at boot: `install.sh`
+regenerates that file from `harbor.yml` via `prepare`, so the edit would not
+survive the next version bump. They still cover a crash mid-life, which the unit
+does not. The cost is cosmetic — at boot Docker tries and fails once, and then
+`harbor.service` starts everything properly.
+
+### The playbook heals a host that is already in this state
+
+A steady-state run used to be unable to. `tasks/preflight.yaml` finds the
+version marker matching, `harbor_needs_install` is false, the role's tasks are
+gated off and `install.sh` never runs — correctly, since that gate is what stops
+the stack bouncing on every run. The first task to touch a dead Harbor was then
+the health wait at the top of `tasks/proxy-cache.yaml`, which spun for five
+minutes and failed the play without saying why.
+
+`tasks/service.yaml` now runs before it and reconciles on **Compose's own view**
+rather than on the API or on `systemctl is-active`:
+
+```bash
+docker compose config --services                  # what should run
+docker compose ps --services --status running     # what does
+```
+
+Neither of the other two probes works here. The health endpoint takes 60–90s to
+answer after an install, so a fresh install would read as down and get bounced.
+`is-active` reports the *unit*, which is a oneshot with `RemainAfterExit` — it
+stays active for as long as the boot-time `compose up` exited 0, which is
+exactly true and exactly useless in the case where the containers died
+afterwards.
+
+Where the two lists differ, the unit is `restarted` (not `started` — `started`
+against an active oneshot is a no-op).
+
 ## Verifying
 
 ```bash
 # On the host
+systemctl is-enabled harbor.service                          # "enabled"
+docker compose -f /home/harbor/docker-compose.yml ps         # nine, all Up
 docker ps --format '{{.Names}}\t{{.Status}}'
 curl -fsS http://127.0.0.1/api/v2.0/health | jq .status     # "healthy"
 
@@ -537,6 +630,11 @@ only lists what has actually been cached.
 
 ## Troubleshooting
 
+- **502 from the registry host after a reboot, and `docker ps -a` shows eight
+  containers `Exited (128)` behind a healthy `harbor-log`** — the syslog race
+  above. Immediate fix is `cd /home/harbor && docker compose up -d`; the durable
+  one is `--tags service`, which installs the unit that prevents it and brings
+  the stack up in the same run.
 - **`unauthorized` or `404` on a pull that should work** — check the path has
   the project name as its first segment and `library/` for Docker Hub official
   images.

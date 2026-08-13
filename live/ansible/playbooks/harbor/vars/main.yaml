@@ -107,6 +107,24 @@ harbor_docker_apt_repo: >-
   https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable
 
 # --------------------------------------------
+# Service unit
+# --------------------------------------------
+# Where the installer tree lives. NOT CONFIGURABLE, despite being a variable:
+# robertdebock.harbor unarchives to `dest: /home` and the release tarball's top
+# directory is `harbor`, so the path is a consequence of the role plus the
+# archive rather than a choice. It is named here so tasks/service.yaml and the
+# unit template cannot disagree about it.
+harbor_install_dir: /home/harbor
+
+# Absolute, because systemd resolves no PATH for ExecStart. `docker compose`,
+# not `docker-compose` - tasks/docker.yaml installs the v2 plugin and asserts
+# it is reachable.
+harbor_compose_bin: /usr/bin/docker
+
+harbor_service_name: harbor.service
+harbor_service_unit_path: /etc/systemd/system/{{ harbor_service_name }}
+
+# --------------------------------------------
 # API
 # --------------------------------------------
 # Talk to Harbor over the loopback, not through harbor_external_url. The

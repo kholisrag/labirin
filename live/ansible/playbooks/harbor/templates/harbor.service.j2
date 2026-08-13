@@ -1,0 +1,56 @@
+{{ ansible_managed | comment }}
+# Managed by live/ansible/playbooks/harbor/install-harbor.yaml
+# Rewritten in full on every run - edits made on the box are lost.
+#
+# THIS UNIT EXISTS BECAUSE `restart: always` DOES NOT BRING HARBOR BACK.
+# Eight of Harbor's nine containers log through the `syslog` driver at
+# tcp://localhost:1514, which is served by the ninth (`harbor-log`). On boot
+# Docker restores every restart-policy container in PARALLEL - `depends_on` is
+# a Compose-time ordering primitive and Docker's own restart-on-boot does not
+# read it - so the eight race `harbor-log` and lose:
+#
+#   failed to create task for container: failed to initialize logging driver:
+#   dial tcp 127.0.0.1:1514: connect: connection refused
+#
+# Docker's restart manager retries containers that RAN AND EXITED. These never
+# ran, so nothing retries them and they sit Exited(128) until a human runs
+# `docker compose up -d`. `compose up` is ordered, so running it once after the
+# engine is up is the whole fix. See the README.
+
+[Unit]
+Description=Harbor container registry (Compose stack)
+Documentation=https://goharbor.io/docs/{{ harbor_version }}/
+Documentation=file://{{ harbor_install_dir }}/docker-compose.yml
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+# /data is a separate device mounted `nofail`, and nofail means systemd does
+# NOT order the mount before local-fs.target - it is wanted, not required, and
+# boot proceeds without it. Without this line the stack can therefore come up
+# against an empty /data on the root disk: Postgres initialises a fresh cluster
+# and the registry serves a cache with no blobs in it.
+RequiresMountsFor={{ harbor_data_mount }}
+
+[Service]
+# `compose up -d` returns once the containers are started, so the unit is a
+# oneshot that stays "active" to represent the running stack rather than a
+# process systemd supervises. Harbor's own containers carry `restart: always`,
+# which handles a crash mid-life; this unit handles boot.
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ harbor_install_dir }}
+ExecStart={{ harbor_compose_bin }} compose up -d
+# `stop`, never `down`. `down` removes the containers, and on a host where the
+# next boot may not reach the network that turns a slow start into a failed
+# one for no gain - the containers hold no state, /data does.
+ExecStop={{ harbor_compose_bin }} compose stop
+# Cold start pulls nothing (the images are already local) but `prepare` and
+# Postgres recovery can be slow on a busy node.
+TimeoutStartSec=600
+TimeoutStopSec=120
+# Covers the engine answering the socket before it is ready to create tasks.
+Restart=on-failure
+RestartSec=15s
+
+[Install]
+WantedBy=multi-user.target

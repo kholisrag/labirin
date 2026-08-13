@@ -83,6 +83,21 @@
         - harbor
 
     # ============================================
+    # Boot survival
+    # ============================================
+    # After the install, because the unit's ExecStart is `compose up -d` against
+    # the tree the role lays down. Before the proxy cache, because everything
+    # below this point talks to the API and this is what guarantees there is
+    # something listening - on a host that came back from a reboot with the
+    # stack down, the health wait at the top of proxy-cache.yaml was previously
+    # the first thing to notice, five minutes later, as a failure.
+    - name: Install and reconcile the Harbor service unit
+      ansible.builtin.include_tasks:
+        file: tasks/service.yaml
+      tags:
+        - service
+
+    # ============================================
     # Registry endpoints and proxy cache projects
     # ============================================
     - name: Configure the proxy cache
@@ -140,6 +155,7 @@
           - "Caches   : {{ harbor_proxy_projects | map(attribute='name') | join(', ') }}"
           - ""
           - "Verify with:"
+          - "  systemctl is-enabled {{ harbor_service_name }}"
           - "  docker ps --format '{% raw %}{{.Names}}\t{{.Status}}{% endraw %}'"
           - "  curl -fsS {{ harbor_api_base }}/health | jq .status"
           - ""

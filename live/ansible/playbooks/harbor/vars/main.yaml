@@ -16,7 +16,7 @@
 #
 # Consumed by robertdebock.harbor, whose vars/main.yml builds the installer URL
 # as harbor-<installation_type>-installer-v<version>.tgz.
-harbor_version: "2.15.0"
+harbor_version: "2.15.5"
 
 # "online" pulls the component images from Docker Hub at install time (~100 MiB
 # tarball); "offline" ships them inside the tarball (~700 MiB). Online is right

@@ -23,6 +23,19 @@
   tags:
     - always
 
+# From v2.16.0 the installers are per-architecture -
+# harbor-online-installer-v2.16.0-amd64.tgz - but robertdebock.harbor's
+# vars/main.yml still builds the pre-2.16 name with no suffix, which 404s.
+# Role vars outrank play vars and vars_files, so redefining harbor_archive in
+# vars/main.yaml would be silently ignored; a fact outranks role vars.
+- name: Point the role at the per-architecture installer
+  ansible.builtin.set_fact:
+    harbor_archive: >-
+      https://github.com/goharbor/harbor/releases/download/v{{ harbor_version }}/harbor-{{ harbor_installation_type
+      }}-installer-v{{ harbor_version }}{{ ('-' ~ harbor_arch) if harbor_version is version('2.16.0', '>=') else '' }}.tgz
+  tags:
+    - always
+
 - name: Assert the distribution is supported
   ansible.builtin.assert:
     that:

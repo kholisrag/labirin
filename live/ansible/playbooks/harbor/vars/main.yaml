@@ -1,7 +1,7 @@
 ---
 # ============================================
 # Harbor - container registry and pull-through proxy cache
-# https://goharbor.io/docs/2.15.0/
+# https://goharbor.io/docs/2.16.0/
 # ============================================
 # This host exists to be a cache. Nothing here pushes images: every project
 # below is a proxy cache in front of an upstream registry, so the failure mode
@@ -16,7 +16,7 @@
 #
 # Consumed by robertdebock.harbor, whose vars/main.yml builds the installer URL
 # as harbor-<installation_type>-installer-v<version>.tgz.
-harbor_version: "2.15.5"
+harbor_version: "2.16.0"
 
 # "online" pulls the component images from Docker Hub at install time (~100 MiB
 # tarball); "offline" ships them inside the tarball (~700 MiB). Online is right

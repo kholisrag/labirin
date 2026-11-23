@@ -95,17 +95,13 @@ services:
       DB_POSTGRES_USER: "{{ gha_cache_db_user }}"
       DB_POSTGRES_PASSWORD: ${GHA_CACHE_DB_PASSWORD}
 
-    healthcheck:
-      # /health is a flat 200 from the HTTP layer - it says the process is
-      # serving, not that S3 or Postgres are reachable. That is still the useful
-      # probe, because a server that cannot reach its database exits rather than
-      # serving unhealthily: lib/db.ts calls process.exit(1) when the migrations
-      # fail. Alpine base, so wget is present.
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    # NO healthcheck, on purpose. From v10.0.0 the image is a Rust binary on
+    # gcr.io/distroless/static-debian12: no shell, no wget, no curl, and the
+    # binary has no health subcommand - so any CMD or CMD-SHELL probe would
+    # mark a working container unhealthy forever. /health still answers 200 and
+    # is probed from outside instead (the playbook's post-install curl, and
+    # OpenResty in front).
+    # (Up to 9.x this was a `wget -q -O- http://localhost:3000/health` probe.)
 
 networks:
   # `external: true` means "attach to the network that already exists under this

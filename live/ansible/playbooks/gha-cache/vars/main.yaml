@@ -22,11 +22,14 @@
 # the playbook, unlike Athens.
 
 # https://github.com/falcondev-oss/github-actions-cache-server/releases
-# GHCR publishes `<major>.<minor>.<patch>` with no `v` prefix, plus a `-caged`
-# variant built on node-caged. The caged image refuses to run with the sqlite
-# driver; we use postgres, so either would work - the plain image is the one
-# upstream's own docs and Helm chart default to.
-gha_cache_version: "9.6.2"
+# GHCR publishes `<major>.<minor>.<patch>` with no `v` prefix. v10 is a Rust
+# rewrite on a distroless image (no shell - see the healthcheck note in the
+# compose template) and dropped the old `-caged` variant.
+#
+# UPGRADE PATH: v10.0.0 drops and clears any cache database older than v9.10,
+# so 9.6.2 went 9.10.0 (start once, "Database migrated") -> 10.0.2 on
+# 2026-11-24. The migration is one-way; v9 cannot run against it afterwards.
+gha_cache_version: "10.0.2"
 
 gha_cache_compose_name: gha-cache
 gha_cache_container_name: gha-cache

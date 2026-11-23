@@ -14,7 +14,7 @@
 # .env - see loadPath()/newComposeEnv() in agent/app/service/container_compose.go.
 # The paths below mirror that decision; they are not free choices.
 
-athens_version: v0.18.1
+athens_version: v0.20.0
 
 athens_compose_name: athens
 athens_container_name: athens

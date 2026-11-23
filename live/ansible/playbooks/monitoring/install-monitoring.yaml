@@ -247,6 +247,11 @@
     # side only - the container side of the arrow collides constantly between
     # unrelated images and means nothing. The leading colon is what keeps
     # ":9090->" from matching a container published on 19090.
+    #
+    # The host ADDRESS counts too: two binds on the same port only collide when
+    # they share an address or one of them is a wildcard. dalang-development
+    # publishes 10.10.99.10:9090 next to Prometheus on 127.0.0.1:9090, and both
+    # bind fine - a port-number-only match refused that as a conflict.
     - name: Find the containers already publishing either host port
       ansible.builtin.set_fact:
         monitoring_port_conflicts: >-
@@ -259,7 +264,11 @@
         - item.0.ports is not none
         # This stack's own containers are not a conflict on a re-run.
         - item.0.name not in monitoring_own_containers
-        - item.0.ports | select('search', ':' ~ item.1 ~ '->') | list | length > 0
+        - >-
+          item.0.ports
+          | select('search', '(^|[ ,])(' ~ (monitoring_bind_address | regex_escape)
+                   ~ '|0\\.0\\.0\\.0|\\[?::\\]?):' ~ item.1 ~ '->')
+          | list | length > 0
       tags:
         - monitoring
         - preflight

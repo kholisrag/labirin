@@ -40,7 +40,7 @@ monitoring_bind_address: 127.0.0.1
 # where an unattended major bump is expensive. v3.13.1 is the current stable
 # (released 2026-07-10); check https://github.com/prometheus/prometheus/releases
 # before moving it.
-monitoring_prometheus_version: v3.13.1
+monitoring_prometheus_version: v3.16.0
 
 monitoring_prometheus_container: prometheus
 
@@ -389,7 +389,7 @@ monitoring_external_labels:
 # ============================================
 # Pinned for the same reason as Prometheus above. 13.1.1 is the current stable;
 # check https://github.com/grafana/grafana/releases before moving it.
-monitoring_grafana_version: 13.1.1
+monitoring_grafana_version: 13.3.1
 
 monitoring_grafana_container: grafana
 

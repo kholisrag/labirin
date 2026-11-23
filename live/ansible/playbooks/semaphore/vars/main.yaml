@@ -21,8 +21,10 @@
 
 # https://github.com/semaphoreui/semaphore/releases
 #
-# NOT `latest`, and not a v2.19.x - every v2.19 tag published so far is `-rc` or
-# `-beta`. v2.18.29 was the newest stable release on 2026-08-04.
+# NOT `latest`. v2.20.23 was the newest stable release on 2026-11-24 (bumped
+# from v2.18.29; BoltDB removal in v2.19.7 does not apply - this stack is SQLite).
+# Its Dockerfile still carries ANSIBLE_VERSION=13.5.0, so the Ansible pin below
+# did not move; the base image went alpine:3.21 -> 3.24.
 #
 # THIS TAG IS ALSO THE ANSIBLE PIN, which is not obvious and is the more
 # important half. deployment/docker/server/Dockerfile carries
@@ -31,7 +33,7 @@
 # here and nowhere else. labirin's own requirements.txt pins no ansible at all
 # (ADR-0119 §H), which makes this line the only pin there is. Moving it moves
 # the Ansible; read the release notes for both.
-semaphore_version: v2.18.29
+semaphore_version: v2.20.23
 
 semaphore_compose_name: semaphore
 semaphore_container_name: semaphore

@@ -13,11 +13,12 @@
 # --------------------------------------------
 # https://github.com/rustfs/rustfs/releases
 #
-# RustFS is PRE-1.0. Every published release so far is tagged as a prerelease,
-# the on-disk format is not promised to be stable across them, and there is no
-# documented in-place downgrade. Treat a version bump here as a change that
-# wants a backup of /data taken first, not as a routine patch.
-rustfs_version: "1.0.0-beta.11"
+# 1.0.0 went GA in 2026-09; before that every release was a prerelease. There
+# is still no documented in-place downgrade, so treat a version bump as a change
+# that wants .rustfs.sys (IAM, bucket metadata) and the old binary backed up
+# first, not as a routine patch. beta.11 -> 1.0.6 was a direct jump: no upgrade
+# notes apply to a single node (1.0.5's are about mixed-version pools).
+rustfs_version: "1.0.6"
 
 # The upstream one-liner (`curl -O https://rustfs.com/install_rustfs.sh`) is
 # NOT used, for two reasons that are not stylistic:
@@ -46,7 +47,7 @@ rustfs_package_url: "{{ rustfs_download_base }}/{{ rustfs_version }}/{{ rustfs_p
 #
 # Refresh on a version bump with:
 #   curl -fsSL https://github.com/rustfs/rustfs/releases/download/<version>/SHA256SUMS
-rustfs_package_sha256: ae77d173c520d523b7fd48fea93e8f8c4ad0c496b16cb47f14660677621424d5
+rustfs_package_sha256: 4f0bf3fecbe861467427ff506aee22c302cfd5ac8b7dcbde71714f8e5e680dea
 
 rustfs_binary_path: /usr/local/bin/rustfs
 # Records which version the binary at rustfs_binary_path was laid down from, so

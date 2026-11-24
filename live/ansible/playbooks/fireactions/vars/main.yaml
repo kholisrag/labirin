@@ -9,25 +9,25 @@
 # --------------------------------------------
 # Fireactions itself.
 #
-# This is a FORK, not upstream. Upstream v2.0.5 can only register runners at
-# organisation level - RunnerConfig has no `repository` field - so personal
-# repositories under github.com/kholisrag cannot use it at all. The fork adds
-# repository-scoped pools (and fixes a validation bug where the `pools` list was
-# never descended into, so nothing inside a pool was ever validated upstream).
-#
-# It tracks upstream tags with a `-personal.N` suffix, and release assets follow
-# upstream's naming exactly, so switching back is just these two variables.
-#   fork:     https://github.com/kholisrag/fireactions/releases
+# UPSTREAM again, since v2.2.2. The kholisrag fork (v2.0.5-personal.1) existed
+# for repository-scoped pools and a `pools` validation bug; every pool is now
+# organisation-scoped, and upstream validates pools with `dive` itself. The fork
+# stays published for the day a personal-repo pool is wanted - release assets
+# follow upstream's naming, so going back is just these two variables.
 #   upstream: https://github.com/hostinger/fireactions/releases
-fireactions_release_repo: kholisrag/fireactions
-fireactions_version: "2.0.5-personal.1"
+#   fork:     https://github.com/kholisrag/fireactions/releases
+#
+# 2.2.0+ also deletes each VM's <runner>.log/.firecracker.log/.sock/.vsock on
+# exit; 2.0.5 kept them forever. max_lifetime / max_log_size_mib (per pool) are
+# new and off by default.
+fireactions_release_repo: hostinger/fireactions
+fireactions_version: "2.2.2"
 
-# Firecracker. Pinned to the version the Fireactions install docs are written
-# against. 1.16.1 was also tried and behaves identically, so this pin is
-# conservatism rather than a known incompatibility - bump deliberately and
-# re-run the first-build smoke test.
+# Firecracker. 1.9.1 -> 1.18.0 removed nothing this host uses: the 5.10 guest
+# kernel is still the supported floor, and the API calls fireactions makes are
+# unchanged. Verified against the first-boot smoke test before rollout.
 # https://github.com/firecracker-microvm/firecracker/releases
-firecracker_version: "1.9.1"
+firecracker_version: "1.18.0"
 
 # Containerd must stay on the 1.7.x line: the devmapper snapshotter that
 # Fireactions depends on was removed from containerd 2.x.
@@ -243,7 +243,18 @@ fireactions_github_app_private_key: "{{ vault_fireactions_github_app_private_key
 # host, read from ../harbor/vars/vault.yaml rather than copied, and the image
 # path embeds the GitHub org. Only the tag is a digest and stays in the clear.
 fireactions_registry_mirror: "{{ vault_harbor_registry_host }}"
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-f093da9"
+#
+# TEMPORARILY ON THE ESCAPE HATCH (2026-11-24). Every image of ours built on
+# the July base ships actions/runner 2.335.1, which GitHub stopped giving jobs
+# to: each microVM was told to self-update, the update exited the runner, and
+# the VM shut down ~60s after boot - no runner online from at least 2026-11-23.
+# Upstream's 20261117070438 carries 2.338.2 and is what the pools run until
+# oprek-sh/fireactions-images#16 (rebase onto that base) is released; then put
+# the vault repo back here with the new <digest>-<sha7> tag. Until then the
+# shim, the 10.10.1.1 resolver, the cache patch and the toolcache are absent.
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/ghcr/hostinger/fireactions-images/ubuntu24.04:20261117070438"
+# Previous, broken (runner 2.335.1):
+# "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:142e9e2b56f732062ed81ce9623b4037e3fc2af716d6999a6cc3db363c008b89-f093da9"
 
 # --------------------------------------------
 # Pools

@@ -28,6 +28,10 @@
         url: >-
           https://github.com/firecracker-microvm/firecracker/releases/download/v{{ firecracker_version }}/firecracker-v{{ firecracker_version }}-{{ fireactions_uname_arch }}.tgz
         dest: "{{ fireactions_firecracker_tmp.path }}/firecracker.tgz"
+        # The release publishes a per-asset .sha256.txt; get_url fetches it and
+        # matches this archive by name.
+        checksum: >-
+          sha256:https://github.com/firecracker-microvm/firecracker/releases/download/v{{ firecracker_version }}/firecracker-v{{ firecracker_version }}-{{ fireactions_uname_arch }}.tgz.sha256.txt
         mode: "0600"
 
     - name: Unpack the Firecracker release archive

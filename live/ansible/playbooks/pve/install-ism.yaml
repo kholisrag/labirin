@@ -24,13 +24,22 @@
             | gpg --dearmor | tee /usr/share/keyrings/dell-openmanage.gpg >/dev/null
         creates: /usr/share/keyrings/dell-openmanage.gpg
 
+    # 6100 is Dell's newest iSM line and, like every line, is published only for
+    # bullseye and noble - there is no trixie build. NOBLE, not bullseye: the
+    # bullseye build links OpenSSL 1.1 (EOL 2023), which trixie does not ship, so
+    # it needed a hand-installed deb11 libssl1.1. The noble build links OpenSSL 3
+    # and needs glibc <= 2.38 and GLIBCXX <= 3.4.32, all satisfied by trixie's
+    # own libraries (checked with objdump -T on 6.1.0.0). Re-check on a version
+    # bump. The pin below keeps every other package off this repo, so nothing
+    # Ubuntu reaches the host beyond these two self-contained packages.
+    # https, not http: linux.dell.com:80 refuses connections from this host.
     - name: Create Dell iSM Deb822 source file
       ansible.builtin.copy:
         dest: /etc/apt/sources.list.d/dell-ism.sources
         content: |
           Types: deb
-          URIs: http://linux.dell.com/repo/community/openmanage/iSM/5400/bullseye
-          Suites: bullseye
+          URIs: https://linux.dell.com/repo/community/openmanage/iSM/6100/noble
+          Suites: noble
           Components: main
           Signed-By: /usr/share/keyrings/dell-openmanage.gpg
           Architectures: amd64
@@ -60,35 +69,17 @@
         name:
           - dcism-osc
           - dcism
-        state: present
+        # latest, not present: a URIs bump alone would otherwise never upgrade
+        # an installed box.
+        state: latest
 
-    - name: Check if libssl1.1 is installed
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          dpkg -l | grep libssl1.1
-      register: libssl_check
-      changed_when: false
-      failed_when: false
-
-    - name: Download libssl1.1 if not installed
-      ansible.builtin.get_url:
-        url: http://ftp.us.debian.org/debian/pool/main/o/openssl/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
-        dest: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
-        mode: "0644"
-      when: libssl_check.rc != 0
-
-    - name: Install libssl1.1 from downloaded deb package
+    # The bullseye build needed a deb11 libssl1.1; the noble one does not. Purge
+    # it where an earlier run of this playbook installed it.
+    - name: Remove the legacy libssl1.1 the bullseye build needed
       ansible.builtin.apt:
-        deb: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
-        state: present
-      when: libssl_check.rc != 0
-
-    - name: Remove temporary libssl1.1 deb file
-      ansible.builtin.file:
-        path: /tmp/libssl1.1_1.1.1w-0+deb11u1_amd64.deb
+        name: libssl1.1
         state: absent
-      when: libssl_check.rc != 0
+        purge: true
 
     - name: Check if dcismeng service exists and get current status
       ansible.builtin.systemd:

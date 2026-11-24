@@ -81,6 +81,30 @@
         state: absent
         purge: true
 
+    # dcism ships 95-iSM-usbnic.rules with RUN+="/etc/init.d/dcismeng start &".
+    # udev RUN has no shell, so the "&" does not background anything: the
+    # worker blocks on dcismeng (After=network.target) while ifupdown2-pre and
+    # networking wait on "udevadm settle". Deadlock until settle times out
+    # (2 min) - networking.service then never runs, no vmbr* exists, and every
+    # VM fails to start ("bridge 'vmbr1' does not exist"). Hit on 2026-11-24.
+    # The packaged file is not a conffile (upgrades overwrite it), so override
+    # from a later rule: RUN= (assignment) drops the inherited RUN list.
+    - name: Make the iSM USB NIC udev rule non-blocking
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/96-iSM-usbnic-nonblocking.rules
+        content: |
+          # Managed by labirin (playbooks/pve/install-ism.yaml).
+          # Overrides the RUN list of dcism's 95-iSM-usbnic.rules, whose
+          # synchronous "dcismeng start &" deadlocks udev settle at boot.
+          SUBSYSTEM=="usb", ATTR{idVendor}=="413c", ATTR{idProduct}=="a102", ATTR{manufacturer}=="Dell(TM)", ACTION=="add", RUN="/bin/touch /opt/dell/srvadmin/iSM/etc/ini/usbnicconfig.ini", RUN+="/bin/systemctl --no-block start dcismeng.service"
+        mode: "0644"
+      register: ism_udev_override
+
+    - name: Reload udev rules
+      ansible.builtin.command: udevadm control --reload
+      when: ism_udev_override is changed
+      changed_when: true
+
     - name: Check if dcismeng service exists and get current status
       ansible.builtin.systemd:
         name: dcismeng

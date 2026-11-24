@@ -24,12 +24,16 @@
             | gpg --dearmor | tee /usr/share/keyrings/dell-openmanage.gpg >/dev/null
         creates: /usr/share/keyrings/dell-openmanage.gpg
 
+    # 6100 is Dell's newest iSM line and, like every line, is published only for
+    # bullseye and noble - there is no bookworm/trixie build, so the suite
+    # mismatch Proxmox flags in its Repositories panel is expected. https, not
+    # http: linux.dell.com:80 refuses connections from this host.
     - name: Create Dell iSM Deb822 source file
       ansible.builtin.copy:
         dest: /etc/apt/sources.list.d/dell-ism.sources
         content: |
           Types: deb
-          URIs: http://linux.dell.com/repo/community/openmanage/iSM/5400/bullseye
+          URIs: https://linux.dell.com/repo/community/openmanage/iSM/6100/bullseye
           Suites: bullseye
           Components: main
           Signed-By: /usr/share/keyrings/dell-openmanage.gpg
@@ -60,7 +64,9 @@
         name:
           - dcism-osc
           - dcism
-        state: present
+        # latest, not present: a URIs bump alone would otherwise never upgrade
+        # an installed box.
+        state: latest
 
     - name: Check if libssl1.1 is installed
       ansible.builtin.shell:

@@ -16,8 +16,9 @@ This playbook installs the whole stack on a Proxmox guest:
 | Fireactions | Orchestrator: registers runners with GitHub, scales pools |
 
 > [!NOTE]
-> This installs the [`kholisrag/fireactions`](https://github.com/kholisrag/fireactions)
-> **fork**, not upstream — see [Why the fork](#why-the-fork).
+> This installs **upstream** [`hostinger/fireactions`](https://github.com/hostinger/fireactions)
+> again (v2.2.2). It ran a fork until then — see [Why the fork](#why-the-fork)
+> for what it was for and how to go back.
 
 ## Layout
 
@@ -282,7 +283,8 @@ is open.
 > [!NOTE]
 > A repository-scoped tier (`fireactions-repo-small`, registered with
 > this repo) was removed once that work moved into the `<org>` org.
-> The fork still supports the scope — set `repository: <owner>/<repo>` on a pool
+> Upstream does not support that scope; only the fork does. To bring it back, switch to the fork
+> (see [Why the fork](#why-the-fork)) and set `repository: <owner>/<repo>` on a pool
 > *instead of* `organization` + `group_id`, and install the App on that repo's
 > owner. `group_id` must be omitted there: user accounts have no runner groups,
 > and the two scopes are mutually exclusive per pool. The scopes are never
@@ -605,7 +607,14 @@ low — see the caution above.
 
 ## Why the fork
 
-`fireactions_release_repo` points at
+> [!NOTE]
+> **No longer in use.** Since v2.2.2 `fireactions_release_repo` is back on
+> `hostinger/fireactions`: every pool is organisation-scoped, so reason 1 no
+> longer applies, and upstream now tags `Pools` with `dive`, which fixes reason 2.
+> Kept here because it is still the way back if a repository-scoped pool is
+> needed again.
+
+`fireactions_release_repo` used to point at
 [`kholisrag/fireactions`](https://github.com/kholisrag/fireactions), not
 `hostinger/fireactions`. Two reasons:
 

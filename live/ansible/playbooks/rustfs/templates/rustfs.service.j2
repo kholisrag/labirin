@@ -39,7 +39,10 @@ RestartSec=10s
 # process holding open file handles into the object store.
 OOMScoreAdjust=-1000
 SendSIGKILL=no
-TimeoutStartSec=30s
+# Not 30s: on a cold boot 1.0.6 took longer than that to raise READY=1 (disk
+# and IAM bootstrap with an empty page cache), systemd killed it, and only the
+# Restart=always retry brought it up. A warm restart is ~4s.
+TimeoutStartSec=120s
 TimeoutStopSec=30s
 
 # --- Sandboxing --------------------------------------------------------------

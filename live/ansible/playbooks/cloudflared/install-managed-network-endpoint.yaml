@@ -1,0 +1,177 @@
+---
+# Cloudflare One managed-network endpoint ("home" detection).
+#
+# The Cloudflare One client decides it is at home when it can complete a TLS
+# handshake with this endpoint AND the certificate's SHA-256 matches the one
+# registered in the managed network
+# (live/opentofu/cloudflare/kholisrag/zero-trust/managed-networks).
+#
+# The endpoint lives on a DEDICATED secondary IP, not the VM's primary one:
+# the client auto-excludes the endpoint IP from the tunnel, and the outside
+# profile carves it out of its Include list. Binding to the primary IP would
+# cut remote SSH/Ansible to this VM.
+#
+# Every address, the port, the fingerprint and the key pair live in
+# vars/managed-network-vault.yaml (ansible-vault).
+- name: Install Cloudflare One managed-network endpoint
+  hosts: all
+  become: true
+  vars_files:
+    - vars/managed-network-vault.yaml
+  vars:
+    cf1_home_detect_ip: "{{ vault_cf1_home_detect_ip }}"
+    cf1_home_detect_prefix: "{{ vault_cf1_home_detect_prefix }}"
+    cf1_home_detect_port: "{{ vault_cf1_home_detect_port }}"
+    cf1_home_detect_netplan_id: "{{ vault_cf1_home_detect_netplan_id }}"
+    cf1_home_detect_sha256: "{{ vault_cf1_home_detect_sha256 }}"
+    cf1_home_detect_dir: /etc/ssl/cf1-home-detect
+
+  tasks:
+    # Same netplan id as cloud-init's 50-cloud-init.yaml, so netplan merges this
+    # file into that interface and appends the address rather than defining a
+    # second, conflicting interface.
+    - name: Add the endpoint's secondary IP via a netplan drop-in
+      ansible.builtin.copy:
+        dest: /etc/netplan/60-cf1-home-detect.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              {{ cf1_home_detect_netplan_id }}:
+                addresses:
+                  - {{ cf1_home_detect_ip }}/{{ cf1_home_detect_prefix }}
+      no_log: true
+      notify: Apply netplan
+
+    # nginx starts before networkd has finished adding the secondary address at
+    # boot; without non-local bind it fails to listen and stays down.
+    - name: Allow binding to an address before it is configured
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_nonlocal_bind
+        value: "1"
+        sysctl_file: /etc/sysctl.d/60-cf1-home-detect.conf
+        state: present
+        reload: true
+
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Disable the default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Create the certificate directory
+      ansible.builtin.file:
+        path: "{{ cf1_home_detect_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install the endpoint certificate
+      ansible.builtin.copy:
+        dest: "{{ cf1_home_detect_dir }}/cert.pem"
+        content: "{{ vault_cf1_home_detect_cert }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Install the endpoint private key
+      ansible.builtin.copy:
+        dest: "{{ cf1_home_detect_dir }}/key.pem"
+        content: "{{ vault_cf1_home_detect_key }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify: Reload nginx
+
+    - name: Configure the endpoint site
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/cf1-home-detect
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible: labirin live/ansible/playbooks/cloudflared
+          server {
+            listen {{ cf1_home_detect_ip }}:{{ cf1_home_detect_port }} ssl;
+            server_name _;
+
+            ssl_certificate     {{ cf1_home_detect_dir }}/cert.pem;
+            ssl_certificate_key {{ cf1_home_detect_dir }}/key.pem;
+            ssl_protocols       TLSv1.2 TLSv1.3;
+
+            access_log off;
+            return 204;
+          }
+      no_log: true
+      notify: Reload nginx
+
+    - name: Enable the endpoint site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/cf1-home-detect
+        dest: /etc/nginx/sites-enabled/cf1-home-detect
+        state: link
+        force: true
+      notify: Reload nginx
+
+    - name: Enable and start nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        enabled: true
+        state: started
+
+  post_tasks:
+    - name: Flush handlers before verifying
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read the fingerprint the endpoint actually serves
+      ansible.builtin.shell: |
+        set -o pipefail
+        openssl s_client -connect {{ cf1_home_detect_ip }}:{{ cf1_home_detect_port }} </dev/null 2>/dev/null \
+          | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr 'A-F' 'a-f'
+      args:
+        executable: /bin/bash
+      register: cf1_served_sha256
+      changed_when: false
+      no_log: true
+
+    # A mismatch here means the managed network registered in Cloudflare will
+    # never match, and every device silently gets the outside profile.
+    - name: Assert the served fingerprint matches the registered one
+      ansible.builtin.assert:
+        that:
+          - cf1_served_sha256.stdout == cf1_home_detect_sha256
+        fail_msg: Served certificate fingerprint does not match vault_cf1_home_detect_sha256.
+        success_msg: Endpoint is serving the registered certificate.
+        quiet: true
+      no_log: true
+
+  handlers:
+    - name: Apply netplan
+      ansible.builtin.command: netplan apply
+      changed_when: true
+
+    # Runs before the reload (handlers run in definition order), so a broken
+    # config fails the play instead of reloading into a dead nginx.
+    - name: Test nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      listen: Reload nginx
+
+    - name: Reload nginx service
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+      listen: Reload nginx

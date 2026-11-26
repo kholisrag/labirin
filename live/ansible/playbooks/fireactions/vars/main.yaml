@@ -247,12 +247,15 @@ fireactions_registry_mirror: "{{ vault_harbor_registry_host }}"
 # Our image, rebuilt on upstream's 2026-11-17 base (actions/runner 2.338.2;
 # fireactions-images#16) with the current semgrep lockfile (#17). The tag is
 # <base-digest>-<sha7> of the fireactions-images commit that built it.
+# 5c12b0d (v0.4.0) adds the garwa-app toolchain bake: Node, JDK 25, Android
+# SDK, uv + CPython 3.15.2, trivy/pinact/gitleaks/terragrunt (~7.4 GB
+# unpacked; old tags are pruned per fireactions-images#29).
 # History: on 2026-11-24 every image built on the July base (runner 2.335.1)
 # stopped getting jobs - GitHub told each runner to self-update, the update
 # exited it, and the microVM shut down ~60s after boot. The pools ran
 # upstream's hostinger/fireactions-images ubuntu24.04:20261117070438 as an
 # escape hatch until this rebuild landed.
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:1ca2c98f76f2c821f3b5461a5862b219d3c6b806366575f333b3b9680fdb09fb-4b7c507"
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:1ca2c98f76f2c821f3b5461a5862b219d3c6b806366575f333b3b9680fdb09fb-5c12b0d"
 
 # --------------------------------------------
 # Pools

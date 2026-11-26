@@ -1,11 +1,11 @@
 # Device profiles.
 #
-#   Diluar Rumah  — the account DEFAULT profile. Home CIDRs go through the
-#                   `petruk-homelab` tunnel.
-#   Mobile        — android/ios, same idea with fewer CIDRs.
-#   Didalam Rumah — matched by the `home` managed network. Every home segment
-#                   routes to every other one directly, so nothing needs the
-#                   tunnel; Gateway DNS filtering still applies.
+#   Default — the account DEFAULT profile, i.e. away from home. Home CIDRs
+#             go through the `petruk-homelab` tunnel.
+#   Mobile  — android/ios away from home, same idea with fewer CIDRs.
+#   Home    — matched by the `home` managed network. Every home segment
+#             routes to every other one directly, so nothing needs the
+#             tunnel; Gateway DNS filtering still applies.
 #
 # The managed-network endpoint IP sits inside an included home /24. The client
 # would drop that WHOLE entry from the tunnel, so the outside profiles carry

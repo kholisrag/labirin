@@ -40,11 +40,16 @@ locals {
   #
   # CPU - the node has room, which is why scaling out beats raising replicas.
   #   petruk-pve0 has 40 cores / 80 threads and measured 85% idle at load ~13.
-  #   Each host is only 8 vCPU, and a host saturates its own 8 vCPU at ~5
-  #   concurrent CI jobs (84% guest time), so replicas beyond ~8 per host just
-  #   trade queue wait for slower jobs. Adding hosts is what actually adds
-  #   throughput here. vCPU allocation across the node is 106 of 80 threads
-  #   (~1.33x) with these four - fine while the node sits this idle.
+  #   At 8 vCPU per host the pools asked for 32 vCPU (small 16 + medium 8 +
+  #   large 8), 4x the host, and on 2026-11-27 /proc/pressure/cpu showed 20-80%
+  #   "some" stall with load 8-18 on every host: API test shards hit their
+  #   8-minute timeout and 2 s Playwright specs hit their 30 s limit. Hosts are
+  #   now 16 vCPU and small is 6 per host (28 vCPU asked, ~1.75x). Node vCPU
+  #   allocation goes from 106 to 138 of 80 threads (~1.7x) - fine while the
+  #   node sits this idle; recheck `top` on petruk-pve0 after the change.
+  #
+  #   reboot_after_update = true: changing cores REBOOTS the host and kills its
+  #   running CI jobs. Apply one host at a time (-target), when CI is quiet.
   hosts = {
     "fireactions-01" = { vm_id = 109 }
     "fireactions-02" = { vm_id = 110 }
@@ -52,8 +57,8 @@ locals {
     "fireactions-04" = { vm_id = 114 }
   }
 
-  # 4 cores x 2 sockets = 8 vCPU per host.
-  vm_cpu_cores   = 4
+  # 8 cores x 2 sockets = 16 vCPU per host.
+  vm_cpu_cores   = 8
   vm_cpu_sockets = 2
   vm_memory_mib  = 32768
 

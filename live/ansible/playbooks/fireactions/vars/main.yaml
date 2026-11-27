@@ -289,11 +289,11 @@ fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireaction
 # microVMs that actually hold a job):
 #
 #                                         idle floor    all busy (measured)
-#   small       2 vCPU x  4 GiB x 8    =     ~4.8 GiB          20 GiB
+#   small       2 vCPU x  4 GiB x 6    =     ~3.6 GiB          15 GiB
 #   medium      4 vCPU x  8 GiB x 2    =     ~1.4 GiB          16 GiB
 #   large       8 vCPU x 12 GiB x 1    =     ~0.8 GiB          12 GiB
 #   ---------------------------------------------------------------------
-#   total                       11 VMs      ~7.0 GiB          48 GiB
+#   total                        9 VMs      ~5.8 GiB          43 GiB
 #
 # In practice only the small tier is ever busy (see below), so the number to
 # check against 32 GiB is 20 GiB of small + ~1.5 GiB of idle medium/large + ~2
@@ -364,10 +364,12 @@ fireactions_canary_labels:
 
 fireactions_pools:
   - name: fireactions-small
-    # 8 per host = 32 org-wide across four hosts. Every ordinary job targets this;
-    # see the fan-out note in the memory budget above before lowering it, and the
-    # CPU note before raising it - 8 is roughly where this host stops paying off.
-    replicas: 8
+    # 6 per host = 24 org-wide across four hosts. Every ordinary job targets this.
+    # Cut from 8 on 2026-11-27 with the hosts going 8 -> 16 vCPU: at 8 the pools
+    # asked 4x the host's CPU and jobs timed out under CPU stall (see the CPU note
+    # in the OpenTofu unit). Lower than 6 brings back the queueing measured at 5
+    # (fan-out note above); raise only after checking /proc/pressure/cpu.
+    replicas: 6
     shutdown_on_exit: true
     runner:
       name: fireactions-small

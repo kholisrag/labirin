@@ -20,6 +20,7 @@ the data device loses the data; the durability story is the array under the
 live/ansible/playbooks/rustfs/
 ├── install-rustfs.yaml    # entrypoint
 ├── manage-iam.yaml        # policies and users, through the `rc` client
+├── manage-lifecycle.yaml  # bucket lifecycle rules, through the same client
 ├── tasks/                 # one file per component
 ├── templates/
 │   ├── rustfs.env.j2      # /etc/default/rustfs
@@ -326,9 +327,52 @@ there is one copy of it. Today that is `gha-cache`; a new consumer is a new
 entry in `rustfs_users`, a policy in `rustfs_policies`, and its vault added to
 `vars_files` in `manage-iam.yaml`.
 
+One user has no consuming service in this repository: the **`gha-artifacts`
+uploader**, which CI jobs in other repositories sign with. Its pair is in
+`vars/vault.yaml` here, and the consumer's copy is a pair of GitHub Actions
+secrets set from it:
+
+```bash
+ansible-vault view live/ansible/playbooks/rustfs/vars/vault.yaml \
+  | sed -n 's/^vault_gha_artifacts_s3_access_key: *//p' | tr -d '\n' \
+  | gh secret set RUSTFS_ACCESS_KEY_ID -R oprek-sh/garwa-app
+```
+
+and the same for `vault_gha_artifacts_s3_secret_key` into
+`RUSTFS_SECRET_ACCESS_KEY`. Its policy, `gha-artifacts-rw`, has no
+`s3:DeleteObject`: the lifecycle rule below is what removes an artifact.
+
 Rotation is a second user, not a new secret — the steps are in the comment
 above `rustfs_users`, and in the
 [gha-cache README](../gha-cache/README.md#the-s3-user).
+
+## Bucket lifecycles
+
+`manage-lifecycle.yaml` sets each bucket's lifecycle rules from
+`rustfs_bucket_lifecycles` in `vars/main.yaml`, with `rc ilm rule import`, and
+only when `rc ilm rule export` differs from what is declared.
+
+```bash
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/rustfs \
+  live/ansible/playbooks/rustfs/manage-lifecycle.yaml
+```
+
+| Bucket | Rules | Why |
+| --- | --- | --- |
+| `gha-cache` | abort incomplete multipart uploads after 3 days. **No expiry.** | The cache server indexes every object in Postgres and evicts by its own budget and age. An expiry here would delete objects it still lists. |
+| `gha-artifacts` | expire objects after 30 days; abort incomplete multipart uploads after 1 day | Write-once files nothing indexes and nothing else deletes. |
+
+A bucket's declared rules are its **whole** configuration: an import replaces,
+so a rule added in the console is gone after the next run. To see what a bucket
+has, on the guest:
+
+```bash
+rc ilm rule export rustfs/gha-artifacts
+```
+
+RustFS accepted both kinds of rule and returns them unchanged. Whether its
+scanner has acted on them is only visible later — an object older than 30 days
+still listed in `gha-artifacts` means it has not.
 
 ## Creating buckets
 

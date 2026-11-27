@@ -1,0 +1,66 @@
+---
+# One bucket's lifecycle. Included once per entry of rustfs_bucket_lifecycles as
+# `rustfs_lifecycle`.
+#
+# A missing bucket fails at the export, with rc's own message. That is the
+# intended prompt to create it.
+
+- name: "Read the lifecycle of {{ rustfs_lifecycle.bucket }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - ilm
+      - rule
+      - export
+      - "{{ rustfs_cli_alias }}/{{ rustfs_lifecycle.bucket }}"
+  environment: "{{ rustfs_cli_env }}"
+  register: rustfs_lifecycle_current
+  changed_when: false
+  no_log: true
+
+# Compared as parsed JSON, like the policies. If RustFS normalises a rule on the
+# way in, this reports `changed` on every run - fix the rule in vars to match
+# what `rc ilm rule export` prints rather than loosening the comparison.
+- name: "Decide whether to write the lifecycle of {{ rustfs_lifecycle.bucket }}"
+  ansible.builtin.set_fact:
+    rustfs_lifecycle_needs_write: >-
+      {{ ((rustfs_lifecycle_current.stdout | from_json).rules | default([]))
+         != rustfs_lifecycle.rules }}
+
+- name: "Stage the lifecycle of {{ rustfs_lifecycle.bucket }}"
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .lifecycle.json
+  register: rustfs_lifecycle_file
+  when: rustfs_lifecycle_needs_write | bool
+  changed_when: false
+
+- name: "Write the staged lifecycle of {{ rustfs_lifecycle.bucket }}"
+  ansible.builtin.copy:
+    content: "{{ {'rules': rustfs_lifecycle.rules} | to_nice_json }}"
+    dest: "{{ rustfs_lifecycle_file.path }}"
+    mode: "0600"
+  when: rustfs_lifecycle_needs_write | bool
+  changed_when: false
+
+# An import REPLACES the bucket's configuration; it does not merge.
+- name: "Import the lifecycle of {{ rustfs_lifecycle.bucket }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - ilm
+      - rule
+      - import
+      - "{{ rustfs_cli_alias }}/{{ rustfs_lifecycle.bucket }}"
+      - "{{ rustfs_lifecycle_file.path }}"
+  environment: "{{ rustfs_cli_env }}"
+  when: rustfs_lifecycle_needs_write | bool
+  changed_when: true
+  no_log: true
+
+- name: "Remove the staged lifecycle of {{ rustfs_lifecycle.bucket }}"
+  ansible.builtin.file:
+    path: "{{ rustfs_lifecycle_file.path }}"
+    state: absent
+  when: rustfs_lifecycle_needs_write | bool
+  changed_when: false

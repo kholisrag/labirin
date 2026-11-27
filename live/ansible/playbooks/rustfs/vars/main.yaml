@@ -251,6 +251,29 @@ rustfs_policies:
             - s3:ListMultipartUploadParts
           Resource:
             - arn:aws:s3:::gha-cache/*
+  # What a CI job needs to store an artifact in gha-artifacts and read it back:
+  # put (multipart included), get, list. NO s3:DeleteObject - nothing in CI
+  # removes an artifact, the lifecycle rule below does, so a leaked key can add
+  # to the bucket but cannot empty it. Nothing outside the bucket.
+  - name: gha-artifacts-rw
+    document:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Action:
+            - s3:ListBucket
+            - s3:GetBucketLocation
+            - s3:ListBucketMultipartUploads
+          Resource:
+            - arn:aws:s3:::gha-artifacts
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:AbortMultipartUpload
+            - s3:ListMultipartUploadParts
+          Resource:
+            - arn:aws:s3:::gha-artifacts/*
 
 # Users. In RustFS a user IS a key pair: `access_key` is the username and
 # `secret_key` its secret, and that pair is what the consumer signs with.
@@ -274,7 +297,55 @@ rustfs_users:
     secret_key: "{{ vault_gha_cache_s3_secret_key | default('') }}"
     policies:
       - gha-cache-rw
+  # The CI artifact uploader (oprek-sh/garwa-app's upload-to-rustfs.sh today).
+  # Its consumer is a pair of GitHub Actions secrets, RUSTFS_ACCESS_KEY_ID and
+  # RUSTFS_SECRET_ACCESS_KEY, and has no vault in this repository - so the pair
+  # is kept in vars/vault.yaml here, and the secrets are set from it.
+  - access_key: "{{ vault_gha_artifacts_s3_access_key | default('') }}"
+    secret_key: "{{ vault_gha_artifacts_s3_secret_key | default('') }}"
+    policies:
+      - gha-artifacts-rw
 
 # Access keys (usernames) that must not exist. Removal is immediate and takes
 # the user's access with it - only list a key once nothing signs with it.
 rustfs_users_absent: []
+
+# ============================================
+# Bucket lifecycle (manage-lifecycle.yaml)
+# ============================================
+# One entry per bucket; `rules` is the bucket's WHOLE lifecycle configuration,
+# imported with `rc ilm rule import` when it differs from what
+# `rc ilm rule export` returns. A rule added by hand in the console is therefore
+# removed on the next run. Buckets not listed here are left alone, and a listed
+# bucket that does not exist fails the play - buckets are still created by hand
+# (README, "Creating buckets").
+#
+# The rules follow what each bucket is FOR, which is why they differ:
+rustfs_bucket_lifecycles:
+  # gha-cache is an index's backing store, not a pile of files. The cache
+  # server keeps every object in its Postgres database and evicts by its own
+  # rules (gha_cache_max_size_bytes, gha_cache_cleanup_older_than_days in
+  # ../gha-cache/vars/main.yaml). An expiry rule here would delete objects the
+  # database still lists, and a cache hit would become a failed restore. So NO
+  # expiration - only the one thing the server cannot clean up: multipart
+  # uploads abandoned by a job that died mid-save, which it has no row for.
+  # Three days, to stay clear of any upload a long job still has open.
+  - bucket: gha-cache
+    rules:
+      - id: abort-incomplete-multipart
+        status: Enabled
+        abortIncompleteMultipartUploadDays: 3
+  # gha-artifacts is the opposite: write-once files nobody indexes (a junit
+  # file from a failed shard, an SBOM per security run), read while a failure
+  # is being looked at and never again. Nothing else deletes them - the
+  # uploader's policy cannot - so expiry is the only bound on the bucket.
+  # 30 days against the 3 that GitHub's own artifact storage gives this org.
+  - bucket: gha-artifacts
+    rules:
+      - id: expire-artifacts
+        status: Enabled
+        expiration:
+          days: 30
+      - id: abort-incomplete-multipart
+        status: Enabled
+        abortIncompleteMultipartUploadDays: 1

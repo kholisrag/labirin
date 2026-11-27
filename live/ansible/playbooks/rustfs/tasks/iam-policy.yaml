@@ -1,0 +1,89 @@
+---
+# One policy. Included once per entry of rustfs_policies as `rustfs_policy`.
+#
+# rc exit codes this relies on: 0 success, 5 not found. Anything else is a real
+# failure and is allowed to fail the play.
+
+- name: "Read policy {{ rustfs_policy.name }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - admin
+      - policy
+      - info
+      - "{{ rustfs_cli_alias }}"
+      - "{{ rustfs_policy.name }}"
+      - --json
+  environment: "{{ rustfs_cli_env }}"
+  register: rustfs_policy_current
+  changed_when: false
+  failed_when: rustfs_policy_current.rc not in [0, 5]
+  tags:
+    - policies
+
+# Compared as parsed JSON, so key order and whitespace do not count as drift.
+# If RustFS ever normalises a document on the way in (reordering a list, say),
+# this would re-upload the same policy every run - harmless, but visible as a
+# permanent `changed`; fix the document in vars to match what `policy info`
+# returns rather than loosening this.
+#
+# RustFS 1.0.6 answers with an envelope - {policy_name, create_date,
+# update_date, policy: <document>} - where rc's own types expect the bare
+# document, so `.policy` is the envelope and the document is `.policy.policy`.
+# Both shapes are read, so an rc or RustFS release that unwraps it keeps
+# working. An IAM document has no top-level `policy` key, so the test is safe.
+- name: "Decide whether to write policy {{ rustfs_policy.name }}"
+  vars:
+    rustfs_policy_reply: "{{ (rustfs_policy_current.stdout | from_json).policy if rustfs_policy_current.rc == 0 else {} }}"
+    rustfs_policy_stored: "{{ rustfs_policy_reply.policy if rustfs_policy_reply.policy is defined else rustfs_policy_reply }}"
+  ansible.builtin.set_fact:
+    rustfs_policy_needs_write: "{{ rustfs_policy_current.rc == 5 or rustfs_policy_stored != rustfs_policy.document }}"
+  tags:
+    - policies
+
+- name: "Stage the document for policy {{ rustfs_policy.name }}"
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .policy.json
+  register: rustfs_policy_file
+  when: rustfs_policy_needs_write | bool
+  changed_when: false
+  tags:
+    - policies
+
+- name: "Write the document for policy {{ rustfs_policy.name }}"
+  ansible.builtin.copy:
+    content: "{{ rustfs_policy.document | to_nice_json }}"
+    dest: "{{ rustfs_policy_file.path }}"
+    mode: "0600"
+  when: rustfs_policy_needs_write | bool
+  changed_when: false
+  tags:
+    - policies
+
+# rc sends this as PUT add-canned-policy, which is an upsert: an existing name
+# gets the new document.
+- name: "Create or update policy {{ rustfs_policy.name }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - admin
+      - policy
+      - create
+      - "{{ rustfs_cli_alias }}"
+      - "{{ rustfs_policy.name }}"
+      - "{{ rustfs_policy_file.path }}"
+  environment: "{{ rustfs_cli_env }}"
+  when: rustfs_policy_needs_write | bool
+  changed_when: true
+  tags:
+    - policies
+
+- name: "Remove the staged document for policy {{ rustfs_policy.name }}"
+  ansible.builtin.file:
+    path: "{{ rustfs_policy_file.path }}"
+    state: absent
+  when: rustfs_policy_needs_write | bool
+  changed_when: false
+  tags:
+    - policies

@@ -179,3 +179,102 @@ rustfs_packages:
   - curl
   - unzip
   - xfsprogs
+
+# ============================================
+# IAM - policies and users (manage-iam.yaml)
+# ============================================
+# Everything below is read by manage-iam.yaml only; install-rustfs.yaml does not
+# touch it.
+#
+# `rc` is RustFS's own client (https://github.com/rustfs/cli). MinIO's `mc`
+# is not used: its admin calls were rejected by RustFS for a long time and rc's
+# README is explicit that the two admin APIs are not interchangeable.
+#
+# The default linux artifacts are static musl builds, so unlike the server
+# there is no glibc question to assert on.
+#
+# Checksums are from the release's SHA256SUMS. Refresh both on a bump:
+#   curl -fsSL https://github.com/rustfs/cli/releases/download/v<version>/SHA256SUMS
+rustfs_cli_version: "0.1.38"
+rustfs_cli_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+rustfs_cli_arch: "{{ rustfs_cli_arch_map[ansible_facts['architecture']] }}"
+rustfs_cli_package_name: "rustfs-cli-linux-{{ rustfs_cli_arch }}-v{{ rustfs_cli_version }}.tar.gz"
+rustfs_cli_package_url: "https://github.com/rustfs/cli/releases/download/v{{ rustfs_cli_version }}/{{ rustfs_cli_package_name }}"
+rustfs_cli_package_sha256:
+  amd64: 9741028f46f5f5a152da1e3257980e9c7be2714c21b5b14a8bb5ac7d93f882e9
+  arm64: 3b4c38698174ff13844bf4a824230cb2e26930712ac3fb149dcd460934c6367c
+rustfs_cli_binary_path: /usr/local/bin/rc
+
+# rc resolves an alias from RC_HOST_<alias> when that variable is set, so the
+# root credentials reach it through the task environment and are never written
+# to ~/.config/rc/config.toml on the guest.
+#
+# Loopback and plain http on purpose: this runs ON the RustFS guest, so there is
+# no wire to encrypt and no dependency on the 1Panel website being up.
+#
+# The credentials sit in the URL's userinfo, so they are percent-encoded - and
+# `/` is encoded by hand because Jinja's urlencode leaves it alone, and a bare
+# `/` there ends the authority.
+rustfs_cli_alias: rustfs
+rustfs_cli_env:
+  RC_HOST_rustfs: >-
+    http://{{ rustfs_access_key | urlencode | replace('/', '%2F')
+    }}:{{ rustfs_secret_key | urlencode | replace('/', '%2F')
+    }}@127.0.0.1{{ rustfs_address }}
+
+# Policies. `document` is uploaded as-is; a policy whose stored document differs
+# from this one is overwritten, so this list is the source of truth for every
+# name in it. Policies not listed here are left alone.
+rustfs_policies:
+  # Everything github-actions-cache-server does to its one bucket: HeadBucket
+  # at startup, object get/put/delete, multipart uploads, and listing for the
+  # storage budget. Nothing outside the bucket.
+  - name: gha-cache-rw
+    document:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Action:
+            - s3:ListBucket
+            - s3:GetBucketLocation
+            - s3:ListBucketMultipartUploads
+          Resource:
+            - arn:aws:s3:::gha-cache
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:AbortMultipartUpload
+            - s3:ListMultipartUploadParts
+          Resource:
+            - arn:aws:s3:::gha-cache/*
+
+# Users. In RustFS a user IS a key pair: `access_key` is the username and
+# `secret_key` its secret, and that pair is what the consumer signs with.
+#
+# CREATE-ONLY for the secret, same as 1panel/manage-databases.yaml: an existing
+# user's secret is never rewritten from here, because doing so would cut off a
+# consumer that is still running with the old one. Policies ARE reconciled
+# (missing ones are attached; extra ones are left alone).
+#
+# The pair lives in the CONSUMER's vault, not in this playbook's - a secret in
+# two files is a secret that can disagree.
+#
+# ROTATION is a new user, not a new secret, so both keys work while the
+# consumer is switched over:
+#   1. change the access key AND secret in the consumer's vault
+#   2. run manage-iam.yaml          - creates the new user, old one untouched
+#   3. redeploy the consumer
+#   4. add the OLD access key to rustfs_users_absent, run manage-iam.yaml again
+rustfs_users:
+  - access_key: "{{ vault_gha_cache_s3_access_key | default('') }}"
+    secret_key: "{{ vault_gha_cache_s3_secret_key | default('') }}"
+    policies:
+      - gha-cache-rw
+
+# Access keys (usernames) that must not exist. Removal is immediate and takes
+# the user's access with it - only list a key once nothing signs with it.
+rustfs_users_absent: []

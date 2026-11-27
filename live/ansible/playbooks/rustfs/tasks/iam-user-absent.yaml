@@ -1,0 +1,35 @@
+---
+# One retired user. Included once per entry of rustfs_users_absent as
+# `rustfs_absent_user`.
+
+- name: "Look up retired user {{ rustfs_absent_user }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - admin
+      - user
+      - info
+      - "{{ rustfs_cli_alias }}"
+      - "{{ rustfs_absent_user }}"
+      - --json
+  environment: "{{ rustfs_cli_env }}"
+  register: rustfs_absent_user_current
+  changed_when: false
+  failed_when: rustfs_absent_user_current.rc not in [0, 5]
+  tags:
+    - users
+
+- name: "Remove retired user {{ rustfs_absent_user }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - admin
+      - user
+      - rm
+      - "{{ rustfs_cli_alias }}"
+      - "{{ rustfs_absent_user }}"
+  environment: "{{ rustfs_cli_env }}"
+  when: rustfs_absent_user_current.rc == 0
+  changed_when: true
+  tags:
+    - users

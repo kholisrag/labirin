@@ -105,11 +105,37 @@
       - ""
       - "This playbook expects a second, empty disk dedicated to the devmapper"
       - "snapshotter. The OpenTofu unit attaches it as scsi1 with serial"
-      - "'containerd', which the guest exposes at the by-id path above."
+      - "'containerd'; the guest exposes the scsi1 slot at the by-id path above."
       - ""
       - "Set fireactions_containerd_device in vars/main.yaml if your host uses"
       - "a different device."
   when: not fireactions_containerd_device_stat.stat.exists
+  tags:
+    - always
+
+# The by-id path follows the Proxmox slot (scsi1), not the disk, and this
+# device gets wiped. The serial is what proves it is the disk the OpenTofu unit
+# dedicated to Containerd rather than whatever else landed in that slot.
+- name: Read the serial of the Containerd block device
+  ansible.builtin.command:
+    cmd: lsblk --nodeps --noheadings --output SERIAL {{ fireactions_containerd_device }}
+  register: fireactions_containerd_device_serial_cmd
+  changed_when: false
+  check_mode: false
+  tags:
+    - always
+
+- name: Fail when the Containerd block device has the wrong serial
+  ansible.builtin.fail:
+    msg:
+      - "Containerd block device '{{ fireactions_containerd_device }}' has serial"
+      - "'{{ fireactions_containerd_device_serial_cmd.stdout | trim }}', expected '{{ fireactions_containerd_device_serial }}'."
+      - ""
+      - "Refusing to continue: this device is wiped, and the serial does not"
+      - "match the disk the OpenTofu unit attaches for Containerd."
+  when: >-
+    (fireactions_containerd_device_serial_cmd.stdout | trim)
+    != fireactions_containerd_device_serial
   tags:
     - always
 

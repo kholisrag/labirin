@@ -99,15 +99,23 @@ fireactions_cni_conf_dir: /etc/cni/net.d
 # Containerd devmapper thin pool
 # --------------------------------------------
 # Dedicated block device consumed by the devmapper snapshotter. This device is
-# WIPED on first run. Addressed by disk serial (set in the OpenTofu unit at
+# WIPED on first run. Addressed by its Proxmox disk slot (scsi1, set in the
+# OpenTofu unit at
 # live/opentofu/proxmox/petruk-pve/petruk-pve0/vms/fireactions/terragrunt.hcl)
 # rather than /dev/sdb, which is not stable across reboots.
 #
-# Note the "S" prefix: QEMU exposes a user-set serial as
-# scsi-SQEMU_QEMU_HARDDISK_<serial>. The "0" prefix form
-# (scsi-0QEMU_QEMU_HARDDISK_drive-scsi1) is the device-name id, which is NOT
-# stable if disks are reordered - that is the whole reason we set a serial.
-fireactions_containerd_device: /dev/disk/by-id/scsi-SQEMU_QEMU_HARDDISK_containerd
+# This used to be the serial form, scsi-SQEMU_QEMU_HARDDISK_<serial>. Ubuntu
+# 26.04 (systemd 259) no longer creates that link: measured on fireactions-01
+# to -04 on 2026-11-27, the disk still reports ID_SCSI_SERIAL=containerd but
+# the only by-id link is the "0" device-name form below. That form exists on
+# 24.04 too, so it is the one path that works on both.
+#
+# The "0" form follows the slot, not the disk, so on its own it would point at
+# whatever is attached as scsi1. Because this device is wiped, preflight also
+# asserts the disk's serial equals fireactions_containerd_device_serial - the
+# serial set in the OpenTofu unit is still what proves it is the right disk.
+fireactions_containerd_device: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1
+fireactions_containerd_device_serial: containerd
 fireactions_containerd_volume_group: containerd
 fireactions_containerd_thinpool_name: thinpool
 # dm device name = "<volume group>-<thin pool>", this is what containerd wants.

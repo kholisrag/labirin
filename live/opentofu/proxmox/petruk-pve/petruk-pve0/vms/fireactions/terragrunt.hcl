@@ -76,9 +76,12 @@ locals {
 
   # Dedicated device for the Containerd devmapper thin pool. Thin-provisioned,
   # so this is a ceiling rather than an upfront allocation. Addressed in the
-  # guest as /dev/disk/by-id/scsi-SQEMU_QEMU_HARDDISK_<serial> (note the "S"
-  # prefix for a user-set serial), which is stable across reboots unlike
-  # /dev/sdb.
+  # guest as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1 (the scsi1
+  # slot), which is stable across reboots unlike /dev/sdb. Ubuntu 26.04 no
+  # longer creates the scsi-SQEMU_QEMU_HARDDISK_<serial> link, so the serial
+  # below is not part of the path any more; the playbook's preflight reads it
+  # with lsblk and refuses to wipe a disk whose serial does not match. Keep the
+  # interface (scsi1) and the serial in step with the fireactions vars.
   #
   # Cut from 200 GiB to 100 GiB to buy back allocation on local-lvm for the
   # Harbor data disk. This is not tight: measured usage was 1.36% of a 190 GiB

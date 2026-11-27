@@ -63,6 +63,7 @@ locals {
     "fireactions-03" = { vm_id = 115 }
     "fireactions-04" = { vm_id = 116 }
     "fireactions-05" = { vm_id = 117 }
+    "fireactions-06" = { vm_id = 118 }
   }
 
   # 8 cores x 2 sockets = 16 vCPU per host.

@@ -290,10 +290,10 @@ fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireaction
 #
 #                                         idle floor    all busy (measured)
 #   small       2 vCPU x  4 GiB x 8    =     ~4.8 GiB          20 GiB
-#   medium      4 vCPU x  8 GiB x 1    =     ~0.7 GiB           8 GiB
+#   medium      4 vCPU x  8 GiB x 2    =     ~1.4 GiB          16 GiB
 #   large       8 vCPU x 12 GiB x 1    =     ~0.8 GiB          12 GiB
 #   ---------------------------------------------------------------------
-#   total                       10 VMs      ~6.3 GiB          40 GiB
+#   total                       11 VMs      ~7.0 GiB          48 GiB
 #
 # In practice only the small tier is ever busy (see below), so the number to
 # check against 32 GiB is 20 GiB of small + ~1.5 GiB of idle medium/large + ~2
@@ -397,7 +397,11 @@ fireactions_pools:
         environment: homelab
 
   - name: fireactions-medium
-    replicas: 1
+    # 2 per host (8 org-wide): garwa-app's CI now runs its API test shards and
+    # e2e on medium, and one medium per host queued those jobs 4-5 min while small
+    # started in seconds. Measured 2026-11-27: each host had 21-24 GiB available
+    # with no memory pressure, so one more 8 GiB medium fits the budget below.
+    replicas: 2
     shutdown_on_exit: true
     runner:
       name: fireactions-medium

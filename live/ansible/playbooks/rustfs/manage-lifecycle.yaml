@@ -1,0 +1,38 @@
+---
+# Lifecycle rules on RustFS buckets.
+#
+# Separate from manage-iam.yaml because it answers a different question - how
+# long a bucket keeps things, not who may touch it - and like that playbook it
+# only talks to a running RustFS through `rc` on the guest and never restarts
+# anything.
+#
+#   ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/rustfs \
+#     live/ansible/playbooks/rustfs/manage-lifecycle.yaml
+#
+# What is declared lives in vars/main.yaml: rustfs_bucket_lifecycles. Each
+# bucket's rules there are its whole configuration, and the comments say why
+# the two buckets differ.
+- name: Manage RustFS bucket lifecycles
+  hosts: rustfs_all
+  become: true
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+
+  tasks:
+    - name: Install the rc client
+      ansible.builtin.include_tasks:
+        file: tasks/cli.yaml
+      tags:
+        - cli
+
+    - name: Reconcile bucket lifecycles
+      ansible.builtin.include_tasks:
+        file: tasks/bucket-lifecycle.yaml
+      loop: "{{ rustfs_bucket_lifecycles }}"
+      loop_control:
+        loop_var: rustfs_lifecycle
+        label: "{{ rustfs_lifecycle.bucket }}"
+      tags:
+        - lifecycle

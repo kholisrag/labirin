@@ -121,7 +121,7 @@ locals {
     ]
     clone = [
       {
-        vm_id = 9001 # ubuntu24-cloudinit
+        vm_id = 9002 # ubuntu26-cloudinit (Ubuntu 26.04 LTS since 2026-11-27)
       }
     ]
     operating_system = [

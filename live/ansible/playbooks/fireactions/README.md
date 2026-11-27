@@ -402,10 +402,23 @@ from 200 GiB to 100 GiB — see [Resizing the containerd disk](#resizing-the-con
 ## The runner image is ours, and comes from Harbor
 
 `fireactions_runner_image` points at
-`<registry-host>/ghcr/<org>/fireactions-images/ubuntu24.04:TAG`,
-not at ghcr.io and no longer at Hostinger's image directly. Harbor runs a
-pull-through proxy cache on `harbor-01` (`live/ansible/playbooks/harbor/`), and
-the path after the project name is the upstream path verbatim.
+`<registry-host>/<org>/fireactions-images/ubuntu24.04:TAG`,
+not at ghcr.io and no longer at Hostinger's image directly. That is Harbor's own
+`<org>` project on `harbor-01` (`live/ansible/playbooks/harbor/`), which
+`<org>/fireactions-images` pushes to on every build — **not** the `ghcr` proxy
+cache, which is the same path with `ghcr/` in front and is now the fallback.
+
+The proxy was the pull path until the image grew to ~1.9 GB. Its first pull of
+a tag fetched from ghcr.io, across the ISP, what the build had just pushed from
+this LAN; it evicts a tag 7 days after its last pull; and every pull needed
+ghcr.io up and `vault_harbor_ghcr_*` valid. The pushed copy has none of that —
+and no upstream either, so **a tag has to be in Harbor before
+`fireactions_runner_image` names it** (`200` is present, `404` is not):
+
+```bash
+curl -so /dev/null -w '%{http_code}\n' \
+  "https://<registry-host>/api/v2.0/projects/<org>/repositories/fireactions-images%252Fubuntu24.04/artifacts/<tag>"
+```
 
 our own `<org>/fireactions-images`
 derives from the same Hostinger base, pinned by digest, and adds three things —
@@ -440,30 +453,30 @@ each unreachable by any other mechanism:
 > [!IMPORTANT]
 > **The package is private, and the escape hatch changes because of it.**
 > containerd here carries no registry credentials and does not need any on this
-> path: Harbor's ghcr proxy authenticates upstream with `vault_harbor_ghcr_*`
-> and its own project is public — verified, an anonymous token against
-> `/v2/ghcr/<org>/fireactions-images/ubuntu24.04/manifests/<tag>` returns 200.
+> path: Harbor's `<org>` project is public — verified, an anonymous token against
+> `/v2/<org>/fireactions-images/ubuntu24.04/manifests/<tag>` returns 200.
 >
 > But a **direct** `ghcr.io/<org>/...` reference would fail, and that is what
-> the emergency escape hatch below reaches for. Fall back to
+> an emergency escape hatch reaches for. Fall back to
 > `ghcr.io/hostinger/fireactions-images/...`, which is public — at the cost of
 > the resolver fix, so expect internal names to stop resolving again.
 
 A pool refills a microVM after **every** job, so a busy PR pulls this image
-dozens of times. From the LAN that is seconds rather than a WAN round trip, and
-it takes the whole homelab off ghcr's anonymous quota.
+dozens of times. From the LAN that is seconds rather than a WAN round trip.
 
 > [!IMPORTANT]
 > **Harbor is now a hard dependency for CI capacity.** Fireactions pulls with
 > containerd's default resolver — there is no mirror fallback and nowhere to
-> put credentials, which is also why the proxy cache projects are public. If
+> put credentials, which is also why the `<org>` project is public. If
 > Harbor is unreachable the pools stop replacing consumed microVMs and jobs
 > queue behind whatever is still alive. `harbor-01` therefore has Proxmox
 > startup order 4 and these hosts have 5.
 >
-> The escape hatch is one variable: set `fireactions_runner_image` back to
-> `ghcr.io/hostinger/fireactions-images/...` and re-run with
-> `--tags fireactions`.
+> Two escape hatches, both re-run with `--tags fireactions`. A tag missing
+> from the `<org>` project while Harbor is healthy: put `ghcr/` back in front of
+> the vaulted path, and the proxy serves any tag ghcr.io holds. Harbor itself
+> down: set `fireactions_runner_image` back to
+> `ghcr.io/hostinger/fireactions-images/...`.
 
 Jobs that pull images *inside* the microVM should use the cache too — that is
 where Docker Hub's rate limit actually bites:
@@ -699,8 +712,8 @@ A healthy boot shows `virtio_blk virtio0: [vda] ... 30.0 GiB` and reaches
 - `github: finding installation for <owner>: 404` — the App is not installed on
   that account, or the installation excludes that repository.
 - Pools stop refilling and the log shows a pull failure against
-  `<registry-host>` — Harbor is down, its 1Panel site is broken, or the
-  `ghcr` proxy project is not public. Check
+  `<registry-host>` — Harbor is down, its 1Panel site is broken, the `<org>`
+  project is not public, or the tag was never pushed to it. Check
   `curl -fsS https://<registry-host>/api/v2.0/health` first; see
   `live/ansible/playbooks/harbor/README.md`.
 - Jobs queue forever — the workflow's `runs-on` labels must match the pool's

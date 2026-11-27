@@ -1,0 +1,101 @@
+---
+# ============================================
+# rc - the RustFS client
+# ============================================
+# Pinned and checksummed, like the server binary. Installed only when missing or
+# at a different version, so a steady-state run downloads nothing.
+# ============================================
+
+- name: Read the installed rc version
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - --version
+  register: rustfs_cli_installed
+  changed_when: false
+  failed_when: false
+  tags:
+    - cli
+
+- name: Decide whether rc needs installing
+  ansible.builtin.set_fact:
+    rustfs_cli_needs_install: >-
+      {{ rustfs_cli_installed.rc != 0
+         or rustfs_cli_version not in (rustfs_cli_installed.stdout | default('')) }}
+  tags:
+    - cli
+
+- name: Create a staging directory for the rc archive
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: rustfs-cli
+  register: rustfs_cli_stage
+  when: rustfs_cli_needs_install | bool
+  changed_when: false
+  tags:
+    - cli
+
+- name: Download the rc release archive
+  ansible.builtin.get_url:
+    url: "{{ rustfs_cli_package_url }}"
+    dest: "{{ rustfs_cli_stage.path }}/{{ rustfs_cli_package_name }}"
+    # A mismatch fails the task. This binary is handed the root credentials.
+    checksum: "sha256:{{ rustfs_cli_package_sha256[rustfs_cli_arch] }}"
+    mode: "0600"
+  when: rustfs_cli_needs_install | bool
+  tags:
+    - cli
+
+- name: Unpack the rc release archive
+  ansible.builtin.unarchive:
+    src: "{{ rustfs_cli_stage.path }}/{{ rustfs_cli_package_name }}"
+    dest: "{{ rustfs_cli_stage.path }}"
+    remote_src: true
+  when: rustfs_cli_needs_install | bool
+  tags:
+    - cli
+
+# Same reasoning as the server binary: the archive layout is not promised, so
+# find the file rather than hard-coding a path inside the tarball.
+- name: Locate the unpacked rc binary
+  ansible.builtin.find:
+    paths: "{{ rustfs_cli_stage.path }}"
+    patterns: rc
+    file_type: file
+    recurse: true
+  register: rustfs_cli_unpacked
+  when: rustfs_cli_needs_install | bool
+  tags:
+    - cli
+
+- name: Assert rc was found in the archive
+  ansible.builtin.assert:
+    that:
+      - rustfs_cli_unpacked.files | length > 0
+    fail_msg: >-
+      No file named 'rc' inside {{ rustfs_cli_package_name }}. Upstream changed
+      the archive layout - check the release assets before adjusting this.
+  when: rustfs_cli_needs_install | bool
+  tags:
+    - cli
+
+- name: Install the rc binary
+  ansible.builtin.copy:
+    src: "{{ (rustfs_cli_unpacked.files | first).path }}"
+    dest: "{{ rustfs_cli_binary_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: rustfs_cli_needs_install | bool
+  tags:
+    - cli
+
+- name: Remove the rc staging directory
+  ansible.builtin.file:
+    path: "{{ rustfs_cli_stage.path }}"
+    state: absent
+  when: rustfs_cli_needs_install | bool
+  changed_when: false
+  tags:
+    - cli

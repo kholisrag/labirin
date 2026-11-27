@@ -19,6 +19,7 @@ the data device loses the data; the durability story is the array under the
 ```text
 live/ansible/playbooks/rustfs/
 ├── install-rustfs.yaml    # entrypoint
+├── manage-iam.yaml        # policies and users, through the `rc` client
 ├── tasks/                 # one file per component
 ├── templates/
 │   ├── rustfs.env.j2      # /etc/default/rustfs
@@ -295,6 +296,39 @@ are not stylistic:
 `/usr/local/bin/rustfs`, `/etc/default/rustfs`, the systemd unit — from a
 pinned, SHA256-verified artifact. The unit is upstream's, with the two
 deviations noted in `templates/rustfs.service.j2`.
+
+## Policies and users
+
+`manage-iam.yaml` creates policies and users inside a running RustFS. It never
+restarts the service and is separate from the install for that reason.
+
+```bash
+ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/rustfs \
+  live/ansible/playbooks/rustfs/manage-iam.yaml
+```
+
+It installs [`rc`](https://github.com/rustfs/cli), RustFS's own client, on the
+guest — pinned and checksummed like the server — and runs it against the
+loopback listener as root. The root credentials reach `rc` through
+`RC_HOST_rustfs` in the task environment and are not written to disk.
+
+What it manages is declared in `vars/main.yaml`:
+
+| Variable | Behaviour |
+| --- | --- |
+| `rustfs_policies` | Created, and overwritten when the stored document differs. Unlisted policies are left alone. |
+| `rustfs_users` | Created if missing; missing policies attached. **An existing user's secret is never rewritten.** |
+| `rustfs_users_absent` | Access keys that are removed if present. |
+
+A user in RustFS is a key pair — the access key *is* the username. Each user's
+pair lives in the **consuming** service's vault, which this playbook loads, so
+there is one copy of it. Today that is `gha-cache`; a new consumer is a new
+entry in `rustfs_users`, a policy in `rustfs_policies`, and its vault added to
+`vars_files` in `manage-iam.yaml`.
+
+Rotation is a second user, not a new secret — the steps are in the comment
+above `rustfs_users`, and in the
+[gha-cache README](../gha-cache/README.md#the-s3-user).
 
 ## Creating buckets
 

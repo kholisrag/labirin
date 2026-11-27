@@ -181,16 +181,25 @@ gha_cache_s3_region: "{{ rustfs_region }}"
 # hanging it.
 gha_cache_s3_socket_timeout_ms: 30000
 
-# RustFS's ROOT credentials, reused rather than duplicated - the same names the
-# RustFS playbook defines, resolved from ../rustfs/vars/vault.yaml.
+# A DEDICATED RustFS user, NOT RustFS's root credentials. In RustFS a user is a
+# key pair - the access key is the username - and this one's only policy,
+# `gha-cache-rw`, allows Get/Put/Delete/List and multipart on the `gha-cache`
+# bucket.
 #
-# A dedicated per-tenant key would be better and is not available: RustFS is
-# pre-1.0 and its IAM surface is not exposed by anything in this repo, so
-# creating one would be a hand step in the console that nothing here records.
-# Worth revisiting when RustFS gains a managed-user API - the cache server needs
-# only Get/Put/Delete/List on one bucket.
-gha_cache_s3_access_key: "{{ rustfs_access_key }}"
-gha_cache_s3_secret_key: "{{ rustfs_secret_key }}"
+# The pair is DEFINED here, in this playbook's vault, and CREATED in RustFS by
+# ../rustfs/manage-iam.yaml, which reads the same vault. Run that before this
+# playbook; the policy and the user list are in ../rustfs/vars/main.yaml.
+#
+# Why not the root pair from ../rustfs/vars/vault.yaml: root reaches every
+# bucket, and root has exactly one key that only changes by restarting RustFS,
+# so it cannot be rotated without the cache server failing in between. Rotating
+# this one is a second user alongside the first - see "The S3 user" in the
+# README.
+#
+# default('') so a vault that does not have them yet fails the playbook's own
+# assert with a readable message instead of an undefined-variable error.
+gha_cache_s3_access_key: "{{ vault_gha_cache_s3_access_key | default('') }}"
+gha_cache_s3_secret_key: "{{ vault_gha_cache_s3_secret_key | default('') }}"
 
 # ============================================
 # Retention

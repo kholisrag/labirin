@@ -23,11 +23,9 @@
   vars_files:
     - vars/main.yaml
     - vars/vault.yaml
-    # The consumer's vault, not a copy of its password here. Same rule as
-    # install-gha-cache.yaml reading the RustFS credential out of
-    # ../rustfs/vars/vault.yaml: a secret in two files is a secret that can
-    # disagree, and the failure - authentication failing against a database that
-    # is running perfectly - names neither file.
+    # The consumer's vault, not a copy of its password here: a secret in two
+    # files is a secret that can disagree, and the failure - authentication
+    # failing against a database that is running perfectly - names neither file.
     - ../gha-cache/vars/vault.yaml
 
   module_defaults:

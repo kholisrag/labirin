@@ -1,0 +1,78 @@
+---
+# One user. Included once per entry of rustfs_users as `rustfs_user`.
+#
+# Every task is no_log: the access key is the consumer's credential id and the
+# create call carries the secret.
+
+- name: Read the user
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - admin
+      - user
+      - info
+      - "{{ rustfs_cli_alias }}"
+      - "{{ rustfs_user.access_key }}"
+      - --json
+  environment: "{{ rustfs_cli_env }}"
+  register: rustfs_user_current
+  changed_when: false
+  failed_when: rustfs_user_current.rc not in [0, 5]
+  no_log: true
+  tags:
+    - users
+
+# ONLY when the user does not exist. `add` on an existing user is a PUT that
+# overwrites it - rc's help for `user passwd` contrasts itself with exactly
+# that - and rewriting the secret of a user something is signing with is how a
+# rotation becomes an outage. To change a secret, rotate to a new user (see
+# vars/main.yaml).
+#
+# rc takes the secret as an argument and has no stdin or env form for `add`, so
+# it is in this process's argv for the life of one call. The guest is
+# single-tenant and this runs as root; that is the accepted exposure.
+- name: Create the user
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - admin
+      - user
+      - add
+      - "{{ rustfs_cli_alias }}"
+      - "{{ rustfs_user.access_key }}"
+      - "{{ rustfs_user.secret_key }}"
+  environment: "{{ rustfs_cli_env }}"
+  when: rustfs_user_current.rc == 5
+  changed_when: true
+  no_log: true
+  tags:
+    - users
+
+- name: Work out which policies are not attached yet
+  ansible.builtin.set_fact:
+    rustfs_user_missing_policies: >-
+      {{ rustfs_user.policies | default([])
+         | difference(((rustfs_user_current.stdout | from_json).policies | default([]))
+                      if rustfs_user_current.rc == 0 else []) }}
+  no_log: true
+  tags:
+    - users
+
+# Attach only - a policy attached by hand in the console is left alone.
+- name: Attach the missing policies
+  ansible.builtin.command:
+    argv:
+      - "{{ rustfs_cli_binary_path }}"
+      - admin
+      - policy
+      - attach
+      - "{{ rustfs_cli_alias }}"
+      - "{{ rustfs_user_missing_policies | join(',') }}"
+      - --user
+      - "{{ rustfs_user.access_key }}"
+  environment: "{{ rustfs_cli_env }}"
+  when: rustfs_user_missing_policies | length > 0
+  changed_when: true
+  no_log: true
+  tags:
+    - users

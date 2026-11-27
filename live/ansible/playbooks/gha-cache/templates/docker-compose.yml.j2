@@ -67,8 +67,9 @@ services:
       AWS_REGION: "{{ gha_cache_s3_region }}"
       AWS_ENDPOINT_URL: "{{ gha_cache_s3_endpoint }}"
 
-      # From the stack's .env, which install-gha-cache.yaml writes from the
-      # RustFS vault. These are RustFS's root credentials.
+      # From the stack's .env, which install-gha-cache.yaml writes from this
+      # playbook's vault. A dedicated RustFS user scoped to the one bucket,
+      # created by ../rustfs/manage-iam.yaml - not RustFS's root credentials.
       AWS_ACCESS_KEY_ID: ${GHA_CACHE_S3_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${GHA_CACHE_S3_SECRET_ACCESS_KEY}
 

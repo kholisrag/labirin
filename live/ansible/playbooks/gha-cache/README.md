@@ -44,9 +44,9 @@ live/ansible/playbooks/1panel/
 └── templates/proxy-gha-cache.conf.j2      # the nginx location block
 ```
 
-S3 credentials are **not** here either. `install-gha-cache.yaml` reads them from
-`../rustfs/vars/vault.yaml`, so a RustFS key rotation is one edit rather than two
-files that can drift apart.
+The S3 credentials **are** here, in `vars/vault.yaml`: an access key of a
+dedicated RustFS user, not RustFS's root pair. `install-gha-cache.yaml` still
+loads `../rustfs/vars/vault.yaml`, but only for the S3 hostname.
 
 ## Where the traffic actually goes
 
@@ -149,6 +149,40 @@ a hand step — in the console at <https://<console-host>>, or:
 aws --endpoint-url https://<s3-host> s3 mb s3://gha-cache
 ```
 
+#### The S3 user
+
+The cache server signs with its **own** RustFS user, not RustFS's root pair.
+Root reaches every bucket, and root has one key that only changes by restarting
+RustFS — so it cannot be rotated without the cache server failing in between.
+
+In RustFS a user *is* a key pair: the access key is the username. Nothing is
+clicked in the console:
+
+1. Choose an access key (a name, e.g. `gha-cache-1`) and a long random
+   alphanumeric secret, and put them in this playbook's vault (step 4) as
+   `vault_gha_cache_s3_access_key` / `vault_gha_cache_s3_secret_key`.
+2. Create the user and its policy:
+
+   ```bash
+   ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/rustfs \
+     live/ansible/playbooks/rustfs/manage-iam.yaml
+   ```
+
+The policy `gha-cache-rw` — Get/Put/Delete/List and multipart on this one
+bucket — is declared in `../rustfs/vars/main.yaml`, next to the user entry that
+points at this vault. See the [RustFS README](../rustfs/README.md#policies-and-users).
+
+**Rotating it** needs no RustFS restart, because it is a second user alongside
+the first rather than a new secret on the same one:
+
+1. Change **both** values in the vault (`gha-cache-2`, new secret).
+2. Run `manage-iam.yaml` — creates the new user; the old one still works.
+3. Re-run `install-gha-cache.yaml` and confirm the server is up.
+4. Add the old access key to `rustfs_users_absent` in
+   `../rustfs/vars/main.yaml` and run `manage-iam.yaml` again.
+
+The only gap is the few seconds the single container takes to be recreated.
+
 No bucket policy, no lifecycle rule. Retention is the cache server's job — see
 [Retention](#retention) — and a bucket-side expiry would delete objects the
 database still has rows for.
@@ -221,20 +255,26 @@ password from step 3. Both playbooks assert on those placeholders before doing
 anything, so a half-configured vault costs ten seconds rather than a
 crash-looping container — or a database literally named `CHANGEME`.
 
+It also holds `vault_gha_cache_s3_access_key` and
+`vault_gha_cache_s3_secret_key` — the RustFS user from step 2, which
+`../rustfs/manage-iam.yaml` reads from here to create it. Both playbooks assert
+they are set and not `CHANGEME`. Keep the secret alphanumeric, for the same
+`.env` reason as the database password below.
+
 **This vault is the single home for that credential.** `manage-databases.yaml`
-reads it from here rather than keeping a copy in the 1Panel vault, on the same
-rule that has `install-gha-cache.yaml` read the S3 key out of
-`../rustfs/vars/vault.yaml`: a secret written in two files is a secret that can
-disagree, and the way that presents — authentication failing against a database
-that is running perfectly — names neither file.
+reads it from here rather than keeping a copy in the 1Panel vault: a secret
+written in two files is a secret that can disagree, and the way that presents —
+authentication failing against a database that is running perfectly — names
+neither file.
 
 Keep the password alphanumeric. It reaches the container through the stack's
 `.env`, which Docker Compose parses and expands `${...}` inside, so a `$` or a
 quote becomes a parse surprise with the same misleading symptom.
 
-The 1Panel API key comes from `../1panel/vars/vault.yaml` and the S3 credentials
+The 1Panel API key comes from `../1panel/vars/vault.yaml` and the S3 hostname
 from `../rustfs/vars/vault.yaml` — same panel, same object store, not duplicated
-here.
+here. RustFS's root credentials sit in that second vault too and are not used
+by this stack.
 
 ## Install
 

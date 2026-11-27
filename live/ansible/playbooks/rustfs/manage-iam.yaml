@@ -1,0 +1,123 @@
+---
+# Policies and users inside RustFS.
+#
+# Separate from install-rustfs.yaml on purpose: that one owns the binary, the
+# unit and the root credentials and may restart the service; this one only
+# talks to a running RustFS through its admin API and never restarts anything.
+#
+# It drives `rc`, RustFS's own client, on the guest itself against the loopback
+# listener, signed in as root from ../rustfs/vars/vault.yaml. There is no
+# Ansible module for RustFS IAM, and the admin API is SigV4-signed, so
+# ansible.builtin.uri is not an option.
+#
+#   ansible-playbook -i live/ansible/inventories/petruk-pve/petruk-pve0/pve-vms/rustfs \
+#     live/ansible/playbooks/rustfs/manage-iam.yaml
+#
+# What is declared lives in vars/main.yaml: rustfs_policies, rustfs_users,
+# rustfs_users_absent. Read the comments there before rotating a key.
+- name: Manage RustFS policies and users
+  hosts: rustfs_all
+  become: true
+
+  vars_files:
+    - vars/main.yaml
+    - vars/vault.yaml
+    # The consumer's vault, not a copy of its key here - same rule as
+    # 1panel/manage-databases.yaml.
+    - ../gha-cache/vars/vault.yaml
+
+  tasks:
+    # A user created with an empty or placeholder key would still be created -
+    # and then be the thing a consumer fails to authenticate as.
+    #
+    # The length floors are rc's and RustFS's own: rc refuses a secret shorter
+    # than 8 before sending anything.
+    - name: Assert every declared user has a usable key pair
+      ansible.builtin.assert:
+        that:
+          - item.access_key | length >= 3
+          - item.secret_key | length >= 8
+          - item.access_key != 'CHANGEME'
+          - item.secret_key != 'CHANGEME'
+          - item.access_key != rustfs_access_key
+          - item.access_key not in rustfs_users_absent
+          - item.policies | default([]) | difference(rustfs_policies | map(attribute='name') | list) | length == 0
+        fail_msg: >-
+          A user in rustfs_users has a missing or placeholder key pair, reuses
+          the root access key, is also listed in rustfs_users_absent, or names a
+          policy that is not in rustfs_policies. The key pairs live in the
+          consuming service's vault - for gha-cache that is
+          live/ansible/playbooks/gha-cache/vars/vault.yaml
+          (vault_gha_cache_s3_access_key / vault_gha_cache_s3_secret_key).
+      loop: "{{ rustfs_users }}"
+      loop_control:
+        label: "user #{{ index }}"
+        index_var: index
+      no_log: true
+      tags:
+        - always
+
+    - name: Assert the root user is not marked for removal
+      ansible.builtin.assert:
+        that:
+          - rustfs_access_key not in rustfs_users_absent
+        fail_msg: rustfs_users_absent contains the root access key.
+      no_log: true
+      tags:
+        - always
+
+    - name: Install the rc client
+      ansible.builtin.include_tasks:
+        file: tasks/cli.yaml
+      tags:
+        - cli
+
+    # Fails here, with rc's own message, if RustFS is down or the root
+    # credentials in the vault are not the ones the service started with -
+    # rather than half-way through the first policy.
+    - name: Check that rc can reach RustFS as root
+      ansible.builtin.command:
+        argv:
+          - "{{ rustfs_cli_binary_path }}"
+          - admin
+          - user
+          - ls
+          - "{{ rustfs_cli_alias }}"
+          - --json
+      environment: "{{ rustfs_cli_env }}"
+      changed_when: false
+      no_log: true
+      tags:
+        - always
+
+    # Policies before users: attaching a policy that does not exist yet fails.
+    - name: Reconcile policies
+      ansible.builtin.include_tasks:
+        file: tasks/iam-policy.yaml
+      loop: "{{ rustfs_policies }}"
+      loop_control:
+        loop_var: rustfs_policy
+        label: "{{ rustfs_policy.name }}"
+      tags:
+        - policies
+
+    - name: Reconcile users
+      ansible.builtin.include_tasks:
+        file: tasks/iam-user.yaml
+      loop: "{{ rustfs_users }}"
+      loop_control:
+        loop_var: rustfs_user
+        label: "{{ rustfs_user.access_key }}"
+      tags:
+        - users
+
+    # Last, so a rotation that adds the new user and retires the old one in a
+    # single run cannot leave a window with neither.
+    - name: Remove retired users
+      ansible.builtin.include_tasks:
+        file: tasks/iam-user-absent.yaml
+      loop: "{{ rustfs_users_absent }}"
+      loop_control:
+        loop_var: rustfs_absent_user
+      tags:
+        - users

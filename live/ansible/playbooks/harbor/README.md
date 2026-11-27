@@ -262,8 +262,12 @@ its upstream already serves anonymously.
 
 ### You cannot push here
 
-Every project is a proxy cache, and Harbor rejects pushes to those. If the
-homelab ever needs to *store* an image, add an ordinary (non-proxy) project —
+Every project this playbook declares is a proxy cache, and Harbor rejects
+pushes to those. Ordinary projects exist beside them, created by the
+repositories that push to them and not declared here — the one the Fireactions
+runner image is pulled from is such a project (`../fireactions/README.md`). If
+the homelab itself ever needs to *store* an image, add an ordinary (non-proxy)
+project —
 and note that a project's `registry_id` cannot be changed after creation, so
 the two kinds are decided once, at creation.
 

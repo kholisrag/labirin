@@ -48,16 +48,16 @@ locals {
   #   allocation goes from 106 to 138 of 80 threads (~1.7x) - fine while the
   #   node sits this idle; recheck `top` on petruk-pve0 after the change.
   #
-  #   FIVE HOSTS (fireactions-05 added 2026-11-27): 80 vCPU for Fireactions,
-  #   node allocation ~154 of 80 threads (~1.9x), memory allocation +32 GiB to
-  #   ~386 GiB of 251.5 (~153%). That fits only while cantrik-01/02/03 stay
+  #   SIX HOSTS (fireactions-05/06 added 2026-11-27): 96 vCPU for Fireactions,
+  #   node allocation ~170 of 80 threads (~2.1x), memory allocation +64 GiB to
+  #   ~418 GiB of 251.5 (~166%). That fits only while cantrik-01/02/03 stay
   #   stopped or ballooned; watch `free -g` on petruk-pve0 with CI busy.
   #
   #   reboot_after_update = true: changing cores REBOOTS the host and kills its
   #   running CI jobs. Apply one host at a time (-target), when CI is quiet.
   hosts = {
     # 113-117 since 2026-11-27: all four hosts were recreated (the 16 vCPU apply
-    # replaced them) and a fifth added, so the block is contiguous; 118 is spare.
+    # replaced them) and a fifth and sixth added, so the block is contiguous.
     "fireactions-01" = { vm_id = 113 }
     "fireactions-02" = { vm_id = 114 }
     "fireactions-03" = { vm_id = 115 }

@@ -21,7 +21,7 @@ fireactions_all:
     # ~/.ssh/config and resolves nowhere else - so this inventory only ever
     # worked from that laptop. It is DNS now: unbound_hosts in
     # ../../../../../playbooks/opnsense/vars/vault.yaml carries an A record for
-    # each of the four, and the same names answer from anywhere on the LAN.
+    # each of the five, and the same names answer from anywhere on the LAN.
     #
     # That is a requirement rather than a tidy-up. The unattended apply runs
     # from a container on the 1Panel box (ADR-0119, ADR-0125), which has no
@@ -39,4 +39,7 @@ fireactions_all:
       ansible_user: ansible
     fireactions_vm_04:
       ansible_host: fireactions-04.internal.khol.is
+      ansible_user: ansible
+    fireactions_vm_05:
+      ansible_host: fireactions-05.internal.khol.is
       ansible_user: ansible

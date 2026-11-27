@@ -32,7 +32,7 @@ firecracker_version: "1.18.0"
 # Containerd must stay on the 1.7.x line: the devmapper snapshotter that
 # Fireactions depends on was removed from containerd 2.x.
 # https://github.com/containerd/containerd/releases
-containerd_version: "1.7.34"
+containerd_version: "1.7.36"
 
 # Matches the version Fireactions itself vendors (see containernetworking/plugins
 # in its go.mod). The v1.6.1 the upstream install docs mention no longer has

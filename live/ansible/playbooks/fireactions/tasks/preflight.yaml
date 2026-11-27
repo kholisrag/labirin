@@ -80,6 +80,38 @@
   tags:
     - always
 
+# A tagged run on a host that was never bootstrapped. `--tags fireactions` is
+# what Semaphore's fireactions-apply runs: it installs the binary, config and
+# unit, then dies at "Enable and start Fireactions" with "Unit
+# containerd.service not found" because containerd, Firecracker, CNI and the
+# guest kernel are not there. That is what happened on 2026-11-27 when all the
+# hosts were rebuilt on Ubuntu 26.04. Say so here instead.
+- name: Check whether Containerd has been installed by this playbook
+  ansible.builtin.stat:
+    path: /etc/systemd/system/containerd.service
+  register: fireactions_containerd_unit_stat
+  tags:
+    - always
+
+- name: Fail when a tagged run targets a host that was never bootstrapped
+  ansible.builtin.fail:
+    msg:
+      - "{{ inventory_hostname }} has no containerd.service, so it is a fresh host,"
+      - "and this run is limited to tags {{ ansible_run_tags | join(', ') }}."
+      - ""
+      - "A fresh host needs the full playbook once, with no --tags, e.g. from a"
+      - "checkout: ansible-playbook -i <fireactions inventory>"
+      - "install-fireactions.yaml --limit {{ inventory_hostname }}"
+      - ""
+      - "Semaphore's fireactions-apply only runs --tags fireactions and cannot"
+      - "bootstrap a host."
+  when:
+    - not fireactions_containerd_unit_stat.stat.exists
+    - "'all' not in ansible_run_tags"
+    - "'containerd' not in ansible_run_tags"
+  tags:
+    - always
+
 - name: Check the dedicated Containerd block device
   ansible.builtin.stat:
     path: "{{ fireactions_containerd_device }}"

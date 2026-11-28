@@ -277,7 +277,7 @@ fireactions_registry_mirror: "{{ vault_harbor_registry_host }}"
 # exited it, and the microVM shut down ~60s after boot. The pools ran
 # upstream's hostinger/fireactions-images ubuntu24.04:20261117070438 as an
 # escape hatch until this rebuild landed.
-fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:1ca2c98f76f2c821f3b5461a5862b219d3c6b806366575f333b3b9680fdb09fb-47f566a"
+fireactions_runner_image: "{{ fireactions_registry_mirror }}/{{ vault_fireactions_runner_image_repo }}:1ca2c98f76f2c821f3b5461a5862b219d3c6b806366575f333b3b9680fdb09fb-b94fb12"
 
 # --------------------------------------------
 # Pools
